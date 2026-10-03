@@ -27,9 +27,64 @@ STM32CubeMX 生成一套、AT32 WorkBench 生成一套、Keil/IAR 又各一套 �
 构建前后 elab 会对业务工程做**文件树快照**（路径 + size + mtime），
 自动验证 `untouched == true` —— 这不是一句承诺，是一个可断言的结果。
 
+> 想看它到底调了哪些**主流工具链命令**？**直接跳 §2.0**（GCC / CMake / Ninja / GDB / OpenOCD 的完整闭环）。
+
 ---
 
 ## 2. 亮点
+
+### 2.0 ★ 主流工具链调用闭环（GCC / CMake / Ninja / GDB / OpenOCD）
+
+**elab 不发明工具链，也不封装私有格式 —— 它只是把主流工具链串成一条可复现的闭环。**
+每一条 `elab` 子命令，落到底都是你早就认识的那一行命令（加 `--dry-run` 就能原样打印出来）：
+
+| elab 子命令 | 底层调用的主流工具链 | 做什么 |
+|---|---|---|
+| `elab build` | **CMake** 配置 → **Ninja** → **arm-none-eabi-gcc** | 编译 + 链接，统一产出 `elf / hex / bin / map` |
+| `elab flash` | **OpenOCD**（探针：CMSIS-DAP / ST-Link / J-Link） | `program … verify reset exit`（含读回比对） |
+| `elab debug` | **OpenOCD** 作 GDB server + **arm-none-eabi-gdb** | 断到 `main` 自检 / 交互式调试 |
+| `elab doctor` | **CMake**（真跑一次 configure 取证） | 环境体检 + 两源漂移校验 |
+
+①②③ 三个阶段的实际命令行（真实输出，长路径折叠为 `…`）：
+
+```text
+# ── ① 构建：CMake → Ninja → GCC ──────────────────────────────────────────
+cmake -S …/examples/AT32_TEST -B …/.work/at32_test -G Ninja \
+      -DCMAKE_MAKE_PROGRAM=…/ninja.exe \
+      -DCMAKE_TOOLCHAIN_FILE=…/toolchains/gcc.cmake \
+      -DCMAKE_PROJECT_INCLUDE=…/toolchains/inject.cmake \
+      -DELAB_ARM_GCC_ROOT=…/GNU-tools-for-STM32 \
+      -DELAB_CPU=cortex-m4 -DELAB_FPU=soft -DELAB_CHIP=at32f421g8 \
+      -DELAB_LD=…/examples/AT32_TEST/AT32F421x8_FLASH.ld \
+      -DCMAKE_BUILD_TYPE=Debug
+
+# ── ② 烧录：OpenOCD ──────────────────────────────────────────────────────
+openocd -s …/OpenOCD/scripts -f interface/atlink.cfg -f target/at32f421xx.cfg \
+        -c "adapter speed 5000" \
+        -c "program {…/.work/at32_test/TEST.elf} verify reset exit"
+
+# ── ③ 调试：OpenOCD 作 GDB server + arm-none-eabi-gdb ────────────────────
+openocd -s …/OpenOCD/scripts -f interface/atlink.cfg -f target/at32f421xx.cfg \
+        -c "adapter speed 5000"          # 前台服务，监听 localhost:3333
+
+arm-none-eabi-gdb …/.work/at32_test/TEST.elf \
+        -ex "target extended-remote localhost:3333" \
+        -ex "monitor reset halt" -ex load \
+        -x …/toolchains/gdb/break_main.gdb   # break main → monitor reset init → continue
+```
+
+**跨芯片时这条链只换一个参数**（`target` cfg），探针与后续命令一字不改：
+
+```text
+AT32 :  -f interface/atlink.cfg  -f target/at32f421xx.cfg     ← 同一根 DAP-Link
+STM32:  -f interface/atlink.cfg  -f target/stm32f1x.cfg       ← 只换 target
+```
+
+> 为什么要专门强调：**工具链是你随时能自己敲的公开命令，不是 elab 的私有封装。**
+> elab 只做一件事 —— 把"该填哪个参数"从 `elab.host.yaml` / `chips/*.yaml` / `projects/*.yaml`
+> 三份数据里取出来填进去，其余原样交给 CMake / Ninja / GCC / OpenOCD / GDB。
+> 所以换台机器、换个人、进 CI，看到的都是同一条命令
+> （本机 Windows 与云端 ubuntu-latest 跑的就是这套，见 §8）。
 
 ### 2.1 芯片差异 = 一份 YAML 里的几个值
 
