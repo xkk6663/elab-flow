@@ -42,11 +42,15 @@ jobs:
       - name: 主机依赖（ninja / cmake）
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build cmake
+          sudo apt-get install -y ninja-build cmake
 
-      - name: 交叉工具链（arm-none-eabi-gcc）
+      # ★ 切勿加 --no-install-recommends：Debian/Ubuntu 的 gcc-arm-none-eabi
+      #   把 newlib（含 nano.specs、stdio.h）放在 **Recommends** 里。
+      #   精简安装后：configure 能过（CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY 不做链接），
+      #   但链接期报 `cannot read spec file 'nano.specs'` → 不产出 .elf（假绿/真炸）。
+      - name: 交叉工具链（arm-none-eabi-gcc + newlib）
         run: |
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
 
       - name: 切换到 CI 版主机配置（L0）
         shell: bash
@@ -58,11 +62,37 @@ jobs:
         shell: bash
         run: ./elab doctor || true
 
-      # ★ shell: bash 展开为 `bash -eo pipefail`，故 | tee 不会吞掉 elab 的退出码。
-      #   若不加 pipefail，CI 失败时会显示成绿灯（假绿）。
+      # 用重定向而非管道拿退出码（管道会吞码；shell: bash 虽含 pipefail，此处更直白）
       - name: 跑主机门禁
+        id: gate
         shell: bash
-        run: ./elab ci --job host-gate --json | tee ci-host.json
+        run: |
+          set +e
+          ./elab ci --job host-gate --json > ci-host.json 2> ci-host.err
+          rc=$?
+          echo "----- ci-host.json -----"; cat ci-host.json
+          echo "----- ci-host.err  -----"; cat ci-host.err
+          exit $rc
+
+      # 把失败步骤转成 check-run 注解 —— 无需 token 即可通过 GitHub API 读取
+      - name: 失败摘要注解
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open('ci-host.json', encoding='utf-8'))
+          except Exception as e:
+              print(f"::error::无法解析 ci-host.json：{e}")
+              raise SystemExit(0)
+          for j in d.get('jobs', []):
+              for p in j.get('projects', []):
+                  for s in p.get('steps', []):
+                      if not s.get('ok'):
+                          det = ' '.join(str(s.get('detail', '')).split())[:300]
+                          print(f"::error::[{j['job']}/{p['project']}/{s['step']}] {det}")
+          PY
 
       - name: 上传固件产物
         if: always()
@@ -77,7 +107,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-host-report
-          path: ci-host.json
+          path: |
+            ci-host.json
+            ci-host.err
           if-no-files-found: warn
 
   # ── 上板门禁：需要真实探针，必须 self-hosted ─────────────────────
@@ -92,8 +124,12 @@ jobs:
       - name: 跑上板门禁（烧录 + 断到 main）
         shell: bash
         run: |
+          set +e
           chmod +x ./elab
-          ./elab ci --onhw --job onhw-gate --json | tee ci-onhw.json
+          ./elab ci --onhw --job onhw-gate --json > ci-onhw.json 2> ci-onhw.err
+          rc=$?
+          cat ci-onhw.json ci-onhw.err
+          exit $rc
       - name: 上传 CI 报告
         if: always()
         uses: actions/upload-artifact@v4
