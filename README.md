@@ -399,6 +399,33 @@ $ ./elab ci
 > 为什么分两档：云端 runner 没有探针。把没有硬件变成**已知的跳过**，
 > 而不是"看起来像失败的红灯"。
 
+### 8.1 云端实测（GitHub Actions）
+
+`.github/workflows/elab.yml` 已接入，push 即触发，在 **`ubuntu-latest`** 上真跑
+（`ci/workflows/elab.yml` 是仓库内定义源，两者逐字一致，工作流第一步会 diff 校验）：
+
+```text
+✓ 工作流双源一致性守卫     ci/workflows/elab.yml == .github/workflows/elab.yml
+✓ 主机依赖 / 交叉工具链     ninja + cmake + gcc-arm-none-eabi（含 newlib/nano.specs）
+✓ 跑主机门禁               at32_test ✓    stm32_test ✓    （doctor --deep + build）
+✓ 上传固件产物             .work/{at32_test,stm32_test}/TEST.{elf,hex,bin,map}
+```
+
+> **云端首跑就抓出一条真实缺陷**：`examples/STM32_TEST/Key/key.c` 里写的是
+> `#include "Key.h"`，而磁盘上的真实文件名是 `key.h` ——
+> **Windows 大小写不敏感能编过，Linux 直接 `No such file or directory`。**
+>
+> 这正是"上云"的价值：把只在**大小写敏感文件系统**上才暴露的问题，
+> 变成 CI 里一条红灯，而不是交付到别人机器上才炸。
+> （`elab ci` 的失败详情会经"失败摘要注解"转成 check-run 注解，无需 token 即可读取。）
+
+**踩过的两个云端坑（都已固化进工作流注释）**：
+
+| 坑 | 现象 | 真相 |
+|---|---|---|
+| `apt install --no-install-recommends gcc-arm-none-eabi` | configure 通过、链接失败、不产出 `.elf` | Debian/Ubuntu 把 newlib（`nano.specs`/`stdio.h`）放在 **Recommends** 里，精简安装会把它裁掉 |
+| 上传 `.work/*/TEST.*` 报 "No files were found" | 构建其实**成功**，只是产物没上传 | `upload-artifact@v4` 默认跳过**隐藏文件**，而 `.work/` 是点开头目录 → 需 `include-hidden-files: true` |
+
 ---
 
 ## 9. 已实测证据（真实硬件）
@@ -416,6 +443,10 @@ $ ./elab ci
 
 探针：AT-Link（CMSIS-DAP FW 0253），`SWD DPIDR 0x2ba01477`。
 芯片报出的主 flash `0x10000` 与 `chip.yaml` 的声明**一致** —— doctor 的内存校验与硬件吻合。
+
+**云端（GitHub Actions / ubuntu-latest）**：`host-gate` 全绿，两颗芯片的
+`doctor --deep` 与 `build` 均在 Linux 上通过 —— 同一份 `ci/matrix.yaml`，
+只换了一份 L0（`ci/host.ci.yaml`）。详见 §8.1。
 
 ---
 
@@ -447,7 +478,7 @@ $ ./elab ci
 | 项 | 状态 | 说明 |
 |---|---|---|
 | STM32 上板烧录/调试 | ⚠️ 未验证 | 本机接的是 AT32 板；命令已生成（只差 target cfg） |
-| GitHub Actions 云端运行 | ⚠️ 未验证 | 本机无云端 runner；`ci/host.ci.yaml` 的 Linux 路径需首次接入时用 doctor 校正 |
+| GitHub Actions 云端运行 | ✅ **已验证** | `host-gate` 在 `ubuntu-latest` 上全绿（见 §8.1）；`onhw-gate` 仍需 self-hosted 探针 |
 | `elab monitor`（串口） | ❌ 未实现 | 标准库无跨平台串口；接受 pyserial 依赖还是写 ctypes 实现，待决策 |
 | SVD 在 IDE 中实际加载 | ⚠️ 未验证 | 路径已解析正确，IDE 寄存器视图未实测 |
 

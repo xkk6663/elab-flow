@@ -100,6 +100,9 @@ jobs:
         with:
           name: firmware
           path: .work/*/TEST.*
+          # ★ .work/ 是【点开头的隐藏目录】，而 upload-artifact v4 默认跳过隐藏文件，
+          #   不显式打开会得到 "No files were found"（构建其实成功）。
+          include-hidden-files: true
           if-no-files-found: warn
 
       - name: 上传 CI 报告
