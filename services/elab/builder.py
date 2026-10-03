@@ -74,7 +74,7 @@ def _parse_size(text: str) -> dict:
     return {"text": int(m.group(1)), "data": int(m.group(2)), "bss": int(m.group(3))}
 
 
-def _tail(text: str, n: int = 12) -> str:
+def _tail(text: str, n: int = 25) -> str:
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
     return "\n".join(lines[-n:])
 

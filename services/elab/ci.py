@@ -18,6 +18,14 @@ from .plan import plan_for
 ONHW_STEPS = {"flash", "debug_verify"}
 
 
+def _doctor_detail(rep) -> str:
+    """失败时带上错误正文，而不是只给一个 code —— CI 排障要看证据。"""
+    errs = [(c, m) for lvl, c, m in rep.items if lvl == "error"]
+    if not errs:
+        return "全绿"
+    return "; ".join(f"{c}: {m}" for c, m in errs)
+
+
 def load_matrix(cfg: Config) -> dict:
     path = cfg.root / "ci" / "matrix.yaml"
     if not path.exists():
@@ -29,18 +37,19 @@ def _run_step(cfg: Config, step: str, project: str, *, clean: bool, verbose: boo
     """执行单个步骤，返回 (ok, detail)。"""
     if step == "doctor_deep":
         rep = doctor_mod.run(cfg, only=project, deep=True)
-        detail = ", ".join(f"{c}" for lvl, c, _ in rep.items if lvl == "error") or "全绿"
-        return rep.passed, detail
+        return rep.passed, _doctor_detail(rep)
     if step == "doctor":
         rep = doctor_mod.run(cfg, only=project, deep=False)
-        detail = ", ".join(f"{c}" for lvl, c, _ in rep.items if lvl == "error") or "全绿"
-        return rep.passed, detail
+        return rep.passed, _doctor_detail(rep)
     if step == "build":
         plan = plan_for(cfg, project)
         res = builder.build_project(plan, clean=clean, verbose=verbose, log=log)
+        if res["status"] != "ok":
+            # ★ 必须带上编译/配置错误正文：否则 CI 只剩 "build-failed" 四个字，无从排障。
+            return False, f"{res['status']}: {res.get('error', '')}"
         mem = res.get("memory") or {}
-        detail = " ".join(f"{k} {v['pct']}%" for k, v in mem.items()) or res.get("status", "")
-        return res["status"] == "ok", detail
+        detail = " ".join(f"{k} {v['pct']}%" for k, v in mem.items()) or res["status"]
+        return True, detail
     if step == "flash":
         plan = plan_for(cfg, project)
         res = flash_mod.flash(plan, verbose=verbose, log=log)

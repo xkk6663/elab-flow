@@ -90,7 +90,7 @@ jobs:
               for p in j.get('projects', []):
                   for s in p.get('steps', []):
                       if not s.get('ok'):
-                          det = ' '.join(str(s.get('detail', '')).split())[:300]
+                          det = ' '.join(str(s.get('detail', '')).split())[:1500]
                           print(f"::error::[{j['job']}/{p['project']}/{s['step']}] {det}")
           PY
 
