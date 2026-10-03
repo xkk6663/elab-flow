@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AT-Link/DAP Link",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "cwd": "${workspaceFolder}",
+      "executable": "c:/Users/xiao1/Desktop/AT32/TEST/build/TEST.elf",
+      "gdbPath": "${command:at32.get.gdb}",
+      "serverpath": "${command:at32.get.openocd}",
+      "configFiles": [
+        "${command:at32.get.cfg.atlink}",
+        "C:/Users/xiao1/AppData/Local/at32-tools/OpenOCD/V2.0.9/scripts/target/at32f421xx.cfg"
+      ],
+      "svdFile": "${command:at32.get.svd}",
+      "runToEntryPoint": "main",
+      "device": "AT32F421G8U7",
+      "interface": "swd",
+      "liveWatch": {
+        "enabled": true,
+        "interval": 100,
+        "expressions": []
+      }
+    }
+  ]
+}

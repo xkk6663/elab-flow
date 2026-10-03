@@ -1,0 +1,62 @@
+# chips/artery/at32f421g8.yaml —— 芯片参数层（L1）
+# 芯片差异的唯一数据载体。只给工具链/client 读，不侵入任何业务代码。
+#
+# 值的来源：AT32_TEST 实测（compile_commands.json / CMakeCache.txt / AT32F421x8_FLASH.ld）
+# 用途：① 驱动 toolchains/gcc.cmake  ② doctor 校验工程实际参数是否漂移  ③ 生成 skill 骨架
+
+id: at32f421g8
+vendor: artery
+family: at32f421
+part: AT32F421G8U7            # 实测编译宏 -DAT32F421G8U7
+package: QFN28
+frequency: 120MHz
+
+# ── 内核与工具链参数 ──────────────────────────────────────────────
+core:
+  arch: arm
+  cpu: cortex-m4              # → -mcpu=cortex-m4
+  fpu: soft                   # → -mfloat-abi=soft（实测无 -mfpu，纯软浮点）
+  std: gnu11                  # 实测 -std=gnu11
+
+compiler_defines:
+  - AT32F421G8U7
+  - USE_STDPERIPH_DRIVER
+
+# ── 内存布局（与 AT32F421x8_FLASH.ld 的 MEMORY 段一致）─────────────
+memory:
+  flash: { origin: 0x08000000, length: 0x10000 }   # 64K  实测
+  ram:   { origin: 0x20000000, length: 0x4000  }   # 16K  实测
+  # 注：at32_chip.json 写的是 "64KB+4KB"，那 4KB 是选项字节/User System Data，
+  #     不参与 .text/.data 布局，故不在本条内。
+
+# ── 链接脚本 ──────────────────────────────────────────────────────
+# ★ 设计取舍：ld 由 WorkBench 随工程生成（与工程生命周期绑定），此处只声明
+#   "工程自带"，实际路径由 projects/*.yaml 的 build.linker_script 给出，避免两份漂移。
+linker:
+  owner: project             # project | chip
+  filename: AT32F421x8_FLASH.ld
+
+# ── 调试 ──────────────────────────────────────────────────────────
+# ★ 只声明 **target** cfg（芯片属性）；interface cfg 属于探针，在 elab.host.yaml: probes.*
+debug:
+  openocd_target: target/at32f421xx.cfg   # 实测存在（相对 host.openocd.scripts）
+  svd: AT32F421xx_v2.svd                   # 文件名即可，目录由 elab.host.yaml: svd_roots 提供
+  device: AT32F421G8U7
+
+# ── 漂移校验（doctor 用）──────────────────────────────────────────
+# ★ 这是本设计的一个关键点：对"自带 CMake 的工程"，芯片参数其实【工程里已经有一份】，
+#    chip.yaml 的价值不是"提供参数"，而是"提供一份可校验的单一真相 + 跨芯片一致性"。
+#    doctor 拿下面的期望值去比对工程实际编译参数，不一致就报错（防止两源漂移）。
+verify:
+  expect_defines: [AT32F421G8U7, USE_STDPERIPH_DRIVER]
+  expect_flags:   ["-mcpu=cortex-m4", "-mfloat-abi=soft"]
+  expect_memory:  { flash: 0x10000, ram: 0x4000 }
+
+# ── 芯片/工程专属坑位（生成 per-chip skill 的内容源）──────────────
+pitfalls:
+  - "本工程是 **B 类**：CMakeLists 第 22 行 `include(cmake/gcc-arm-none-eabi.cmake)` 硬挂自带工具链。elab 用 -DCMAKE_TOOLCHAIN_FILE 接管后，该文件仍会被 include，把 flags/链接参数盖回去 → 必须挂 inject.cmake 抢回。"
+  - "**链接参数双重叠加**：工程用 `CMAKE_C_LINK_FLAGS`，elab 用 `CMAKE_EXE_LINKER_FLAGS`——两者不同名，CMake 会把两份都拼进链接行，出现两遍 -T/-mcpu。inject.cmake 必须 `unset(CMAKE_C_LINK_FLAGS)` 清掉工程那份，否则一旦两源不一致就是**静默错误**（后者生效）。"
+  - "`add_compile_options()` 必须拆成独立参数（`-mcpu=X -mfloat-abi=Y`），整串会被当成**单个带引号的参数**，gcc 报 `unrecognized -mcpu target: cortex-m4 -mfloat-abi=soft`。"
+  - "链接脚本由 AT32 WorkBench 随工程生成（`AT32F421x8_FLASH.ld`），**归工程所有**；chip.yaml 只记内存布局用于 doctor 校验，不另存一份，避免双源漂移。"
+  - "inject **不注入 defines/include**：AT32 工程的 defines 由其 INTERFACE target 提供且准确，再注入只会制造双源。chip.yaml 的 `compiler_defines` 仅供 doctor 校验。"
+

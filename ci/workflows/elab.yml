@@ -1,0 +1,67 @@
+# ci/workflows/elab.yml —— GitHub Actions 定义（L5）
+#
+# ★ 重要：本文件**调用的是同一份 ci/matrix.yaml**，不在 workflow 里另写一遍流程。
+#   本地 `elab ci` 与云端 CI 因此行为一致。
+#
+# 落地方式：本仓库成为独立 git 仓库后，把本文件复制到
+#   <repo>/.github/workflows/elab.yml
+# （GitHub 只认 .github/workflows/ 下的文件；此处保存的是"定义源"。）
+
+name: elab-flow
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ── 主机门禁：纯编译类，云端 runner 可跑 ────────────────────────
+  host-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 主机依赖（ninja / cmake）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake
+
+      - name: 交叉工具链（arm-none-eabi-gcc）
+        run: |
+          sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: 使用 CI 版主机配置（L0）
+        run: cp ci/host.ci.yaml elab.host.yaml
+
+      - name: 跑主机门禁
+        run: |
+          chmod +x ./elab
+          ./elab ci --job host-gate --json | tee ci-host.json
+
+      - name: 上传固件产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: .work/*/TEST.*
+
+      - name: 上传 CI 报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-host-report
+          path: ci-host.json
+
+  # ── 上板门禁：需要真实探针，必须 self-hosted ─────────────────────
+  # 默认不触发（仅手动 workflow_dispatch），因为云端 runner 没有探针。
+  onhw-gate:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, atlink]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 跑上板门禁（烧录 + 断到 main）
+        run: |
+          chmod +x ./elab
+          ./elab ci --onhw --job onhw-gate --json | tee ci-onhw.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-onhw-report
+          path: ci-onhw.json

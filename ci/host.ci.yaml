@@ -1,0 +1,50 @@
+# ci/host.ci.yaml —— CI 镜像版主机配置（L0 的另一份实例）
+#
+# ★ 这个文件本身就是「L0 可替换」的证明：
+#   同一套 elab 工作流，换一份 L0 → 换一整套主机路径。
+#   用法：  ELAB_HOST=ci/host.ci.yaml ./elab build -p at32_test
+#   （workflows/elab.yml 里就是先 cp 成本名再跑）
+#
+# ⚠️ 状态：**模板**。下面的路径是按 Ubuntu runner + apt 安装的常规位置填的，
+#   尚未在真实云端 runner 上实测（本机是 Windows，无法验证 Linux 侧）。
+#   首次接入 CI 时请用 `elab doctor` 校正到镜像实测路径。
+
+version: 1
+
+host:
+  os: linux
+  workspace: ${ELAB_ROOT}
+  exec_ext: ""                  # Linux 无 .exe
+
+toolchains:
+  arm-none-eabi:
+    root: /usr                  # apt 装的 gcc-arm-none-eabi → 编译器在 /usr/bin
+    version: ""                 # 留空 = doctor 不校验版本漂移
+    pin: true
+    prepend_path: true
+
+tools:
+  cmake:
+    path: auto
+    min: "3.22"
+  ninja:
+    path: /usr/bin/ninja
+  gdb:
+    from: arm-none-eabi         # → /usr/bin/arm-none-eabi-gdb
+  openocd:
+    path: ""                    # 云端无探针
+    scripts: ""
+  pyocd:
+    path: null
+
+probes:
+  default: atlink
+  list:
+    atlink: { backend: cmsis-dap, transport: swd, speed: 5000, usb_interface: 3 }
+    stlink: { backend: stlink,    transport: swd, speed: 4000 }
+
+serial:
+  default: auto
+  baud: 115200
+
+svd_roots: []                   # 云端不需要寄存器视图

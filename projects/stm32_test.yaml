@@ -1,0 +1,44 @@
+# projects/stm32_test.yaml —— 项目接入层（L4）
+# ★ 与 at32_test 一起，验证"同一套 elab 工作流驱动不同芯片工程"。
+#
+# 实测依据：STM32_TEST/CMakeLists.txt、CMakePresets.json、cmake/gcc-arm-none-eabi.cmake、
+#           cmake/stm32cubemx/CMakeLists.txt、STM32F103XX_FLASH.ld、build/Debug/CMakeCache.txt
+
+name: stm32_test
+root: ${ELAB_ROOT}/examples/STM32_TEST           # 示例工程；真实项目可写绝对路径
+chip: st/stm32f103xb
+archetype: A                                     # 工具链由 preset 的 toolchainFile 指定（非 CMakeLists 内 include）
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${ELAB_ROOT}/.work/stm32_test
+  generator: Ninja
+  # A 类：命令行 -D 直接接管工具链，工程自带的 preset toolchainFile 不参与
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake
+  # A 类仍需 inject：补回工程寄生在其工具链文件里的自述变量 TOOLCHAIN_LINK_LIBRARIES
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake
+  linker_script:   ${root}/STM32F103XX_FLASH.ld   # ld 归工程（用户已确认）
+  build_type: Debug
+  project_name: TEST
+  uses_freertos: true                             # 工程链接 FreeRTOS（OBJECT 库）
+
+artifacts:
+  # ★ 注意：STM32_TEST 的 CMakeLists 没有 AT32 那样的 POST_BUILD objcopy，
+  #   所以 hex/bin 必须由 elab build 统一产出（而不是依赖工程自带 POST_BUILD）。
+  elf: ${work_dir}/TEST.elf
+  hex: ${work_dir}/TEST.hex
+  bin: ${work_dir}/TEST.bin
+  map: ${work_dir}/TEST.map
+
+debug:
+  # ★ 探针是【工作台属性】，不是芯片属性：本机就一个 DAP-Link，两颗芯片共用。
+  #   interface cfg 由探针决定（elab.host.yaml: probes.atlink），target cfg 由芯片决定。
+  probe: atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+guard:
+  untouched: true
+  # 两份业务工程都不是 git 仓库 → 改用文件树快照（见干跑验证报告 C4）
+  snapshot: true
+  snapshot_root: ${root}

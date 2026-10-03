@@ -1,0 +1,53 @@
+# chips/st/stm32f103xb.yaml —— 芯片参数层（L1）
+# 值来源：STM32_TEST 实测（cmake/stm32cubemx/CMakeLists.txt、cmake/gcc-arm-none-eabi.cmake、
+#         STM32F103XX_FLASH.ld、build/Debug/compile_commands.json）
+
+id: stm32f103xb
+vendor: st
+family: stm32f1
+part: STM32F103xB              # 实测编译宏 -DSTM32F103xB
+core_name: Cortex-M3
+
+core:
+  arch: arm
+  cpu: cortex-m3               # → -mcpu=cortex-m3
+  fpu: none                    # ★ M3 无 FPU → 不产出 -mfloat-abi（gcc.cmake 已支持 none）
+  std: gnu11
+
+compiler_defines:
+  - STM32F103xB
+  - USE_HAL_DRIVER
+
+memory:
+  # 以工程自带 ld 的 MEMORY 段为准（STM32F103XX_FLASH.ld line 56-60）
+  flash: { origin: 0x08000000, length: 0x10000 }   # 64K
+  ram:   { origin: 0x20000000, length: 0x5000  }   # 20K
+  # 注：STM32F103xB 官方标称 128K flash，但本工程的 ld 只声明 64K，
+  #     ld 才是链接器实际使用的边界 → 以 ld 为准。
+
+linker:
+  owner: project               # 与 AT32 同策略（用户已确认：链接脚本归工程）
+  filename: STM32F103XX_FLASH.ld
+
+# ── 调试 ──────────────────────────────────────────────────────────
+# ★ 只声明 **target** cfg（芯片属性）。interface cfg 属于探针（elab.host.yaml: probes.*），
+#   所以 STM32 并不"需要 ST-Link"——同一个 DAP-Link 换 target cfg 即可开发。
+debug:
+  openocd_target: target/stm32f1x.cfg     # 实测存在（相对 host.openocd.scripts）
+  svd: STM32F103.svd                      # 目录由 elab.host.yaml: svd_roots 提供
+  device: STM32F103xB
+
+verify:
+  expect_defines: [STM32F103xB, USE_HAL_DRIVER]
+  expect_flags:   ["-mcpu=cortex-m3"]
+  expect_memory:  { flash: 0x10000, ram: 0x5000 }
+
+# ── 芯片/工程专属坑位（生成 per-chip skill 的内容源）──────────────
+pitfalls:
+  - "本工程是 **A 类**：工具链由 preset 的 `toolchainFile` 指定（命令行级）。elab 用 -DCMAKE_TOOLCHAIN_FILE 接管后，工程自带工具链文件**根本不会被加载**。"
+  - "**静默丢约定（最危险）**：工程自带工具链里有 `set(CMAKE_EXECUTABLE_SUFFIX_C \".elf\")`。接管后该约定丢失，产物会从 `TEST.elf` 变成无后缀的 `TEST`——**构建照样成功、不报错**，故障推迟到 flash 阶段才爆发。修法：`.elf` 后缀写进**通用** `toolchains/gcc.cmake`（对所有芯片一致）。"
+  - "**第二个丢失项**：`set(TOOLCHAIN_LINK_LIBRARIES \"m\")` 被 `cmake/stm32cubemx/CMakeLists.txt` 的 `MX_LINK_LIBS` 引用；接管后该变量 undefined，libm 不会参与链接。inject.cmake 必须补回（本次恰好没用到 libm 符号而侥幸通过，属隐患）。"
+  - "**Cortex-M3 无 FPU**：`fpu: none` 时**绝不能**产出 `-mfloat-abi`。`gcc.cmake` 与 `inject.cmake` 都按 `none` 分支跳过该参数。"
+  - "本工程 ld 只声明 **64K flash**（`STM32F103xB` 官方标称 128K）——**以 ld 为准**，因为 ld 才是链接器实际使用的边界。"
+  - "本工程 CMakeLists **没有** POST_BUILD objcopy，hex/bin 由 elab build 统一产出（约束 C6）。"
+

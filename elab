@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# elab —— elab-Flow 命令行入口（L3）
+# 零第三方依赖：只需要一个 python3（>=3.8）。
+#
+# 用法：  ./elab build -p stm32_test
+#         ./elab doctor --deep
+#         ./elab list --json
+#
+# 覆盖解释器：  ELAB_PYTHON=/path/to/python ./elab list
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Git Bash(MSYS) 下给 Windows 版 python 传 POSIX 路径会找不到模块，
+# 故优先取 Windows 形式（pwd -W）；纯 Linux/macOS 回退到普通 pwd。
+HERE_NATIVE="$HERE"
+if command -v cygpath >/dev/null 2>&1; then
+  HERE_NATIVE="$(cygpath -m "$HERE" 2>/dev/null || echo "$HERE")"
+elif (cd "$HERE" && pwd -W >/dev/null 2>&1); then
+  HERE_NATIVE="$(cd "$HERE" && pwd -W)"
+fi
+
+PY="${ELAB_PYTHON:-}"
+if [ -z "$PY" ]; then
+  if command -v python >/dev/null 2>&1; then PY=python
+  elif command -v python3 >/dev/null 2>&1; then PY=python3
+  else
+    echo "[elab] 找不到 python（可用 ELAB_PYTHON 指定）" >&2
+    exit 127
+  fi
+fi
+
+# PYTHONPATH 分隔符随平台变化（Windows ';' / 其余 ':'）
+SEP=":"
+case "$(uname -s 2>/dev/null || echo linux)" in
+  MINGW*|MSYS*|CYGWIN*) SEP=";" ;;
+esac
+
+export PYTHONPATH="$HERE_NATIVE/services${PYTHONPATH:+$SEP$PYTHONPATH}"
+export ELAB_ROOT="${ELAB_ROOT:-$HERE_NATIVE}"
+exec "$PY" -m elab "$@"

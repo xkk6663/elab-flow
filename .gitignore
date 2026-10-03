@@ -1,0 +1,10 @@
+# elab-Flow 工作目录（构建产物 / 生成物），不入库
+.work/
+
+# 示例工程内的历史 IDE / CMake 构建产物
+# （elab 自身产物落在 .work/；examples/ 的源码照常入库，CI 依赖它）
+build/
+
+# Python 字节码
+__pycache__/
+*.pyc

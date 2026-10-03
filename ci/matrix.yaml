@@ -1,0 +1,35 @@
+# ci/matrix.yaml —— CI 矩阵（L5）
+#
+# 本地 `elab ci` 与 GitHub Actions 共用【同一份定义】——不在两处各写一遍流程，
+# 否则"本地绿、CI 红"这类问题会反复出现。
+#
+# 一档 job = 一组「项目 × 检查步骤」。分两档是刻意的：
+#   host-gate  纯主机可跑（编译类）→ 云端 runner 也能跑
+#   onhw-gate  需要真实探针      → 必须 self-hosted，且可选
+
+version: 1
+
+defaults:
+  build_type: Debug
+  jobs: 4                 # 传给 cmake --build -j
+
+jobs:
+  # ── 档 1：主机门禁（无探针依赖）────────────────────────────────
+  - name: host-gate
+    desc: 环境体检 + 深度漂移校验 + 全芯片编译（云端可跑）
+    projects: [at32_test, stm32_test]
+    steps:
+      - doctor_deep       # 真跑 configure，校验实际编译命令与 chip.yaml 一致
+      - build             # 编译 + 统一产出 hex/bin + 零改动快照
+    artifacts: ".work/{project}/TEST.*"
+    runner: ubuntu-latest
+
+  # ── 档 2：上板门禁（需要探针，self-hosted）─────────────────────
+  - name: onhw-gate
+    desc: 烧录 + 断到 main 自检（需要探针接在机器上）
+    projects: [at32_test]
+    steps:
+      - flash
+      - debug_verify
+    optional: true        # 云端无探针；缺 runner 时跳过而非失败
+    runner: [self-hosted, atlink]

@@ -1,0 +1,104 @@
+# elab.host.yaml —— 主机环境层（L0）
+# 唯一的"主机事实源"：所有工具链路径 / 工具 / 探针 / 串口在此声明。
+# 其他任何层禁止自己拼绝对路径。
+#
+# 本文件的值 = 本机实测值（2026-10-03 探测），见每项后的 "实测" 注释。
+# 覆盖方式：环境变量优先（CI 注入），例如 ELAB_HOST / ELAB_ARM_GCC_ROOT。
+
+version: 1
+
+host:
+  os: auto                    # auto | windows | linux | macos
+  workspace: ${ELAB_ROOT}     # ELAB_ROOT = 本文件所在目录（elab-flow/）
+  exec_ext: auto              # auto → Windows = .exe，其余为空
+
+# ── 交叉编译工具链 ────────────────────────────────────────────────
+toolchains:
+  arm-none-eabi:
+    # ★ 实测（2026-10-03）：本机并存【四套】arm-gcc，此前谁生效完全靠 PATH 运气
+    #   —— 正是断点 G2 的活体标本，"一台机器上有几套 GCC"此前没有任何单一文件能回答。
+    #   (a) C:/DevEnv/GNU-tools-for-STM32                                          13.3.1  ← elab 选定（AT32 旧 build 用它）
+    #   (b) C:/Users/xiao1/AppData/Local/at32-tools/gcc-arm-none-eabi/V10.3        10.3    装了没用
+    #   (c) C:/Users/xiao1/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/13.3.1+st.9  未用
+    #   (d) C:/Users/xiao1/AppData/Local/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2  STM32 旧 build 用它
+    root: C:/DevEnv/GNU-tools-for-STM32
+    version: "13.3.1"         # 实测 arm-none-eabi-gcc 13.3.1 20240614
+    pin: true                 # 必须由 elab 显式指定，不依赖 PATH
+    # 决策 D1：elab 调 cmake 前，必须把 ${root}/bin 前置进 PATH。
+    #   原因：工程内常有 `set(CMAKE_C_COMPILER arm-none-eabi-gcc)` 裸名写法
+    #   （CMake 会忽略它，但子进程/工具仍可能按 PATH 解析），前置 PATH 才能保证版本可复现。
+    prepend_path: true
+
+  riscv32-esp-elf:            # ESP32-S3 备用（本项目暂未接入）
+    root: C:/Users/xiao1/.espressif/tools/riscv32-esp-elf
+    found: false              # 待确认具体版本子目录，暂标未就绪
+
+# ── 主机侧工具 ────────────────────────────────────────────────────
+tools:
+  cmake:
+    path: auto                # 实测 PATH 上为 4.4.3（Python Scripts 安装）
+    min: "3.22"               # AT32_TEST 要求 3.22；CMAKE_PROJECT_INCLUDE 要求 ≥3.15
+    alt: C:/Users/xiao1/AppData/Local/at32-tools/cmake-3.28.1   # 实测存在，可作固定备选
+  ninja:
+    # 实测：ninja 不在 PATH，本机并存【两套】，各工程此前各用一个
+    #   (a) at32-tools/ninja/V1.11.1        ← elab 选定（AT32 旧 build 用它）
+    #   (b) stm32cube/bundles/ninja/1.13.1+st.1/bin/ninja.exe   （STM32 旧 build 用它）
+    path: C:/Users/xiao1/AppData/Local/at32-tools/ninja/V1.11.1/ninja.exe
+  gdb:
+    # 必须用 ARM 版，不能用 PATH 上的 /c/MinGW/bin/gdb（实测那是 x86 版）
+    from: arm-none-eabi       # → ${tools.arm-none-eabi.root}/bin/arm-none-eabi-gdb.exe
+  openocd:
+    path:    C:/Users/xiao1/AppData/Local/at32-tools/OpenOCD/V2.0.9/bin/openocd.exe
+    scripts: C:/Users/xiao1/AppData/Local/at32-tools/OpenOCD/V2.0.9/scripts
+  pyocd:
+    path: null                # 未安装
+
+# ── 调试探针 ──────────────────────────────────────────────────────
+# ★ 关键模型：interface cfg 属于【探针】，target cfg 属于【芯片】—— 两者正交。
+#   SWD 就是 SWD：同一个 DAP-Link，只换 target cfg 就能连不同厂家的芯片。
+#   实测（2026-10-03，同一个 CMSIS-DAP 探针）：
+#     atlink.cfg + target/at32f421xx.cfg → [at32f421xx.cpu] Cortex-M4 r0p1 detected
+#     atlink.cfg + target/stm32f1x.cfg   → [stm32f1x.cpu]   Cortex-M4 r0p1 detected
+#   所以"某芯片必须用某品牌探针"是误解：探针只决定 interface，芯片只决定 target。
+probes:
+  default: atlink
+  list:
+    # 实测 AT32_TEST/.vscode/tmp_dap_interface.cfg: cmsis-dap / swd / 5000 / usb interface 3
+    # atlink.cfg 的内容 = cmsis-dap driver + transport swd + speed 5000 + cmsis_dap_backend hid
+    atlink:
+      backend: cmsis-dap
+      interface_cfg: interface/atlink.cfg      # ← interface cfg 是探针属性（写在这里）
+      transport: swd
+      speed: 5000
+      usb_interface: 3
+    # 通用 DAP-Link（不依赖 atlink 的 hid backend 预设，用于其它 CMSIS-DAP 探针）
+    dap:
+      backend: cmsis-dap
+      interface_cfg: interface/cmsis-dap.cfg
+      transport: swd
+      speed: 5000
+    stlink:
+      backend: stlink
+      interface_cfg: interface/stlink.cfg
+      transport: swd
+      speed: 4000
+    jlink:
+      backend: jlink
+      interface_cfg: interface/jlink.cfg
+      transport: swd
+      speed: 8000
+
+# ── 串口日志 ──────────────────────────────────────────────────────
+serial:
+  default: auto               # auto = 探测第一个可用口
+  baud: 115200
+
+# ── SVD 搜索根（寄存器视图，供 IDE / 调试用）──────────────────────
+# 与 openocd cfg 同样的思路：chips/*.yaml 只声明【文件名】（相对、主机无关），
+# 真正的目录写在这里（L0 唯一主机事实源）。按顺序搜索，首个命中即用。
+# 注：实测本机 AT32 的 svd 只在 WorkBench 原件目录里（at32-tools 未附带）；
+#     STM32 的在 STM32Cube 的 DFP pack 里。
+svd_roots:
+  - C:/Users/xiao1/Desktop/AT32/AT32F421G8U7_WorkBench/svd
+  - C:/Users/xiao1/AppData/Local/stm32cube/packs/STMicroelectronics/stm32f1xx_dfp/1.1.0/SVD
+

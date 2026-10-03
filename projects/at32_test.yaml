@@ -1,0 +1,43 @@
+# projects/at32_test.yaml —— 项目接入层（L4）
+# 只回答四件事：在哪 / 哪颗芯片 / 入口构建是什么 / 产物叫什么。
+# ★ 不搬代码、不改目录、不新增文件到业务工程。
+#
+# 实测依据：AT32_TEST/CMakeLists.txt、CMakePresets.json、build/CMakeCache.txt、
+#           build/compile_commands.json、.vscode/{at32_chip,at32_config}.json、template.ATWP
+
+name: at32_test
+# 示例工程已随仓库走（${ELAB_ROOT} = elab-flow/），因此这里没有主机绝对路径。
+# 接入【真实项目】时 root 可写任意绝对路径或 ${ELAB_ROOT}/../somewhere。
+root: ${ELAB_ROOT}/examples/AT32_TEST
+chip: artery/at32f421g8
+archetype: B                                    # 工具链在 CMakeLists 内 hard include（line 22）
+
+build:
+  kind: cmake                                   # cmake | cmake-wrapper | make
+  source: ${root}/CMakeLists.txt                # 用工程已有入口，不新建
+  work_dir: ${ELAB_ROOT}/.work/at32_test        # 全部构建产物落在这里，不污染业务工程
+  generator: Ninja
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake      # elab 自己的工具链
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake   # ★ B 类必需：project() 之后盖章
+  linker_script:   ${root}/AT32F421x8_FLASH.ld            # ld 归工程所有（见 chip.yaml 说明）
+  build_type: Debug
+  # 实测项目名：AT32 CMakeLists 里 set(CMAKE_PROJECT_NAME TEST) → 产物名为 TEST.*
+  project_name: TEST
+
+artifacts:                                      # 告诉 elab 产物在哪（烧录 / size 统计用）
+  elf: ${work_dir}/TEST.elf
+  hex: ${work_dir}/TEST.hex
+  bin: ${work_dir}/TEST.bin
+  map: ${work_dir}/TEST.map
+
+debug:
+  probe: atlink                                 # → elab.host.yaml: probes.atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+# ── 零改动保证（可验证）────────────────────────────────────────────
+# ★ 约束 C4：不能用 `git status` 校验 —— AT32_TEST 不是 git 仓库。
+#   改用文件树快照（相对路径 + size + mtime），构建前后比对。
+guard:
+  untouched: true
+  snapshot: true
+  snapshot_root: ${root}
