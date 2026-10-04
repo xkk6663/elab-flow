@@ -1,0 +1,83 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 62px 1fr auto;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.compact .row {
+  grid-template-columns: 54px 1fr auto;
+  gap: 6px;
+}
+
+.name {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar {
+  position: relative;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--elab-bg-active);
+  overflow: hidden;
+}
+
+.fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  transition: width 0.25s ease-out;
+}
+
+.ok {
+  background: var(--elab-status-ok);
+}
+.warn {
+  background: var(--elab-status-run);
+}
+.full {
+  background: var(--elab-status-fail);
+}
+
+.num {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dim {
+  color: var(--elab-fg-faint);
+  font-style: normal;
+}
+
+.none {
+  padding: var(--elab-space-2) 0;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+.prov {
+  margin-top: 1px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fill {
+    transition: none;
+  }
+}

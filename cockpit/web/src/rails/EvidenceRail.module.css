@@ -1,0 +1,79 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  background: var(--elab-bg-surface);
+  border-left: 1px solid var(--elab-border);
+}
+
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-2) var(--elab-space-3);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 6px var(--elab-space-3);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.meta {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.warn {
+  flex: 0 0 auto;
+  padding: 6px var(--elab-space-3);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.5;
+  color: var(--elab-status-run);
+  background: color-mix(in srgb, var(--elab-status-run) 10%, transparent);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+code {
+  font-family: var(--elab-font-mono);
+  font-size: 0.94em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--elab-bg-hover);
+}
+
+/* ── 手动输入行 ── */
+.write {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-2) var(--elab-space-3);
+  border-top: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+}
+
+.writeIcon {
+  flex: 0 0 auto;
+  width: 13px;
+  color: var(--elab-fg-faint);
+}
+
+.portTag {
+  flex: 0 0 auto;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  white-space: nowrap;
+}

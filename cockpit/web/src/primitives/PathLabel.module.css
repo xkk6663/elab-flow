@@ -1,0 +1,61 @@
+.wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--elab-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.path {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-primary);
+  text-align: left;
+}
+
+.copyable {
+  cursor: copy;
+}
+.copyable:hover {
+  background: var(--elab-bg-hover);
+  border-color: var(--elab-border);
+}
+
+/* 目录部分弱化并允许压缩；文件名保持完整不省略 */
+.dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--elab-fg-faint);
+  direction: rtl; /* 从尾部截断，保住最贴近文件名的层级 */
+  text-align: left;
+}
+
+.name {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.suffix {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.copied {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-ok);
+}

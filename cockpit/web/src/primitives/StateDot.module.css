@@ -1,0 +1,68 @@
+.dot {
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--elab-status-idle);
+  border: 1.5px solid transparent;
+  box-sizing: border-box;
+}
+
+/* pending：空心灰 */
+.pending {
+  background: transparent;
+  border-color: var(--elab-status-idle);
+}
+
+/* running：实心琥珀 + 呼吸 */
+.running {
+  background: var(--elab-status-run);
+}
+.breathe {
+  animation: dotbreathe 1.3s ease-in-out infinite;
+}
+
+/* ok：实心绿 */
+.ok {
+  background: var(--elab-status-ok);
+}
+
+/* failed：实心红 */
+.failed {
+  background: var(--elab-status-fail);
+}
+
+/* skipped：细环灰（明显比 pending 更淡） */
+.skipped {
+  background: transparent;
+  border-color: var(--elab-fg-faint);
+  border-style: dotted;
+}
+
+/* cancelled：空心红 + 斜杠，形状可辨 */
+.cancelled {
+  background: transparent;
+  border-color: var(--elab-status-fail);
+  position: relative;
+}
+.cancelled::after {
+  content: "";
+  position: absolute;
+  inset: 15% -15%;
+  border-top: 1.5px solid var(--elab-status-fail);
+  transform: rotate(-45deg);
+}
+
+@keyframes dotbreathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--elab-status-run) 60%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--elab-status-run) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .breathe {
+    animation: none;
+  }
+}

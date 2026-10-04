@@ -1,0 +1,45 @@
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.bubble {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  z-index: 60;
+  padding: 3px 8px;
+  border-radius: var(--elab-radius-sm);
+  border: 1px solid var(--elab-border-strong);
+  background: var(--elab-bg-raised);
+  color: var(--elab-fg-primary);
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-sans);
+  white-space: nowrap;
+  box-shadow: var(--elab-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.top .bubble {
+  bottom: calc(100% + 6px);
+}
+.bottom .bubble {
+  top: calc(100% + 6px);
+}
+
+/* ★ 用 `:has(:focus-visible)` 而不是 `:focus-within`：
+   鼠标点一下按钮，Chrome 也会把焦点给它。若用 `:focus-within`，点完按钮
+   提示就**一直挂在那里**（实测：鼠标移开后 tooltip 仍在，看起来像卡住了）。
+   `:focus-visible` 只在键盘导航时命中 —— 键盘用户照样能拿到提示，鼠标用户不再被粘住。 */
+.wrap:hover .bubble,
+.wrap:has(:focus-visible) .bubble {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble {
+    transition: none;
+  }
+}

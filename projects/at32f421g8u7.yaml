@@ -1,0 +1,102 @@
+# projects/at32f421g8u7.yaml —— 由 `elab adapt` 确定性生成，请勿手改
+# generated-by: elab adapt   ← 机器生成标记；删掉此行即视为人工接管，elab 将不再覆盖
+#
+# 生成依据见文末 provenance 段（逐条记「结论 ← 哪个文件的什么内容」）。
+# 本文件不含时间戳：同一工程重复生成必得同样内容，便于 --check 与 CI 守卫比对。
+# 要改芯片参数请改 chips/*.yaml；要改工程请改工程本身，本文件只管「怎么接进来」。
+
+name: at32f421g8u7
+root: ${ELAB_ROOT}/examples/AT32F421G8U7
+chip: artery/at32f421g8
+archetype: B
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${ELAB_ROOT}/.work/at32f421g8u7
+  generator: Ninja
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake
+  linker_script:   ${root}/AT32F421x8_FLASH.ld
+  build_type: Debug
+  project_name: AT32F421G8U7
+
+artifacts:
+  elf: ${work_dir}/AT32F421G8U7.elf
+  hex: ${work_dir}/AT32F421G8U7.hex
+  bin: ${work_dir}/AT32F421G8U7.bin
+  map: ${work_dir}/AT32F421G8U7.map
+
+debug:
+  probe: atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+guard:
+  untouched: true
+  snapshot: true
+  snapshot_root: ${root}
+
+# ── 串口闭环判据（docs/技术方案_闭环驾驶舱.md §16）───────────────
+serial:
+  baud: 115200          # 来源：生成器模板 RealBaudRate（见 provenance.baud）
+  port: auto        # 自动选口：会跳过蓝牙虚拟口（本机 COM3-8 均为 BthModem）
+
+# 固件探测到输出能力（见 provenance.stdout），故给出**真实判据** —— 闭环可被机器判定：
+#   close_on 命中任意一条 → ok；fail_on 优先于 close_on；都没中且超时 → inconclusive。
+#   pattern 逐行匹配，命中行会原文带进事件作证据。
+# ★ ^\[(boot|alive)\] 是 elab 约定的「存活关键字」；固件换关键字请同步改这里。
+monitor:
+  close_on:
+    - { kind: regex, pattern: "^\\[(boot|alive)\\]", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "HardFault|Hard Fault|assert|PANIC" }
+  idle_timeout_s: 30
+
+# ── 证据链 ───────────────────────────────────────────────────────
+provenance:
+  vendor:
+    value: "artery（at32_workbench）"
+    level: E4          # 结构约定
+    evidence: "CMakeLists.txt: add_subdirectory(cmake/at32_workbench)"
+  archetype:
+    value: "B"
+    level: E4          # 结构约定
+    evidence: "CMakeLists.txt: include("cmake/gcc-arm-none-eabi.cmake")（行内挂自带工具链，接管后仍会执行）"
+  project_name:
+    value: "AT32F421G8U7"
+    level: E1          # 编译事实
+    evidence: "CMakeLists.txt: set(CMAKE_PROJECT_NAME AT32F421G8U7)"
+  toolchain_cmake:
+    value: "cmake/gcc-arm-none-eabi.cmake"
+    level: E4          # 结构约定
+    evidence: "CMakePresets.json: toolchainFile = cmake/gcc-arm-none-eabi.cmake"
+  linker_script:
+    value: "AT32F421x8_FLASH.ld"
+    level: E3          # 链接事实
+    evidence: "工具链文件: -T AT32F421x8_FLASH.ld"
+  compile_flags:
+    value: "-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=soft"
+    level: E1          # 编译事实
+    evidence: "工具链文件: TARGET_FLAGS"
+  chip_macro:
+    value: "AT32F421G8U7"
+    level: E1          # 编译事实
+    evidence: "cmake/at32_workbench/CMakeLists.txt: WK_Defines_Syms → USE_STDPERIPH_DRIVER, AT32F421G8U7"
+  chip:
+    value: "artery/at32f421g8"
+    level: E1          # 编译事实
+    evidence: "编译宏 AT32F421G8U7 == chips/artery/at32f421g8.yaml:part"
+  memory:
+    value: "FLASH=0x10000 RAM=0x4000"
+    level: E3          # 链接事实
+    evidence: "AT32F421x8_FLASH.ld MEMORY 段"
+  baud:
+    value: "115200（模板实测 115163）"
+    level: E5          # 生成器模板文件（可能过期）
+    evidence: "AT32F421G8U7.ATWP: RealBaudRate=115163"
+  stdout:
+    value: "有输出能力"
+    level: E4          # 结构约定
+    evidence: "project/src/main.c: 定义了 __io_putchar（带函数体）；project/src/main.c: 调用了 printf"
+  confidence: "high"
+  serial_pins: "USART1 TX=PB6 RX=PB7"

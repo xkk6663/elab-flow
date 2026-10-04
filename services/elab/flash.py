@@ -163,7 +163,10 @@ def debug(plan: Plan, *, mode: str = "print", log=print) -> dict:
                 "-ex", 'printf "ELAB_STOP pc=%p\\n", $pc',
                 "-ex", "info registers pc sp",
                 "-ex", "bt",
-                "-ex", "monitor reset halt",
+                # ★ 收尾必须是 reset **run** 而不是 reset halt：
+                #   自检结束后若把 MCU 留在暂停态，后续的串口闭环（loop 第⑤步）
+                #   会一个字节都收不到 —— 板子根本没在跑。自检不该把板子弄死。
+                "-ex", "monitor reset run",
             ]
             try:
                 r = subprocess.run(batch, cwd=str(plan.cfg.root), env=env,

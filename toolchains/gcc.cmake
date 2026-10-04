@@ -61,6 +61,19 @@ set(CMAKE_ASM_FLAGS        "${_elab_target_flags} -x assembler-with-cpp")
 set(CMAKE_C_FLAGS_DEBUG    "-O0 -g3")
 set(CMAKE_C_FLAGS_RELEASE  "-Os -g0")
 
+set(_elab_link_flags "")
 if(DEFINED ELAB_LD AND NOT ELAB_LD STREQUAL "")
-    set(CMAKE_EXE_LINKER_FLAGS "${_elab_target_flags} -T \"${ELAB_LD}\" -Wl,--gc-sections -Wl,--print-memory-usage --specs=nano.specs")
+    set(_elab_link_flags "${_elab_target_flags} -T \"${ELAB_LD}\" -Wl,--gc-sections -Wl,--print-memory-usage --specs=nano.specs")
+endif()
+
+# ★ N6 修复：-Wl,-Map 由 elab 盖章，落点来自 plan.py 的 -DELAB_MAP_FILE。
+#   这里与 inject.cmake 用同一个变量、同一段逻辑：inject 生效时它会整体覆盖本值，
+#   而 T1（零改动、无 inject）工程仍能拿到 map，两层不会各自漂移。
+#   详见 inject.cmake 的同名注释（含 A/B 两类工程各丢一次的原因）。
+if(DEFINED ELAB_MAP_FILE AND NOT ELAB_MAP_FILE STREQUAL "")
+    set(_elab_link_flags "${_elab_link_flags} -Wl,-Map=\"${ELAB_MAP_FILE}\"")
+endif()
+
+if(NOT _elab_link_flags STREQUAL "")
+    set(CMAKE_EXE_LINKER_FLAGS "${_elab_link_flags}")
 endif()

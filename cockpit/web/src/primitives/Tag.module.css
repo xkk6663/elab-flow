@@ -1,0 +1,82 @@
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--elab-border);
+  font-size: var(--elab-fs-xs);
+  line-height: 17px;
+  color: var(--elab-fg-secondary);
+  background: var(--elab-bg-hover);
+  white-space: nowrap;
+}
+
+.dense {
+  padding: 0 6px;
+  line-height: 15px;
+}
+
+.mono {
+  font-family: var(--elab-font-mono);
+  letter-spacing: -0.01em;
+}
+
+.pill {
+  min-width: 18px;
+  justify-content: center;
+  padding: 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── tone：色值全部走令牌 ── */
+.blue {
+  color: var(--elab-c-blue-700);
+  border-color: color-mix(in srgb, var(--elab-c-blue-500) 45%, transparent);
+  background: color-mix(in srgb, var(--elab-c-blue-500) 12%, transparent);
+}
+:root[data-theme="dark"] .blue {
+  color: var(--elab-c-blue-300);
+}
+
+.green {
+  color: var(--elab-c-green-700);
+  border-color: color-mix(in srgb, var(--elab-c-green-500) 45%, transparent);
+  background: color-mix(in srgb, var(--elab-c-green-500) 12%, transparent);
+}
+:root[data-theme="dark"] .green {
+  color: var(--elab-c-green-300);
+}
+
+.amber {
+  color: var(--elab-c-amber-700);
+  border-color: color-mix(in srgb, var(--elab-c-amber-500) 45%, transparent);
+  background: color-mix(in srgb, var(--elab-c-amber-500) 14%, transparent);
+}
+:root[data-theme="dark"] .amber {
+  color: var(--elab-c-amber-300);
+}
+
+.red {
+  color: var(--elab-c-red-700);
+  border-color: color-mix(in srgb, var(--elab-c-red-500) 45%, transparent);
+  background: color-mix(in srgb, var(--elab-c-red-500) 12%, transparent);
+}
+:root[data-theme="dark"] .red {
+  color: var(--elab-c-red-300);
+}
+
+.violet {
+  color: var(--elab-c-gray-800);
+  border-color: color-mix(in srgb, var(--elab-fg-muted) 45%, transparent);
+  background: color-mix(in srgb, var(--elab-fg-muted) 12%, transparent);
+}
+:root[data-theme="dark"] .violet {
+  color: #d9a0e8;
+  border-color: rgba(217, 160, 232, 0.42);
+  background: rgba(217, 160, 232, 0.14);
+}
+
+.neutral {
+  /* 默认即是 */
+}

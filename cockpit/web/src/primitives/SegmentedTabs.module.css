@@ -1,0 +1,64 @@
+.wrap {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--elab-radius-sm);
+  background: var(--elab-bg-sunken);
+  border: 1px solid var(--elab-border);
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--elab-fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tab:hover {
+  color: var(--elab-fg-primary);
+}
+
+.active {
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg-primary);
+  box-shadow: var(--elab-shadow);
+  font-weight: 600;
+}
+
+.dim {
+  opacity: 0.55;
+}
+
+.md .tab {
+  padding: 4px 10px;
+  font-size: var(--elab-fs-sm);
+}
+.sm .tab {
+  padding: 2px 8px;
+  font-size: var(--elab-fs-xs);
+}
+
+.badge {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--elab-bg-active);
+  color: var(--elab-fg-muted);
+  font-size: var(--elab-fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  line-height: 15px;
+}
+
+.badgeAlert {
+  background: var(--elab-status-fail);
+  color: var(--elab-fg-inverse);
+  font-weight: 700;
+}

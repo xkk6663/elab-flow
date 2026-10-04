@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>elab cockpit · 闭环驾驶舱</title>
+    <script>
+      // 在任何绘制之前定主题，避免"白闪一下再变黑"。
+      // 三态 light/dark/system（§15.4 第 4 条），与 layoutStore 的默认值保持一致。
+      (function () {
+        try {
+          var t = localStorage.getItem("elab.theme") || "system";
+          var eff =
+            t === "system"
+              ? window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : t;
+          document.documentElement.setAttribute("data-theme", eff);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

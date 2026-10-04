@@ -1,0 +1,77 @@
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  /* ★ 必须三处都锁死横向溢出。踩过的坑：顶栏右侧的 Tooltip 气泡是
+     `position:absolute; white-space:nowrap`，虽然 `opacity:0` 不可见，
+     但**仍参与祖先的 scrollWidth** —— 顶栏实测 scrollWidth 比 clientWidth
+     多 80px，于是文档级多出一条横向滚动条（截图里能直接看到）。
+     只给 body 加 `overflow:hidden` 不够，html 仍会产生滚动容器。 */
+  overflow: hidden;
+}
+
+body {
+  background: var(--elab-bg-canvas);
+  color: var(--elab-fg-primary);
+  font-family: var(--elab-font-sans);
+  font-size: var(--elab-fs-md);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--elab-font-mono);
+}
+
+/* 统一的细滚动条（两套主题都用 currentColor 派生的半透明，避免硬编码） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--elab-border-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--elab-fg-faint);
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--elab-accent);
+  outline-offset: 1px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* 屏幕阅读器专用 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

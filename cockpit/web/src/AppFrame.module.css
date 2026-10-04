@@ -1,0 +1,165 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-3);
+  height: 40px;
+  padding: 0 var(--elab-space-4);
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+  z-index: 20;
+}
+
+.compactSel {
+  display: none; /* 只在 <820px 露出 */
+  min-width: 0;
+}
+
+.frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.col {
+  flex: 0 0 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.left {
+  width: var(--w-projects);
+}
+.right {
+  width: var(--w-evidence);
+  display: flex;
+  flex-direction: column;
+}
+
+.center {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+/* ── 拖拽条 ── */
+.handle {
+  flex: 0 0 6px;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  touch-action: none;
+}
+.handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.handle:hover::after,
+:global(body[data-dragging]) .handle::after {
+  background: var(--elab-accent);
+}
+
+/* ── 折叠后的窄条 ── */
+.strip {
+  width: 26px;
+  border: 0;
+  padding: 0;
+  background: var(--elab-bg-sunken);
+  color: var(--elab-fg-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.strip:hover {
+  background: var(--elab-bg-hover);
+  color: var(--elab-fg-primary);
+}
+.stripLeft {
+  border-right: 1px solid var(--elab-border);
+}
+.stripRight {
+  border-left: 1px solid var(--elab-border);
+}
+.stripText {
+  writing-mode: vertical-rl;
+  font-size: var(--elab-fs-xs);
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.drawerBar {
+  flex: 0 0 auto;
+  display: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   响应式降级（§15.2）
+     <1100px → 证据轨折叠为**底部抽屉**
+     <820px  → 中列独占，工程轨改顶栏下拉
+   ══════════════════════════════════════════════════════════════════ */
+@media (max-width: 1100px) {
+  .frame {
+    flex-direction: column;
+  }
+  .handle {
+    display: none;
+  }
+  .left {
+    width: 100%;
+    max-height: 34vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--elab-border);
+  }
+  .right {
+    width: 100%;
+    /* 抽屉高度固定，中列吃掉剩余空间 */
+    height: 46vh;
+    border-left: 0;
+    border-top: 1px solid var(--elab-border);
+  }
+  .center {
+    flex: 1 1 auto;
+    min-height: 26vh;
+    overflow: hidden;
+  }
+  .drawerBar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 2px 6px;
+    border-bottom: 1px solid var(--elab-border);
+  }
+  .stripText {
+    writing-mode: horizontal-tb;
+  }
+}
+
+@media (max-width: 820px) {
+  .left,
+  .stripLeft {
+    display: none;
+  }
+  .compactSel {
+    display: block;
+    flex: 1 1 auto;
+  }
+}
+
+/* 拖拽的时候别让页面文字被顺手选中 */
+:global(body[data-dragging]) {
+  user-select: none;
+  cursor: col-resize;
+}

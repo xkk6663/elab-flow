@@ -1,0 +1,54 @@
+.row {
+  border-bottom: 1px solid var(--elab-border);
+}
+.row:last-child {
+  border-bottom: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  width: 100%;
+  padding: 6px var(--elab-space-2);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.head:hover {
+  background: var(--elab-bg-hover);
+}
+
+.headBody {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.caret {
+  width: 0;
+  height: 0;
+  flex: 0 0 0;
+  border-left: 4px solid var(--elab-fg-faint);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.14s;
+}
+.caretOpen {
+  transform: rotate(90deg);
+}
+
+.body {
+  padding: 0 var(--elab-space-2) var(--elab-space-2) calc(var(--elab-space-2) + 12px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    transition: none;
+  }
+}

@@ -35,8 +35,27 @@ set(CMAKE_C_FLAGS_DEBUG   "-O0 -g3")
 set(CMAKE_C_FLAGS_RELEASE "-Os -g0")
 
 # ── 链接参数 ──────────────────────────────────────────────────────
+set(_elab_link_flags "")
 if(DEFINED ELAB_LD AND NOT ELAB_LD STREQUAL "")
-    set(CMAKE_EXE_LINKER_FLAGS "${_elab_flags} -T \"${ELAB_LD}\" -Wl,--gc-sections -Wl,--print-memory-usage --specs=nano.specs")
+    set(_elab_link_flags "${_elab_flags} -T \"${ELAB_LD}\" -Wl,--gc-sections -Wl,--print-memory-usage --specs=nano.specs")
+endif()
+
+# ★ N6 修复：-Wl,-Map 的归属。两种工程各丢一次，原因正好相反：
+#   【B 类】AT32 的 CMakeLists line 22 在 project() 之前 include 了自带工具链，
+#          其 gcc-arm-none-eabi.cmake line 41 把 -Wl,-Map=${CMAKE_PROJECT_NAME}.map
+#          放进 CMAKE_C_LINK_FLAGS；本文件下面的 unset(CMAKE_C_LINK_FLAGS)
+#          （为了消除双份 -T）把它一并清掉，且无人补回。
+#   【A 类】STM32 的工具链只挂在 CMakePresets 的 toolchainFile 上，elab 用
+#          -DCMAKE_TOOLCHAIN_FILE 接管后该文件【根本不执行】→ 从未有过 Map；
+#          而下面这句 set 又是整体覆盖 CMAKE_EXE_LINKER_FLAGS，也没有它。
+#   结论：map 是 elab 对 projects/*.yaml → artifacts.map 的承诺，就该由 elab 盖章。
+#   路径由 plan.py 显式传入（-DELAB_MAP_FILE），不从 ${CMAKE_PROJECT_NAME} 反推。
+if(DEFINED ELAB_MAP_FILE AND NOT ELAB_MAP_FILE STREQUAL "")
+    set(_elab_link_flags "${_elab_link_flags} -Wl,-Map=\"${ELAB_MAP_FILE}\"")
+endif()
+
+if(NOT _elab_link_flags STREQUAL "")
+    set(CMAKE_EXE_LINKER_FLAGS "${_elab_link_flags}")
 endif()
 
 # ★ B 类实测坑：工程自带工具链用的是 CMAKE_C_LINK_FLAGS（AT32 的 gcc-arm-none-eabi.cmake

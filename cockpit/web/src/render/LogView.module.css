@@ -1,0 +1,115 @@
+.scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--elab-bg-code);
+  border-top: 1px solid var(--elab-border);
+}
+
+.lines {
+  padding: var(--elab-space-2) 0;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.5;
+  /* 日志里对齐信息（地址、百分比）很多，等宽数字明显更好读 */
+  font-variant-numeric: tabular-nums;
+}
+
+.line {
+  padding: 0 var(--elab-space-3);
+  /* 左侧色条：告警行即使被横向裁掉颜色也能一眼扫到 */
+  border-left: 2px solid transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--elab-fg-secondary);
+}
+
+.alert {
+  border-left-color: var(--elab-status-fail);
+  color: var(--elab-status-fail);
+}
+
+.warn {
+  border-left-color: var(--elab-status-run);
+}
+
+.marker {
+  margin: 3px 0;
+  color: var(--elab-fg-muted);
+  font-weight: 600;
+}
+
+.omit {
+  padding: 2px var(--elab-space-3);
+  color: var(--elab-fg-faint);
+  font-style: italic;
+  border-bottom: 1px dashed var(--elab-border);
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--elab-fg-faint);
+  font-size: var(--elab-fs-sm);
+  pointer-events: none;
+}
+
+/* ── ANSI 语义 class（颜色来自 tokens.css，按主题各一套，§15.4 规则 2） ── */
+.a {
+  /* 默认前景，无需覆盖 */
+}
+.a-bold {
+  font-weight: 700;
+}
+.a-black {
+  color: var(--elab-ansi-black);
+}
+.a-red {
+  color: var(--elab-ansi-red);
+}
+.a-green {
+  color: var(--elab-ansi-green);
+}
+.a-yellow {
+  color: var(--elab-ansi-yellow);
+}
+.a-blue {
+  color: var(--elab-ansi-blue);
+}
+.a-magenta {
+  color: var(--elab-ansi-magenta);
+}
+.a-cyan {
+  color: var(--elab-ansi-cyan);
+}
+.a-white {
+  color: var(--elab-ansi-white);
+}
+.a-bright-black {
+  color: var(--elab-ansi-bright-black);
+}
+.a-bright-red {
+  color: var(--elab-ansi-bright-red);
+}
+.a-bright-green {
+  color: var(--elab-ansi-bright-green);
+}
+.a-bright-yellow {
+  color: var(--elab-ansi-bright-yellow);
+}
+.a-bright-blue {
+  color: var(--elab-ansi-bright-blue);
+}
+.a-bright-magenta {
+  color: var(--elab-ansi-bright-magenta);
+}
+.a-bright-cyan {
+  color: var(--elab-ansi-bright-cyan);
+}
+.a-bright-white {
+  color: var(--elab-ansi-bright-white);
+}

@@ -132,6 +132,19 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     if p.linker_script:
         args.append(f"-DELAB_LD={p.linker_script}")
 
+    # ★ N6 修复：-Wl,-Map 的落点由 plan 显式下传。
+    #   两种工程各丢一次，原因相反，所以不能靠"工程自带的工具链"来留它：
+    #     【B 类】AT32 的 CMakeLists 在 project() 之前 include 自带工具链，
+    #            其 -Wl,-Map 落在 CMAKE_C_LINK_FLAGS 里，被 inject.cmake 的
+    #            unset(CMAKE_C_LINK_FLAGS) 一并清掉（该 unset 是为了消除双份 -T）。
+    #     【A 类】STM32 的工具链只挂在 CMakePresets 的 toolchainFile 上，elab 用
+    #            -DCMAKE_TOOLCHAIN_FILE 接管后该文件【根本不执行】→ 从未有过 Map。
+    #   也不靠 ${CMAKE_PROJECT_NAME} 反推文件名（E6 猜测）：at32_test 就手写了
+    #   set(CMAKE_PROJECT_NAME TEST)，一旦与 artifacts.map 的基名漂移就会静默错位。
+    map_path = p.artifacts.get("map") or ""
+    if map_path:
+        args.append(f"-DELAB_MAP_FILE={to_fwd(map_path)}")
+
     args.append(f"-DCMAKE_BUILD_TYPE={p.build_type}")
     p.cmake_args = args
     return p

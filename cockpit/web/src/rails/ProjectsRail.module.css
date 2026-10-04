@@ -1,0 +1,225 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  background: var(--elab-bg-surface);
+  border-right: 1px solid var(--elab-border);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-3) var(--elab-space-3) var(--elab-space-2);
+  border-bottom: 1px solid var(--elab-border);
+  flex: 0 0 auto;
+}
+
+.title {
+  font-size: var(--elab-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--elab-fg-muted);
+}
+
+.count {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--elab-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--elab-space-2);
+}
+
+.note {
+  padding: var(--elab-space-3) var(--elab-space-2);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  line-height: 1.6;
+}
+
+/* ── 工程卡片 ── */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--elab-space-2) var(--elab-space-3);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.card:hover:not(:disabled) {
+  border-color: var(--elab-border-strong);
+}
+.card:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.sel {
+  border-color: var(--elab-accent);
+  background: var(--elab-accent-bg);
+}
+
+.row1 {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+  font-weight: 600;
+  color: var(--elab-fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dotBuilt {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--elab-status-ok);
+}
+
+.row2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.row3 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-run);
+}
+
+.warnIcon {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+}
+
+.warnText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 芯片卡 ── */
+.chipBox {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--elab-border);
+  padding: var(--elab-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--elab-space-2);
+  background: var(--elab-bg-sunken);
+}
+
+.chipHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chipIcon {
+  color: var(--elab-fg-muted);
+  flex: 0 0 auto;
+}
+
+.chipId {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+  font-weight: 700;
+  color: var(--elab-fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 3px var(--elab-space-2);
+  margin: 0;
+  font-size: var(--elab-fs-xs);
+}
+.kv dt {
+  color: var(--elab-fg-faint);
+}
+.kv dd {
+  margin: 0;
+  color: var(--elab-fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: var(--elab-font-mono);
+}
+
+.io {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: var(--elab-space-2);
+  border-top: 1px dashed var(--elab-border);
+}
+
+.ioRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--elab-fs-xs);
+}
+
+.ioIcon {
+  flex: 0 0 auto;
+  width: 12px;
+  color: var(--elab-fg-faint);
+}
+
+.ioLabel {
+  flex: 0 0 52px;
+  color: var(--elab-fg-faint);
+}
+
+.ioVal {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--elab-font-mono);
+  color: var(--elab-fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hint {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  line-height: 1.5;
+}

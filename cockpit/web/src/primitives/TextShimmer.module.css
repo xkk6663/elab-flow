@@ -1,0 +1,44 @@
+.wrap {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+/* 流光层：只覆盖文字区域，不改变文字自身的颜色/清晰度 */
+.sheen {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    var(--elab-shimmer) 50%,
+    transparent 80%
+  );
+  background-size: 220% 100%;
+  animation: sheen 1.5s linear infinite;
+  /* 关键：别让覆盖层把下面文字糊掉 —— 让它跟文字一起裁切 */
+  mix-blend-mode: overlay;
+}
+
+@keyframes sheen {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheen {
+    animation: none;
+    opacity: 0;
+  }
+  .on {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+}

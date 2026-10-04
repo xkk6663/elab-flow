@@ -1,0 +1,183 @@
+.shell {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── 顶栏元素 ── */
+.brand {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--elab-fg-primary);
+  white-space: nowrap;
+}
+
+.ver {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  white-space: nowrap;
+}
+
+.headerSpacer {
+  flex: 1 1 auto;
+}
+
+.serialChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  white-space: nowrap;
+}
+
+.serialIcon {
+  width: 12px;
+  color: var(--elab-fg-faint);
+}
+
+.fontCtl {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  overflow: hidden;
+}
+
+.fontBtn {
+  border: 0;
+  padding: 2px 7px;
+  background: transparent;
+  color: var(--elab-fg-muted);
+  font: inherit;
+  font-size: var(--elab-fs-xs);
+  cursor: pointer;
+}
+.fontBtn:hover:not(:disabled) {
+  background: var(--elab-bg-hover);
+  color: var(--elab-fg-primary);
+}
+.fontBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 窄屏的工程下拉 */
+.select {
+  width: 100%;
+  max-width: 22rem;
+  padding: 3px 6px;
+  border: 1px solid var(--elab-border-strong);
+  border-radius: var(--elab-radius-sm);
+  background: var(--elab-bg-sunken);
+  color: var(--elab-fg-primary);
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+}
+
+/* ── 提示条 ── */
+.notice {
+  position: absolute;
+  left: 50%;
+  bottom: var(--elab-space-4);
+  transform: translateX(-50%);
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  max-width: min(46rem, 90vw);
+  padding: var(--elab-space-2) var(--elab-space-3);
+  border: 1px solid var(--elab-border-strong);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-raised);
+  box-shadow: var(--elab-shadow);
+}
+
+.noticeIcon {
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--elab-status-fail);
+}
+
+.noticeText {
+  flex: 1 1 auto;
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-primary);
+  word-break: break-word;
+}
+
+.noticeClose {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--elab-fg-faint);
+  font-size: var(--elab-fs-lg);
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.noticeClose:hover {
+  color: var(--elab-fg-primary);
+}
+
+/* ── 致命错误页 ── */
+.fatal {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 14vh var(--elab-space-5) var(--elab-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--elab-space-3);
+}
+
+.fatalIcon {
+  width: 26px;
+  height: 26px;
+  color: var(--elab-status-fail);
+}
+
+.fatalTitle {
+  margin: 0;
+  font-size: var(--elab-fs-xl);
+  color: var(--elab-fg-primary);
+}
+
+.fatalMsg {
+  margin: 0;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-status-fail);
+  word-break: break-word;
+  line-height: 1.7;
+}
+
+.fatalCmd {
+  margin: 0;
+  padding: var(--elab-space-3);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-code);
+  border: 1px solid var(--elab-border);
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-secondary);
+  overflow: auto;
+}
+
+.fatalHint {
+  margin: 0;
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-muted);
+  line-height: 1.7;
+}
+
+code {
+  font-family: var(--elab-font-mono);
+  font-size: 0.94em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--elab-bg-hover);
+}

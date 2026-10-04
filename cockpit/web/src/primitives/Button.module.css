@@ -1,0 +1,97 @@
+/* 按钮 —— 只用 --elab-* 令牌（§15.4 规则 1：组件内禁止字面色值） */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--elab-radius-sm);
+  background: transparent;
+  color: var(--elab-fg-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.label {
+  display: inline-block;
+}
+
+/* ── 尺寸 ── */
+.md {
+  padding: 5px 11px;
+  font-size: var(--elab-fs-sm);
+}
+.sm {
+  padding: 3px 8px;
+  font-size: var(--elab-fs-xs);
+}
+
+/* ── 变体 ── */
+.primary {
+  background: var(--elab-accent);
+  color: var(--elab-fg-inverse);
+  font-weight: 600;
+}
+.primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.danger {
+  border-color: var(--elab-status-fail);
+  color: var(--elab-status-fail);
+}
+.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--elab-status-fail) 14%, transparent);
+}
+
+.outline {
+  border-color: var(--elab-border-strong);
+  color: var(--elab-fg-primary);
+}
+.outline:hover:not(:disabled) {
+  background: var(--elab-bg-hover);
+}
+
+.ghost:hover:not(:disabled) {
+  background: var(--elab-bg-hover);
+  color: var(--elab-fg-primary);
+}
+
+/* toolbar：图标 + 短文字，常驻在窄条里，靠 hover 显形 */
+.toolbar {
+  padding: 3px 7px;
+  color: var(--elab-fg-muted);
+}
+.toolbar:hover:not(:disabled) {
+  background: var(--elab-bg-hover);
+  color: var(--elab-fg-primary);
+}
+
+/* ── 忙碌转圈 ── */
+.spin {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: btnspin 0.7s linear infinite;
+}
+
+@keyframes btnspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation-duration: 2s;
+  }
+}

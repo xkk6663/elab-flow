@@ -1,0 +1,14 @@
+# ── 前端构建产物 ────────────────────────────────────────────────────
+# cockpit/web/dist/ 由 `npm --prefix cockpit/web run build` 生成，**随仓库提交**
+# （决策依据见 docs/技术方案_闭环驾驶舱.md §15.6：把"零依赖"的边界从构建时
+#  收窄到运行时 —— 用户 `python -m cockpit.server` 即可，无需 Node）。
+#
+# 标 linguist-generated 是为了控制它的代价：
+#   · GitHub 在 PR 里折叠这些文件，不再把打包 diff 混进 review 视线；
+#   · 仓库语言统计不会被 190 KB 的 bundle 带偏。
+# 注意：这只影响**展示**，不影响 diff —— CI 的 dist 一致性守卫
+# （`git diff --exit-code cockpit/web/dist/`）依然能正常工作。
+cockpit/web/dist/** linguist-generated=true linguist-detectable=false
+
+# ── 事件日志是数据不是代码 ──────────────────────────────────────────
+*.jsonl linguist-detectable=false

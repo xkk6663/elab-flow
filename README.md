@@ -185,6 +185,39 @@ $ ELAB_HOST=ci/host.ci.yaml ./elab build -p stm32_test --dry-run
 AI 要读的提示，和 doctor 要校验的参数，**来自同一份 YAML** ——
 芯片参数一改重跑 `elab skill` 即可，skill 不会悄悄过期。
 
+### 2.8 ★ 事件流（L6）+ 闭环驾驶舱（L7）：把"此刻在哪一步"变成可观测的
+
+前面六层解决的是"**命令能跑通**"；这一层解决"**跑的时候人看得见**"。
+
+`elab run --emit-events` 把每一步写成**只追加的 JSONL 事件流**，驾驶舱跟读它：
+
+```bash
+python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方依赖）
+```
+
+界面是三列：**工程轨**（YAML 驱动的工程卡 + 芯片卡）→ **阶段轨**（四态状态带、
+内存占位、产物、零改动守卫、阶段账本）→ **证据轨**（构建/烧录/串口三合一实时日志）。
+
+| 关键设计 | 为什么 |
+|---|---|
+| 事件**只追加**、每 run 一个文件、`seq` 全局单调 | 重放不需要额外机制：读文件按 `seq` 过滤即可；断线续传直接复用 `Last-Event-ID` |
+| **单写者**：只有 `elab run --emit-events` 一个进程写 | 不加文件锁；唯一豁免是「取消」时父进程补一条 `run/cancel`（此时写者已死） |
+| 推送走 **SSE**（stdlib 手写）、触发走 `POST` | SSE 有浏览器原生重连 + `Last-Event-ID`，零实现成本；长任务在**子进程**里跑，绝不钉死服务线程 |
+| `proc/*` **100ms 合并**成一帧 | 一次编译上万行；不合并会把 SSE 打成"每行一个 HTTP 帧" |
+| 日志渲染**不进 React 树**（环形缓冲 + 命令式 DOM 追加） | 上万行走 reconciler 会直接卡死界面 |
+| 内存占位**取自 `.map`** | 增量构建不 relink 时链接器不输出 `--print-memory-usage`，`.map` 是唯一可得的口径（与链接器自报逐字节一致） |
+
+**实测验收（真浏览器点「跑全闭环」，doctor + build）**：实时日志滚动到 36 行、
+状态 `ok`、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP** 齐全、
+零改动守卫 153 文件未触碰、**页面与控制台零报错**。
+
+> 契约见 `docs/ICD_cockpit_events.md`，实现记录见 `docs/技术方案_闭环驾驶舱.md`。
+> ⚠️ 一条容易踩的硬约束：SSE 用的是**命名事件**，`EventSource.onmessage`
+> **只接收没有 `event:` 字段的帧** —— 新增 topic 必须**两端同时**改
+> （`cockpit/server.py` 的 `SSE_TOPICS` + `cockpit/web/src/api/types.ts` 的
+> `KNOWN_TOPICS`），否则该 topic 的全部事件在浏览器里**静默消失**。
+> 已加守卫用例 `tests/it_cockpit_server.py::test_known_topics_covers_server_emitted` 拦截。
+
 ---
 
 ## 3. 快速开始
@@ -203,10 +236,23 @@ cd elab-flow
 ./elab build -p at32_test --clean
 ./elab flash -p at32_test
 ./elab debug -p at32_test --run      # 交互式 gdb
+
+# ④ 闭环驾驶舱：起后端，浏览器里看"此刻在哪一步"（零第三方依赖）
+python -m cockpit.server             # → http://127.0.0.1:3333/
 ```
 
 > 需要 Python ≥ 3.8（无第三方依赖）。Windows 上可用 `elab.cmd`；Git Bash 用 `./elab`。
 > 没有探针时，`doctor` / `build` / `ci` 照样可跑（`loop` 会在 flash 步失败）。
+> 驾驶舱的**前端产物 `cockpit/web/dist/` 已随仓库提交**，所以最终用户不需要装 Node；
+> 只有在改前端时才需要 `npm --prefix cockpit/web run build`。
+
+### 自测
+
+```bash
+python tests/test_kernel_events.py        # 事件流：seq 前缀性质、并发写、明文通道（16 例）
+python tests/test_map_memory.py           # .map → 内存口径（11 例）
+python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（12 例，会真编译，约 40s）
+```
 
 ### 实测输出（真实硬件）
 
@@ -242,8 +288,9 @@ elab-flow/                          ← 项目根
 │   └── gdb/break_main.gdb          ← 断到 main
 │
 ├── projects/                       ← L4 项目接入（指向业务工程，只读）
-│   ├── at32_test.yaml              ← B 类
-│   └── stm32_test.yaml             ← A 类
+│   ├── at32_test.yaml              ← B 类（手写）
+│   ├── at32f421g8u7.yaml           ← B 类（★ 由 `elab adapt` 生成，带 provenance 证据链）
+│   └── stm32_test.yaml             ← A 类（手写）
 │
 ├── services/elab/                  ← L3 实现（零第三方依赖）
 │   ├── __main__.py                 ← 命令分发
@@ -252,6 +299,11 @@ elab-flow/                          ← 项目根
 │   ├── doctor.py                   ← 体检 + 两源漂移校验
 │   ├── builder.py                  ← configure + build + 统一产物 + 零改动快照
 │   ├── flash.py                    ← openocd 烧录 / gdb 调试
+│   ├── monitor.py                  ← 串口闭环判据（ok / failed / inconclusive）
+│   ├── serialport.py               ← 串口后端（pyserial 或零依赖 ctypes，优雅降级）
+│   ├── adapt.py                    ← ★ 确定性探测器：图形配置器工程 → projects/*.yaml
+│   ├── run.py                      ← ★ 事件驱动运行（`elab run --emit-events`）
+│   ├── kernel/                     ← ★ 事件流内核（只追加 JSONL、seq 单调、单写者）
 │   ├── ci.py                       ← CI 矩阵执行
 │   ├── skillgen.py                 ← 由 chip.yaml 生成 per-chip skill
 │   └── _yaml.py                    ← 零依赖 YAML 子集解析器
@@ -265,9 +317,21 @@ elab-flow/                          ← 项目根
 │   ├── artery/at32f421g8/SKILL.md
 │   └── st/stm32f103xb/SKILL.md
 │
-├── docs/                           ← 架构设计与验证报告
+├── cockpit/                        ← L7 闭环驾驶舱
+│   ├── server.py                   ← ★ 后端：stdlib HTTP + SSE（零第三方依赖）
+│   └── web/                        ← 前端工程（Vite + React + TS）
+│       ├── src/                    ← 三轨 + 环形缓冲日志渲染 + ctx.layout
+│       └── dist/                   ← ★ 构建产物，**已提交入仓**（最终用户不需要 Node）
+│
+├── tests/                          ← 测试
+│   ├── test_kernel_events.py       ← 事件流（seq 前缀性质 / 并发写 / 明文通道）
+│   ├── test_map_memory.py          ← .map → 内存口径
+│   └── it_cockpit_server.py        ← 后端集成 + 浏览器侧回归（真编译）
+│
+├── docs/                           ← 架构设计、验证报告、事件契约
 ├── examples/                       ← 示例工程（业务代码，elab 只读不改）
 │   ├── AT32_TEST/                  ← AT32F421G8U7 / Cortex-M4 / WorkBench / B 类
+│   ├── AT32F421G8U7/               ← 同上芯片的另一份导出（`elab adapt` 的验证样本）
 │   └── STM32_TEST/                 ← STM32F103xB / Cortex-M3 / CubeMX / A 类
 └── .work/                          ← 全部构建产物（git 忽略）
 ```
@@ -283,14 +347,21 @@ elab-flow/                          ← 项目根
 |---|---|
 | `elab list [--json]` | 列出主机 / 芯片 / 项目 |
 | `elab doctor [-p N] [--deep] [--json]` | 环境体检 + 两源漂移校验 |
-| `elab build -p N [--clean\|--all\|--dry-run] [-v]` | 编译 + 统一产出 elf/hex/bin + 零改动快照 |
+| `elab build [-p N\|--all] [--clean] [--dry-run] [--no-guard] [-j J] [-v]` | 编译 + 统一产出 elf/hex/bin/**map** + 零改动快照 |
 | `elab flash -p N [--dry-run] [--json]` | openocd 烧录 + `verify` |
 | `elab debug -p N [--run\|--verify]` | `--run` 交互式 gdb；`--verify` 非交互断到 main 自检 |
-| `elab loop -p N [--clean] [--no-debug] [--dry-run]` | ★ 一键闭环：doctor → build → flash → debug |
-| `elab ci [--onhw] [--job J\|-p N] [--json]` | 按 `ci/matrix.yaml` 跑 CI 矩阵 |
+| `elab monitor -p N [--port P] [--seconds S] [--reset-port] [--caps] [-q] [--json]` | ★ 串口闭环判据：读串口 → 判 `ok` / `failed` / `inconclusive` |
+| `elab loop -p N [--clean] [--no-debug] [--no-monitor] [--dry-run] [-v]` | ★ 一键闭环：doctor → build → flash → debug → monitor |
+| `elab run -p N [--steps S] [--emit-events] [--actor agent\|human] [--keep-going] …` | ★ 事件驱动运行：跑一串步骤，可选发射驾驶舱事件流 |
+| `elab ci [--onhw] [--job J\|-p N] [--clean] [--json]` | 按 `ci/matrix.yaml` 跑 CI 矩阵 |
 | `elab skill [--all\|-p N\|--chip C] [--json]` | 由 `chips/*.yaml` 生成 per-chip skill |
+| `elab adapt [path] [--probe\|--write\|--check\|--verify] [-n NAME] [--force]` | ★ 确定性适配图形配置器工程 → 生成 `projects/*.yaml`（带 `provenance` 证据链） |
+| `python -m cockpit.server [--port P] [--reload] [-v]` | ★ L7 闭环驾驶舱后端（零第三方依赖；`--reload` 只提供 API 不托管 dist） |
 
 全局：`--root` 覆盖 ELAB_ROOT，`--json` 机器可读输出（AI/CI 用）。
+
+`elab run` 的 `--steps` 可取：`doctor` / `doctor_deep` / `build` / `flash` / `debug_verify` / `monitor`
+（默认 `doctor,build`；默认失败即停，`--keep-going` 改为继续）。
 
 `--json` 契约示例：
 
@@ -300,10 +371,14 @@ elab-flow/                          ← 项目根
     "memory": { "FLASH": {"used":4840,"region":65536,"pct":7.39},
                 "RAM":   {"used":1576,"region":16384,"pct":9.62} },
     "size": { "text": 4828, "data": 12, "bss": 1572 },
-    "artifacts": { "elf": {...}, "hex": {...}, "bin": {...} },
+    "artifacts": { "elf": {...}, "hex": {...}, "bin": {...}, "map": {...} },
     "guard": { "untouched": true, "files_before": 153,
                "added": [], "removed": [], "changed": [] } } ]
 ```
+
+> `artifacts.map` 由 **elab 自己盖章**（`plan.py` 下传 `-DELAB_MAP_FILE=<abs>`，
+> `gcc.cmake` 与 `inject.cmake` 用同一变量），不再依赖工程自带工具链是否碰巧带上 `-Wl,-Map`。
+> 内存占位也随之多了一条不依赖链接器输出的口径：增量构建未 relink 时从 `.map` 反推。
 
 ---
 
@@ -430,16 +505,27 @@ $ ./elab ci
 
 ## 9. 已实测证据（真实硬件）
 
-| 项 | AT32_TEST | STM32_TEST |
-|---|---|---|
-| 芯片 / 内核 | AT32F421G8U7 / Cortex-M4 | STM32F103xB / Cortex-M3 |
-| 工程形态 | B 类（WorkBench） | A 类（CubeMX） |
-| 编译 | ✅ `[28/28] Linking C executable TEST.elf` | ✅ `[37/37] Linking C executable TEST.elf` |
-| FLASH | 4840 B / 64 KB = **7.39%** | 37780 B / 64 KB = **57.65%** |
-| RAM | 1576 B / 16 KB = **9.62%** | 8712 B / 20 KB = **42.54%** |
-| 零改动 | ✅ 153 文件未触碰 | ✅ 1145 文件未触碰 |
-| 烧录 | ✅ `Verified OK`（读回逐字节比对） | ⚠️ 未上板（需 STM32 板） |
-| 调试 | ✅ 断在 `main.c:78`，`pc=0x8000ecc <main+4>` | ⚠️ 未上板 |
+| 项 | AT32_TEST | STM32_TEST | at32f421g8u7 ★ |
+|---|---|---|---|
+| 芯片 / 内核 | AT32F421G8U7 / Cortex-M4 | STM32F103xB / Cortex-M3 | AT32F421G8U7 / Cortex-M4 |
+| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（WorkBench，另一份导出） |
+| 接入方式 | 手写 `projects/*.yaml` | 手写 `projects/*.yaml` | **`elab adapt` 自动生成**（带 `provenance` 证据链） |
+| 编译 | ✅ `[28/28] Linking C executable TEST.elf` | ✅ `[37/37] Linking C executable TEST.elf` | ✅ 一次通过（6.7s） |
+| FLASH | 4840 B / 64 KB = **7.39%** | 37780 B / 64 KB = **57.65%** | 11788 B / 64 KB = **17.99%** |
+| RAM | 1576 B / 16 KB = **9.62%** | 8712 B / 20 KB = **42.54%** | 2008 B / 16 KB = **12.26%** |
+| 零改动 | ✅ 153 文件未触碰 | ✅ 1145 文件未触碰 | ✅ 99 文件未触碰 |
+| 产物 | elf/hex/bin/map | elf/hex/bin/map | elf 328900 B · hex 33226 B · bin 11788 B · **map 324896 B**（`memory_source=map`） |
+| 烧录 | ✅ `Verified OK`（读回逐字节比对） | ⚠️ 未上板（需 STM32 板） | ⚠️ 未上板 |
+| 调试 | ✅ 断在 `main.c:78`，`pc=0x8000ecc <main+4>` | ⚠️ 未上板 | ⚠️ 未上板 |
+
+`at32f421g8u7` 是第三个样本，价值在于：**它的 `projects/*.yaml` 不是人写的**，而是
+`elab adapt` 从工程结构里确定性探测出来的（`--verify` 跑三绿灯：`doctor --deep` +
+`build` + `guard.untouched`），文末 `provenance` 逐条记「结论 ← 哪个文件的什么内容」。
+这证明"接一颗新芯片"可以被机器完成，而不只是被机器辅助。
+
+**驾驶舱（L7）实测**：真浏览器里点「跑全闭环」，实时日志滚动到 36 行、状态 `ok`、
+徽标/元信息/DOM 行数三者一致、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP**、
+零改动守卫可见、**页面与控制台零报错**。
 
 探针：AT-Link（CMSIS-DAP FW 0253），`SWD DPIDR 0x2ba01477`。
 芯片报出的主 flash `0x10000` 与 `chip.yaml` 的声明**一致** —— doctor 的内存校验与硬件吻合。
@@ -470,6 +556,11 @@ $ ./elab ci
 | C14 | debug 的 openocd 后台进程必须 `finally terminate()` | 否则占住 3333 端口 |
 | C15 | SVD：**chip 声明文件名 + host 声明搜索根** | 禁止在 chip.yaml 写主机绝对路径 |
 | C16 | CI 与本地共用同一份 `matrix.yaml` | 否则必然"本地绿、CI 红" |
+| C17 | 事件流**单写者**：只有 `elab run --emit-events` 一个进程写；`seq` 分配与落盘必须在**同一把锁**内 | 唯有如此，磁盘上的事件才恒为连续 `seq` 前缀 —— 重放/断线续传才成立。取消时父进程补 `run/cancel` 是**唯一豁免**（前置条件：写者已死） |
+| C18 | SSE 是**命名事件**：新增 topic 必须**两端同时**改 `SSE_TOPICS` + `KNOWN_TOPICS` | `EventSource.onmessage` 只接收**没有 `event:` 字段**的帧；漏一个 topic = 该 topic 全部事件在浏览器里静默消失。**实测事故**：漏了 `proc/stdout-batch` → 实时编译日志 100% 不可见（而 run 结束后重放却正常，极易误判）。守卫：`test_known_topics_covers_server_emitted` |
+| C19 | HTTP/1.1 keep-alive 下，**每条请求**都要重置 handler 的实例级标志 | 一个 handler **实例**服务的是一整条**连接**。`_sent_headers` 不重置 → 第二条请求起一个字节都不写：页面 `readyState` 卡 `interactive`、控制台**零报错**，而 curl（每次新连接）全绿 |
+| C20 | 日志**不进 React 树**；且"列表为空"的判据必须能识别"**被清空**" | 上万行走进 reconciler 会卡死；`clearAll()` 既不改"被裁计数"也不满足"指针越界"，只按这两条判会**既不重建也不追加** → 切工程后显示的还是上一次的日志 |
+| C21 | `/api/runs.active` 只能是**活着的** run；登记簿 ≠ 活动列表 | 登记簿要保留已结束的条目（SSE 靠它判"已结束→重放完收尾"），但把它当活动列表返回会让前端挂到**最早那条已结束的 run**（症状：跑新 run 显示旧 run 的日志） |
 
 ---
 
@@ -478,8 +569,13 @@ $ ./elab ci
 | 项 | 状态 | 说明 |
 |---|---|---|
 | STM32 上板烧录/调试 | ⚠️ 未验证 | 本机接的是 AT32 板；命令已生成（只差 target cfg） |
+| `at32f421g8u7` 上板 | ⚠️ 未验证 | `doctor --deep` + `build` + `guard` 三绿灯已过；未烧录 |
 | GitHub Actions 云端运行 | ✅ **已验证** | `host-gate` 在 `ubuntu-latest` 上全绿（见 §8.1）；`onhw-gate` 仍需 self-hosted 探针 |
-| `elab monitor`（串口） | ❌ 未实现 | 标准库无跨平台串口；接受 pyserial 依赖还是写 ctypes 实现，待决策 |
+| `elab monitor`（串口读） | ⚠️ **实现完成、真机未读通** | 判据引擎（`close_on` / `fail_on` / 静默超时 → `ok`/`failed`/`inconclusive`）已实现且单测 12/12；后端支持 pyserial（可选）或零依赖 ctypes，缺失时优雅降级。本机真机读串口未打通：探针是**复合设备**，其虚拟串口与 SWD 同源，`openocd` 占用后端口被独占（`ERROR_ACCESS_DENIED`），需先软复位（`elab monitor --reset-port`） |
+| 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ❌ 未实现 | M3 范围；当前输入框明确置灰并注明"将在 M3 落地"，不做假按钮 |
+| 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
+| 前端产物一致性守卫（CI job） | ❌ 未实现 | `.gitattributes` 已就位；`web-dist-guard`（重 build 后 `git diff --exit-code cockpit/web/dist/`）尚未加入工作流 |
+| `stream/overrun`（背压截断事件） | ❌ 未实现 | 契约 §6.2 已规定语义（队列溢出时先丢 `proc/*`、补发一条截断提示），服务端**尚未发出**该事件 |
 | SVD 在 IDE 中实际加载 | ⚠️ 未验证 | 路径已解析正确，IDE 寄存器视图未实测 |
 
 ---
@@ -494,14 +590,19 @@ $ ./elab ci
 | `docs/干跑验证报告_STM32与跨芯片.md` | 跨芯片验证（C5–C7 的来源） |
 | `docs/干跑验证报告_CLI实现.md` | CLI 落地（C8–C11 的来源） |
 | `docs/干跑验证报告_上板闭环.md` | 上板闭环 + CI + Skill（C12–C16 的来源） |
+| `docs/ICD_cockpit_events.md` | ★ **事件契约（ICD v1）**：topic 全集、事件信封、SSE 帧格式、兼容性承诺 |
+| `docs/技术方案_闭环驾驶舱.md` | ★ **驾驶舱方案与实现记录**：决策 D1–D6、约束 N1–N12、串口闭环判据 §16、前端实现记录 §20 |
 
 ---
 
 ## 13. 设计边界（再强调一次）
 
-- **对象是"工作链"，不是"代码"**：elab 负责 configure / build / flash / debug / CI / AI 六件事。
+- **对象是"工作链"，不是"代码"**：elab 负责 configure / build / flash / debug / monitor / CI / AI / **事件流** 八件事。
 - **三个收敛点**：主机路径 → `elab.host.yaml`；芯片差异 → `chips/*.yaml`；工程接入 → `projects/*.yaml`。
 - **两个技术支点**：`-DCMAKE_TOOLCHAIN_FILE` + `-DCMAKE_PROJECT_INCLUDE`（不改源码）；
   `openocd + gdb` CLI（不依赖任何 IDE 插件 / 平台插件）。
+- **两条"看不出来"的边界**：① 业务代码**一个字不改**，用文件树快照证明（`guard.untouched`）；
+  ② 每一步都在**只追加事件流**里留痕，"此刻在哪一步"由事件决定，而不是由界面自己猜
+  （Model-visible means logged）。
 - **验收标准**：同一句 `elab build/flash -p X`，对不同厂商、不同内核、不同生成器的工程同样成立，
   且业务工程文件树恒为 `untouched`。

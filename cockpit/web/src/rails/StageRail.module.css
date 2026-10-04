@@ -1,0 +1,359 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow: auto;
+  background: var(--elab-bg-canvas);
+}
+
+/* ── 空态 ── */
+.empty {
+  margin: auto;
+  padding: var(--elab-space-5);
+  text-align: center;
+  max-width: 34rem;
+}
+.emptyTitle {
+  margin: 0 0 var(--elab-space-2);
+  font-size: var(--elab-fs-lg);
+  color: var(--elab-fg-secondary);
+}
+.emptyHint {
+  margin: 0;
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-faint);
+  line-height: 1.7;
+}
+
+/* ── 顶栏 ── */
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-3);
+  padding: var(--elab-space-3) var(--elab-space-4);
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.headMain {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  min-width: 0;
+}
+
+.projName {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-lg);
+  font-weight: 700;
+  color: var(--elab-fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headSide {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.runId {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+.elapsed {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── R1 状态带 ── */
+.band {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  padding: var(--elab-space-3) var(--elab-space-4);
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+}
+
+.bandItem {
+  display: inline-flex;
+  align-items: center;
+}
+
+.bandNode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 2px;
+  border-radius: var(--elab-radius-sm);
+}
+
+.bandLabel {
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-muted);
+}
+
+.bandRunning {
+  color: var(--elab-status-run);
+  font-weight: 700;
+}
+.bandOk {
+  color: var(--elab-fg-primary);
+}
+.bandFail {
+  color: var(--elab-status-fail);
+  font-weight: 700;
+}
+.bandIdle {
+  color: var(--elab-fg-faint);
+}
+
+.bandDur {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 连接线：把"步骤序列"读成一串，而不是一堆孤立的点 */
+.connector {
+  width: 20px;
+  height: 1px;
+  margin: 0 2px;
+  background: var(--elab-border-strong);
+  flex: 0 0 20px;
+}
+.connOk {
+  background: var(--elab-status-ok);
+}
+.connFail {
+  background: var(--elab-status-fail);
+}
+
+/* ── 控制条 ── */
+.bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-3) var(--elab-space-4);
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+}
+.barSpacer {
+  flex: 1 1 auto;
+}
+
+/* ── 区块 ── */
+.sect {
+  flex: 0 0 auto;
+  padding: var(--elab-space-3) var(--elab-space-4);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.sectTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  margin: 0 0 var(--elab-space-2);
+  font-size: var(--elab-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--elab-fg-muted);
+}
+
+.sectIcon {
+  width: 12px;
+  color: var(--elab-fg-muted);
+}
+
+.none {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  line-height: 1.6;
+}
+
+.warnRow {
+  margin-top: var(--elab-space-2);
+  padding: var(--elab-space-2);
+  border-radius: var(--elab-radius-sm);
+  background: color-mix(in srgb, var(--elab-status-run) 12%, transparent);
+  color: var(--elab-status-run);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.6;
+}
+
+code {
+  font-family: var(--elab-font-mono);
+  font-size: 0.94em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--elab-bg-hover);
+}
+
+/* ── 产物 ── */
+.artList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.artRow {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  align-items: baseline;
+  gap: var(--elab-space-2);
+  min-width: 0;
+}
+
+.artKey {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  text-transform: uppercase;
+}
+
+/* ── 守卫 ── */
+.guardRow {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.guardText {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guardList {
+  list-style: none;
+  margin: var(--elab-space-2) 0 0;
+  padding: 0;
+}
+
+.guardFile {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-fail);
+  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 账本 ── */
+.ledger {
+  border-bottom: 0;
+}
+
+.ledgerBody {
+  margin: 0 calc(-1 * var(--elab-space-2));
+}
+
+.ledStep {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-primary);
+  font-weight: 600;
+}
+
+.ledDetail {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ledDur {
+  flex: 0 0 auto;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detailLine {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.evList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evRow {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  padding-left: 10px;
+  position: relative;
+  word-break: break-word;
+}
+.evRow::before {
+  content: "·";
+  position: absolute;
+  left: 2px;
+  color: var(--elab-fg-faint);
+}
+
+.verdictRow {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  margin-top: var(--elab-space-2);
+  padding-top: var(--elab-space-2);
+  border-top: 1px dashed var(--elab-border);
+}
+
+.verdictKey {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+.verdictDetail {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

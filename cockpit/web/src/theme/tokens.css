@@ -1,0 +1,149 @@
+/* ══════════════════════════════════════════════════════════════════
+   elab 设计令牌（§15.4）—— 分两层，**第二层才是主题开关**
+
+   规则（写进 §15.4 的硬规则）：
+     1. 组件里禁止字面色值（除 currentColor）——一律走 var(--elab-*)；
+     2. ANSI 16 色**必须**按主题各映射一套，否则暗色下编译器输出看不清
+        （这是最容易踩的坑）；
+     3. 字号由 --elab-font-scale 一处控制全局；
+     4. 三态 light / dark / system，data-theme 挂在 <html>。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── 第一层：原色（palette）—— 一般不改 ────────────────────────── */
+:root {
+  --elab-c-blue-300: #7fb4e8;
+  --elab-c-blue-500: #378add;
+  --elab-c-blue-700: #185fa5;
+  --elab-c-green-300: #a5d16b;
+  --elab-c-green-500: #639922;
+  --elab-c-green-700: #3b6d11;
+  --elab-c-amber-300: #f6c667;
+  --elab-c-amber-500: #ef9f27;
+  --elab-c-amber-700: #b3701a;
+  --elab-c-red-300: #ef8b8a;
+  --elab-c-red-500: #e24b4a;
+  --elab-c-red-700: #a32f2e;
+  --elab-c-gray-50: #f8f7f4;
+  --elab-c-gray-100: #f1efe8;
+  --elab-c-gray-200: #e3e0d6;
+  --elab-c-gray-400: #a8a49a;
+  --elab-c-gray-600: #6b6b6b;
+  --elab-c-gray-800: #2c2c2a;
+  --elab-c-gray-850: #232322;
+  --elab-c-gray-900: #1a1a1a;
+  --elab-c-gray-950: #131312;
+
+  --elab-font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei",
+    sans-serif;
+  --elab-font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas,
+    "Courier New", monospace;
+
+  --elab-font-scale: 1;
+  --elab-fs-xs: calc(11px * var(--elab-font-scale));
+  --elab-fs-sm: calc(12px * var(--elab-font-scale));
+  --elab-fs-md: calc(13px * var(--elab-font-scale));
+  --elab-fs-lg: calc(15px * var(--elab-font-scale));
+  --elab-fs-xl: calc(18px * var(--elab-font-scale));
+
+  --elab-radius-sm: 4px;
+  --elab-radius: 8px;
+  --elab-radius-lg: 12px;
+  --elab-space-1: 4px;
+  --elab-space-2: 8px;
+  --elab-space-3: 12px;
+  --elab-space-4: 16px;
+  --elab-space-5: 24px;
+}
+
+/* ── 第二层：语义别名（alias）—— 主题切换只动这一层 ────────────── */
+:root[data-theme="light"] {
+  --elab-bg-canvas: var(--elab-c-gray-100);
+  --elab-bg-surface: #ffffff;
+  --elab-bg-sunken: var(--elab-c-gray-100);
+  --elab-bg-raised: #ffffff;
+  --elab-bg-hover: rgba(0, 0, 0, 0.04);
+  --elab-bg-active: rgba(0, 0, 0, 0.07);
+  --elab-bg-code: #f8f7f4;
+
+  --elab-fg-primary: var(--elab-c-gray-900);
+  --elab-fg-secondary: #4a4a48;
+  --elab-fg-muted: var(--elab-c-gray-600);
+  --elab-fg-faint: var(--elab-c-gray-400);
+  --elab-fg-inverse: #ffffff;
+
+  --elab-border: rgba(0, 0, 0, 0.14);
+  --elab-border-strong: rgba(0, 0, 0, 0.26);
+  --elab-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.05);
+
+  --elab-accent: var(--elab-c-blue-700);
+  --elab-accent-bg: rgba(55, 138, 221, 0.12);
+  --elab-status-ok: var(--elab-c-green-700);
+  --elab-status-run: var(--elab-c-amber-700);
+  --elab-status-fail: var(--elab-c-red-700);
+  --elab-status-idle: var(--elab-c-gray-400);
+  --elab-shimmer: rgba(255, 255, 255, 0.65);
+
+  /* ANSI 16 色 —— 浅色主题一套 */
+  --elab-ansi-black: #3b3b38;
+  --elab-ansi-red: #c0392b;
+  --elab-ansi-green: #2e7d32;
+  --elab-ansi-yellow: #9a6700;
+  --elab-ansi-blue: #185fa5;
+  --elab-ansi-magenta: #8e3fa8;
+  --elab-ansi-cyan: #0e7490;
+  --elab-ansi-white: #6b6b6b;
+  --elab-ansi-bright-black: #6b6b6b;
+  --elab-ansi-bright-red: #e24b4a;
+  --elab-ansi-bright-green: #4c9a2a;
+  --elab-ansi-bright-yellow: #b3701a;
+  --elab-ansi-bright-blue: #378add;
+  --elab-ansi-bright-magenta: #b060cc;
+  --elab-ansi-bright-cyan: #0891b2;
+  --elab-ansi-bright-white: #1a1a1a;
+}
+
+:root[data-theme="dark"] {
+  --elab-bg-canvas: var(--elab-c-gray-950);
+  --elab-bg-surface: var(--elab-c-gray-900);
+  --elab-bg-sunken: #0f0f0e;
+  --elab-bg-raised: var(--elab-c-gray-850);
+  --elab-bg-hover: rgba(255, 255, 255, 0.06);
+  --elab-bg-active: rgba(255, 255, 255, 0.1);
+  --elab-bg-code: #101010;
+
+  --elab-fg-primary: #eceae3;
+  --elab-fg-secondary: #bdbab1;
+  --elab-fg-muted: #8e8b83;
+  --elab-fg-faint: #6b6963;
+  --elab-fg-inverse: var(--elab-c-gray-950);
+
+  --elab-border: rgba(255, 255, 255, 0.11);
+  --elab-border-strong: rgba(255, 255, 255, 0.22);
+  --elab-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 18px rgba(0, 0, 0, 0.32);
+
+  --elab-accent: var(--elab-c-blue-300);
+  --elab-accent-bg: rgba(55, 138, 221, 0.2);
+  --elab-status-ok: var(--elab-c-green-300);
+  --elab-status-run: var(--elab-c-amber-300);
+  --elab-status-fail: var(--elab-c-red-300);
+  --elab-status-idle: #5c5a55;
+  --elab-shimmer: rgba(255, 255, 255, 0.16);
+
+  /* ANSI 16 色 —— 暗色主题**另给一套**（§15.4 规则 2） */
+  --elab-ansi-black: #4a4842;
+  --elab-ansi-red: #ef8b8a;
+  --elab-ansi-green: #a5d16b;
+  --elab-ansi-yellow: #f6c667;
+  --elab-ansi-blue: #7fb4e8;
+  --elab-ansi-magenta: #d9a0e8;
+  --elab-ansi-cyan: #6fd3e8;
+  --elab-ansi-white: #c8c5bc;
+  --elab-ansi-bright-black: #8e8b83;
+  --elab-ansi-bright-red: #ff9f9e;
+  --elab-ansi-bright-green: #c2e58f;
+  --elab-ansi-bright-yellow: #ffd98a;
+  --elab-ansi-bright-blue: #a5ccf4;
+  --elab-ansi-bright-magenta: #eabcf5;
+  --elab-ansi-bright-cyan: #9ee4f2;
+  --elab-ansi-bright-white: #f2f0ea;
+}

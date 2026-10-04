@@ -19,7 +19,10 @@ import sys
 
 from . import __version__
 from .config import Config, ElabError, Host
-from . import builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
+from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
+from . import monitor as monitor_mod
+from . import run as run_mod
+from . import serialport as serialport_mod
 from . import skillgen
 from .plan import plan_for
 
@@ -68,13 +71,26 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--verify", action="store_true",
                    help="非交互自检：断到 main 后打印证据并退出")
 
-    p = sub.add_parser("loop", help="一键闭环：doctor → build → flash → debug")
+    p = sub.add_parser("loop", help="一键闭环：doctor → build → flash → debug → monitor")
     _add_common(p)
     p.add_argument("-p", "--project", required=True, help="项目名")
     p.add_argument("--clean", action="store_true", help="先清空工作目录")
     p.add_argument("--no-debug", action="store_true", help="跳过 debug 自检")
+    p.add_argument("--no-monitor", action="store_true", help="跳过串口闭环判据")
     p.add_argument("--dry-run", action="store_true", help="只跑到 build，不烧录")
     p.add_argument("-v", "--verbose", action="store_true")
+
+    p = sub.add_parser("monitor",
+                       help="串口闭环判据：读串口 → 判 ok / failed / inconclusive")
+    _add_common(p)
+    p.add_argument("-p", "--project", required=True, help="项目名")
+    p.add_argument("--port", help="覆盖 serial.port（默认取 projects/*.yaml 的 auto）")
+    p.add_argument("--seconds", type=float, default=0.0,
+                   help="观察窗口秒数（默认取 close_on.within_s）")
+    p.add_argument("-q", "--quiet", action="store_true", help="不回显收到的每一行")
+    p.add_argument("--reset-port", action="store_true",
+                   help="先尝试软复位该 USB 设备（等价拔插一次 DAP-Link，通常需管理员权限）")
+    p.add_argument("--caps", action="store_true", help="只打印串口后端能力并退出")
 
     p = sub.add_parser("ci", help="按 ci/matrix.yaml 跑 CI 矩阵")
     _add_common(p)
@@ -84,11 +100,47 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--clean", action="store_true", help="先清空工作目录")
     p.add_argument("-v", "--verbose", action="store_true")
 
+    p = sub.add_parser("run",
+                       help="事件驱动运行：跑一串步骤并可选地发射 cockpit 事件流")
+    _add_common(p)
+    p.add_argument("-p", "--project", required=True, help="项目名")
+    p.add_argument("--steps", help=f"逗号分隔，默认 {','.join(run_mod.DEFAULT_STEPS)}"
+                                   f"（可选：{','.join(run_mod.ALL_STEPS)}）")
+    p.add_argument("--emit-events", action="store_true",
+                   help="把事件写成只追加 JSONL（驾驶舱跟读它；见 docs/ICD_cockpit_events.md）")
+    p.add_argument("--events-dir", help="覆盖运行产物目录（默认 .work/.cockpit/runs）")
+    p.add_argument("--run-id", help="指定 run id（默认自动分配 r-<8hex>）")
+    p.add_argument("--actor", choices=["agent", "human"], default="agent",
+                   help="这条时间线上是谁在操作（契约要求每条事件都在位）")
+    p.add_argument("--clean", action="store_true", help="build 前清空工作目录")
+    p.add_argument("-j", "--jobs", type=int, help="并行任务数")
+    p.add_argument("-v", "--verbose", action="store_true", help="透传子进程输出")
+    p.add_argument("-q", "--quiet", action="store_true", help="不回显逐行输出")
+    p.add_argument("--keep-going", action="store_true",
+                   help="失败也继续跑后续步骤（默认失败即停）")
+
     p = sub.add_parser("skill", help="由 chips/*.yaml 生成 per-chip AI skill")
     _add_common(p)
     p.add_argument("-p", "--project", help="按项目推导芯片")
     p.add_argument("--chip", help="按 vendor/id 指定芯片")
     p.add_argument("--all", action="store_true", help="为所有芯片生成")
+
+    p = sub.add_parser("adapt",
+                       help="一键适配图形配置器导出的工程（确定性探测 → 生成 projects/*.yaml）")
+    _add_common(p)
+    p.add_argument("path", nargs="?", default=".",
+                   help="要适配的工程目录（须含 CMakeLists.txt）")
+    p.add_argument("-n", "--name", help="项目名（默认由目录名推导）")
+    p.add_argument("--probe", action="store_true", help="只探测并打印结论（默认行为）")
+    p.add_argument("--write", action="store_true", help="生成 projects/<name>.yaml")
+    p.add_argument("--check", action="store_true",
+                   help="幂等校验：已适配且与重新探测一致 → no-op（CI 守卫用）")
+    p.add_argument("--verify", action="store_true",
+                   help="适配后跑三绿灯：doctor --deep + build + guard.untouched")
+    p.add_argument("--force", action="store_true",
+                   help="存在未决项 / 人工改动时仍写入（覆盖前自动 .bak）")
+    p.add_argument("--clean", action="store_true", help="--verify 时先清空工作目录")
+    p.add_argument("-v", "--verbose", action="store_true", help="--verify 时透传子进程输出")
 
     return ap
 
@@ -123,8 +175,14 @@ def _dispatch(args) -> int:
         return cmd_loop(cfg, args)
     if args.cmd == "ci":
         return cmd_ci(cfg, args)
+    if args.cmd == "run":
+        return cmd_run(cfg, args)
     if args.cmd == "skill":
         return cmd_skill(cfg, args)
+    if args.cmd == "adapt":
+        return cmd_adapt(cfg, args)
+    if args.cmd == "monitor":
+        return cmd_monitor(cfg, args)
     return 2
 
 
@@ -266,14 +324,54 @@ def cmd_debug(cfg: Config, args) -> int:
     return 0 if res["status"] in ("ok", "printed") else 1
 
 
+# ── monitor：串口闭环判据 ─────────────────────────────────────────
+def cmd_monitor(cfg: Config, args) -> int:
+    """退出码：0=ok，1=failed，2=inconclusive（★ 三态各有码，才能区分"没证据"与"失败"）。"""
+    if args.caps:
+        caps = serialport_mod.capabilities()
+        ports, backend = serialport_mod.list_ports()
+        data = {"capabilities": caps, "backend": backend,
+                "ports": [{"name": p.name, "kind": p.kind, "device": p.device,
+                           "desc": p.desc} for p in ports]}
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return 0 if caps["available"] else 2
+        print(f"[monitor] 串口后端 layer={caps['layer']}  "
+              f"pyserial={caps['pyserial']}  win32={caps['win32_ctypes']}  "
+              f"可用={caps['available']}")
+        if caps.get("hint"):
+            print(f"          {caps['hint']}")
+        print(f"[monitor] 枚举（backend={backend}，已去重）：")
+        for p in ports:
+            print(f"          {p}")
+        chosen, why, _ = serialport_mod.select_port("auto", ports)
+        print(f"[monitor] auto → {chosen or '(无)'}：{why}")
+        return 0 if caps["available"] else 2
+
+    silent = (lambda *a, **k: None) if args.json else print
+    v = monitor_mod.run(cfg, args.project, port=args.port or "",
+                        seconds=args.seconds, echo=not args.quiet,
+                        reset_port=args.reset_port, log=silent)
+    if args.json:
+        print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(monitor_mod.render(v))
+    return monitor_mod.exit_code(v)
+
+
 # ── loop：一键闭环 ────────────────────────────────────────────────
 def cmd_loop(cfg: Config, args) -> int:
-    """doctor → build → flash → debug(verify)，一条命令走完闭环。"""
+    """doctor → build → flash → debug → monitor，一条命令走完闭环。
+
+    ★ 阶段顺序不是随意的：monitor 必须在 flash/debug **之后** ——
+      DAP-Link 是复合 USB 设备，openocd 占着 SWD 时它的虚拟串口打不开（约束 N5）。
+    """
     name = args.project
     steps = []
+    n_steps = 4 if args.no_monitor else 5
 
     def step(no, title):
-        print(f"\n{'=' * 62}\n[{no}/4] {title}\n{'=' * 62}")
+        print(f"\n{'=' * 62}\n[{no}/{n_steps}] {title}\n{'=' * 62}")
 
     # ① doctor
     step(1, f"doctor —— 环境体检 + 漂移校验（{name}）")
@@ -317,11 +415,32 @@ def cmd_loop(cfg: Config, args) -> int:
     else:
         steps.append(("debug", None))
 
+    # ⑤ monitor：串口闭环判据（必须排在 openocd 之后，见约束 N5）
+    mon_status = None
+    if not args.no_monitor:
+        step(5, "monitor —— 串口闭环判据（close_on / fail_on）")
+        v = monitor_mod.run(cfg, name, echo=not args.json)
+        print(monitor_mod.render(v))
+        if v.status == "failed":
+            mon_status = False
+        elif v.status == "ok":
+            mon_status = True
+        else:
+            mon_status = "inconcl"      # ★ 无证据 ≠ 失败，不中断闭环
+        steps.append(("monitor", mon_status))
+
     print(f"\n{'=' * 62}")
+    failed = False
     for s, ok in steps:
-        mark = "✓" if ok else ("—" if ok is None else "✗")
-        print(f"  [{mark}] {s}")
+        mark = {True: "✓", False: "✗", None: "—", "inconcl": "?"}.get(ok, "?")
+        extra = "  (无结论：未见约定关键字)" if ok == "inconcl" else ""
+        print(f"  [{mark}] {s}{extra}")
+        if ok is False:
+            failed = True
     print(f"{'=' * 62}")
+    if failed:
+        print(f"[elab] ✗ 闭环未通过：{name}")
+        return 1
     print(f"[elab] ✓✓ 闭环完成：{name}")
     return 0
 
@@ -345,6 +464,32 @@ def cmd_ci(cfg: Config, args) -> int:
     return 0 if res["passed"] else 1
 
 
+# ── run：事件驱动运行 ─────────────────────────────────────────────
+def cmd_run(cfg: Config, args) -> int:
+    """跑一串步骤，可选地把每一步写成事件。
+
+    退出码：0 = 全部步骤通过；1 = 有步骤失败。**与 `elab ci` 一致**，
+    方便驾驶舱/脚本直接看码而不必解析输出。
+    """
+    res = run_mod.run(
+        cfg, args.project,
+        steps=args.steps, clean=args.clean, jobs=args.jobs,
+        verbose=args.verbose, actor=args.actor,
+        emit_events=args.emit_events, run_id=args.run_id,
+        echo=not args.quiet, runs_dir=args.events_dir,
+        keep_going=args.keep_going,
+    )
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print()
+        print(run_mod.render(res))
+        if args.emit_events:
+            print(f"[elab] 事件 → {res['events']['state']}")
+            print(f"       跟读 → {res['events']['proc']}")
+    return 0 if res["ok"] else 1
+
+
 # ── skill：生成 per-chip AI skill ─────────────────────────────────
 def cmd_skill(cfg: Config, args) -> int:
     silent = (lambda *a, **k: None) if args.json else print
@@ -354,6 +499,102 @@ def cmd_skill(cfg: Config, args) -> int:
         print(json.dumps(written, ensure_ascii=False, indent=2))
     else:
         print(f"[elab] 已生成 {len(written)} 份 per-chip skill（内容源自 chips/*.yaml）")
+    return 0
+
+
+# ── adapt：一键适配 ───────────────────────────────────────────────
+def cmd_adapt(cfg: Config, args) -> int:
+    """探测 →（可选）写接入文件 →（可选）三绿灯自证。
+
+    退出码约定（供 CI / agent 消费）：
+      probe  : 0 = 可适配；1 = T3（无 CMakeLists.txt，需真改造）
+      write  : 0 = written/identical；1 = 被拒（未决项）/ differs / hand-edited
+      check  : 0 = identical；1 = drift/missing
+      verify : 0 = 三绿灯全过
+    """
+    silent = (lambda *a, **k: None) if args.json else print
+
+    if args.verify:
+        rc = _adapt_verify(cfg, args, silent)
+        return rc
+
+    res = adapt_mod.run(cfg, path=args.path, name=args.name or "",
+                        write_it=args.write, check=args.check,
+                        force=args.force, log=silent)
+
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res.get("tier") != "T3" else 1
+
+    if res["tier"] == "T3":
+        return 1
+    if args.check:
+        return 0 if (res.get("result") or {}).get("status") == "identical" else 1
+    if args.write:
+        st = (res.get("result") or {}).get("status")
+        return 0 if st in ("written", "identical") else 1
+    return 0
+
+
+def _adapt_verify(cfg: Config, args, log) -> int:
+    """适配 → 重载配置 → 三绿灯：doctor --deep + build + guard.untouched。
+
+    这是「适配成功」的可证伪判据：不只看文件写没写出来，
+    还要证明①接入声明与环境自洽、②真能编译出 elf、③业务工程一个字节没动。
+    """
+    probe = adapt_mod.probe_project(cfg, args.path)
+    name = args.name or adapt_mod.default_name(probe)
+
+    log(f"{'=' * 62}\n[adapt 1/5] 确定性探测\n{'=' * 62}")
+    log(adapt_mod.render_probe(probe))
+    if probe.tier == "T3":
+        log("\n[adapt] ✗ T3：工程根目录没有 CMakeLists.txt，无法适配")
+        return 1
+
+    log(f"\n{'=' * 62}\n[adapt 2/5] 生成接入文件 projects/{name}.yaml\n{'=' * 62}")
+    wr = adapt_mod.write(cfg, probe, name=name, force=args.force, log=log)
+    if wr["status"] not in ("written", "identical"):
+        log(f"[adapt] ✗ 接入文件未就绪（status={wr['status']}）")
+        return 1
+
+    # 新增了 projects/*.yaml → 必须重载 Config 才能让 doctor/plan 看到它
+    cfg2 = Config(getattr(args, "root", None))
+    if name not in cfg2.projects:
+        log(f"[adapt] ✗ 重载后仍未发现项目 {name}（检查 {wr['path']} 的 name/root 字段）")
+        return 1
+
+    log(f"\n{'=' * 62}\n[adapt 3/5] doctor --deep —— 接入声明 vs 实际编译命令\n{'=' * 62}")
+    rep = doctor_mod.run(cfg2, only=name, deep=True)
+    log(rep.render())
+    if not rep.passed:
+        log(f"\n[adapt] ✗ 体检未通过（{len(rep.errors)} 项失败）")
+        return 1
+    log("[adapt] ✓ 体检通过")
+
+    log(f"\n{'=' * 62}\n[adapt 4/5] build —— 真编译 + 统一产物\n{'=' * 62}")
+    plan = plan_for(cfg2, name)
+    res = builder.build_project(plan, clean=args.clean, verbose=args.verbose, log=log)
+    log(builder.render_summary(res))
+    if res["status"] != "ok":
+        log(f"\n[adapt] ✗ 构建失败（{res['status']}）")
+        return 1
+
+    guard = res.get("guard") or {}
+    untouched = guard.get("untouched")
+
+    log(f"\n{'=' * 62}\n[adapt 5/5] 三绿灯判据\n{'=' * 62}")
+    def g(ok):
+        return "✓" if ok else "✗"
+    log(f"  [{g(rep.passed)}] doctor --deep        接入声明与环境自洽")
+    log(f"  [{g(res['status'] == 'ok')}] build               产出 {len(res.get('artifacts') or {})} 个产物")
+    log(f"  [{g(untouched)}] guard.untouched     业务工程零改动"
+        + ("" if untouched is None else
+           f"  (+{len(guard.get('added') or [])} -{len(guard.get('removed') or [])}"
+           f" ~{len(guard.get('changed') or [])})"))
+    if untouched is False:
+        log("\n[adapt] ✗ 业务工程被改动了 —— 违背「适配≠改造」，请检查构建是否写了源目录")
+        return 1
+    log(f"\n[adapt] ✓✓✓ 三绿灯达成：{name}")
     return 0
 
 
