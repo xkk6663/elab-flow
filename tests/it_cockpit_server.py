@@ -19,6 +19,7 @@ import json
 import re
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -83,6 +84,27 @@ class _Client:
                   headers={"Content-Type": "application/json",
                            "Content-Length": str(len(raw))})
         return c, c.getresponse()
+
+
+def _fake_roundtrip(cfg, name, **kw):
+    """假往返：**按真实现的形状调一次 `journal`**，让记录真的落到留档文件里。
+
+    ★ 为什么不干脆 `return_value=<结果>`：落盘这件事发生在 `roundtrip` **内部**
+      （`_journal` 回调），假返回值会把它整个绕过去 —— 那样测到的只是"路由没写坏"，
+      而不是"写一条真的会被记下来"。要让"落盘"可证伪，就得让它真的发生。
+    """
+    j = kw.get("journal")
+    port, baud = "COM9", kw.get("baud") or 115200
+    if j is not None:
+        j({"dir": "tx", "text": kw.get("data") or "", "ok": True, "written": 5,
+           "payload_bytes": 5, "hex": False, "newline": True,
+           "port": port, "baud": baud, "error": None})
+        for line in ("hi", "[alive] tick=7"):
+            j({"dir": "rx", "text": line, "ok": True, "port": port, "baud": baud})
+    return {"ok": True, "port": port, "baud": baud, "backend": "fake", "layer": "L1",
+            "written": 5, "payload_bytes": 5, "echoed": ["hi", "[alive] tick=7"],
+            "bytes_read": 9, "read_ms": 600, "elapsed_s": 0.6, "eol": "\r\n",
+            "error": None}
 
 
 def _read_sse(client: _Client, run_id: str, *, after: int = 0,
@@ -652,6 +674,78 @@ class CockpitIntegration(unittest.TestCase):
                 self.assertFalse(json.loads(r.read().decode())["ok"])
             finally:
                 cc.close()
+
+    # ── 手写通道的落盘留档（M3-b2）──────────────────────────────
+    def test_serial_console_info_in_capabilities(self):
+        """留档的位置与条数必须由服务端说 —— 界面猜不出来（本地缓冲重载即失）。"""
+        c = self.client.get_json("/api/capabilities")
+        info = c["serial"]["console"]
+        for k in ("path", "count", "max_records", "error"):
+            self.assertIn(k, info)
+        self.assertTrue(info["path"].endswith("serial-console.jsonl"),
+                        "console 与 run 产物同级，文件名固定")
+        self.assertIsInstance(info["count"], int)
+        self.assertGreaterEqual(info["max_records"], 1)
+        # 读不出文件不算致命 —— 该字段存在即可，不要求一定为 None
+        self.assertIsNone(info["error"], "读自己的留档不该失败")
+
+    def test_serial_write_lands_in_console_and_reads_back(self):
+        """★ 落盘的端到端判据：**写一条 → HTTP 读回来**。
+
+        只断言"文件里多了一行"是不够的 —— 真正要证明的是**读的那一路也通了**，
+        否则界面上的"服务端留档"永远是个空列表（本地写完、读不回来）。
+
+        用临时目录接管 `console_path_for`，避免把测试记录写进仓库真留档里。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "serial-console.jsonl"
+            with unittest.mock.patch.object(srv_mod.serialconsole_mod,
+                                            "console_path_for", return_value=path), \
+                    unittest.mock.patch.object(srv_mod.serialterm_mod, "roundtrip",
+                                               side_effect=_fake_roundtrip):
+                cc, r = self.client.post("/api/serial",
+                                         {"project": PROJECT, "data": "help"})
+                try:
+                    self.assertEqual(r.status, 200)
+                finally:
+                    cc.close()
+
+                got = self.client.get_json("/api/serial/console?limit=10")
+
+        self.assertEqual(got["count"], 3, "一对往返 = 1 条 tx + 2 条 rx 回显")
+        self.assertEqual(got["path"], srv_mod.to_fwd(path))
+        dirs = [x["dir"] for x in got["records"]]
+        self.assertEqual(dirs, ["tx", "rx", "rx"])
+        self.assertEqual(got["records"][0]["text"], "help")
+        self.assertTrue(got["records"][0]["ok"])
+        self.assertEqual(got["records"][1]["text"], "hi")
+        # ★ 每条都必须带 project：界面按工程过滤历史全靠它（端口会复用，工程不会）
+        self.assertEqual({x["project"] for x in got["records"]}, {PROJECT})
+
+    def test_serial_console_limit_is_clamped_and_validated(self):
+        """`limit` 三条边界：非法 → 400；0 → 抬到 1；超大 → 压到 MAX_RECORDS。
+
+        夹取而不是报错，是**刻意**的：`limit` 只影响"看多少行"，为它让整个请求
+        失败不划算；但非法类型（`limit=abc`）属于调用方写错了，必须响亮地报。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "serial-console.jsonl"
+            with unittest.mock.patch.object(srv_mod.serialconsole_mod,
+                                            "console_path_for", return_value=path):
+                cc, r = self.client.get("/api/serial/console?limit=abc")
+                try:
+                    self.assertEqual(r.status, 400)
+                    self.assertIn("limit", json.loads(r.read().decode())["error"])
+                finally:
+                    cc.close()
+
+                lo = self.client.get_json("/api/serial/console?limit=0")
+                hi = self.client.get_json("/api/serial/console?limit=999999999")
+                default = self.client.get_json("/api/serial/console")
+        self.assertEqual(lo["requested"], 1)
+        self.assertEqual(hi["requested"], srv_mod.serialconsole_mod.MAX_RECORDS)
+        self.assertEqual(default["requested"], srv_mod.serialconsole_mod.DEFAULT_TAIL)
+        self.assertEqual(lo["records"], [], "空留档不该编造记录")
 
 
 if __name__ == "__main__":
