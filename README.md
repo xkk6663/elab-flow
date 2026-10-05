@@ -208,10 +208,17 @@ python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方
 | 内存占位**取自 `.map`** | 增量构建不 relink 时链接器不输出 `--print-memory-usage`，`.map` 是唯一可得的口径（与链接器自报逐字节一致） |
 | 背压丢弃**留痕**（`stream/overrun`） | 客户端太慢时丢 `proc/*` 是允许的，但**不允许悄悄丢**：服务端如实报告损失，界面显示"服务端背压截断"。`run/*` 与 `stream/closed` 绝不丢 |
 | 只读**命令预览**（`GET /api/plan`、`elab run/loop --dry-run`） | `--clean` 会真删工作目录、flash 会真烧板 —— 按下前必须能看清"到底会执行什么"（约束 C26） |
+| 串口**手写通道**（`POST /api/serial`、`elab serial`）：写一条 → 收一段回显 | 串口是**独占资源**：常驻会话会与 `elab run` 的 monitor 互斥，且持口线程一旦僵死就没人释放（只能重启驾驶舱）。"无状态往返"把占用压进**一次请求**，天然与 monitor 串行（约束 C27） |
 
 **实测验收（真浏览器点「跑全闭环」，doctor + build）**：实时日志滚动到 36 行、
 状态 `ok`、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP** 齐全、
 零改动守卫 153 文件未触碰、**页面与控制台零报错**。
+
+**实测验收（串口手写通道，M3-b，真机 + 真浏览器）**：在证据轨「串口」Tab 输入
+`status` 回车 → 面板依次出现 `TX → status`、`✓ 已发送 8B → COM10@115200（ctypes/L1）`、
+`← [alive] tick=1235`（设备真的收到了，心跳照常）；波特率下拉可直接切
+（9600…921600）。同一条链路 `elab serial -p at32f421g8u7 --data help` 输出一致 ——
+**CLI 与界面共用 `serialterm.roundtrip()`，只有一份实现**。
 
 > 契约见 `docs/ICD_cockpit_events.md`，实现记录见 `docs/技术方案_闭环驾驶舱.md`。
 > ⚠️ 一条容易踩的硬约束：SSE 用的是**命名事件**，`EventSource.onmessage`
@@ -367,6 +374,7 @@ elab-flow/                          ← 项目根
 | `elab flash -p N [--dry-run] [--json]` | openocd 烧录 + `verify` |
 | `elab debug -p N [--run\|--verify]` | `--run` 交互式 gdb；`--verify` 非交互断到 main 自检 |
 | `elab monitor -p N [--port P] [--seconds S] [--reset-port] [--caps] [-q] [--json]` | ★ 串口闭环判据：读串口 → 判 `ok` / `failed` / `inconclusive` |
+| `elab serial -p N --data S [--port P] [--baud B] [--read-ms MS] [--no-newline] [--hex] [--json]` | ★ 串口**手写通道**（M3-b）：写一条 → 收一段回显。默认按文本发并附加 `CRLF`；`--hex` 按二进制发。退出码 `0`=写成功（**不代表**设备一定回应），`1`=写失败 |
 | `elab loop -p N [--clean] [--no-flash] [--no-debug] [--no-monitor] [--dry-run] [-v]` | ★ 一键闭环：doctor → build → flash → debug → monitor |
 | `elab run -p N [--steps S] [--emit-events] [--dry-run] [--clean] [-j J] [--actor agent\|human] [--keep-going] …` | ★ 事件驱动运行：跑一串步骤，可选发射驾驶舱事件流；`--dry-run` = **只读预览** |
 | `elab ci [--onhw] [--job J\|-p N] [--clean] [--json]` | 按 `ci/matrix.yaml` 跑 CI 矩阵 |
@@ -578,6 +586,7 @@ $ ./elab ci
 | 调试 | ✅ 断在 `main.c:78`，`pc=0x8000ecc <main+4>` | ⚠️ 未上板 | ✅ 断在 `main.c:103`，`pc=0x8001714 <main+4>` |
 | 串口闭环 | — | — | ✅ `monitor` OK：`COM10@115200`（排除 6 个蓝牙口），2.6s 内命中 `[alive] tick=N` |
 | **串口事件链到浏览器** | — | — | ✅ **真服务 + 真板子**：`serial/open`(id=6) → `serial/line`×2 → `serial/close` → `serial/closed-loop`(id=10, `verdict=ok`, `rule`/`evidence` 均非空) 全部以**命名帧**到达 SSE |
+| **串口手写通道**（M3-b） | — | — | ✅ **真机 + 真浏览器**：界面输入 `status` → `TX → status` / `✓ 已发送 8B → COM10@115200（ctypes/L1）` / `← [alive] tick=1235`；CLI `elab serial` 同源同结果 |
 | **全闭环** | ✅ 五步全绿 | ⚠️ 未上板 | ✅ **`elab loop` 五步全绿** |
 
 **"串口闭环落在时间线上"的一次完整验收**（`POST /api/run {at32f421g8u7, monitor}` + 真 SSE 客户端）：
@@ -647,6 +656,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | C24 | SSE 的**合并**判据只能用"**是进程输出**"（`is_batched`），**不许**用落盘通道分类 `is_activity` | 落盘通道把 `serial/*`/`stream/*` 也算了进去，而"合并"是**传输层**动作。**实测事故**：`serial/open`/`close`/`closed-loop` 没有 `line` 字段 → 被合并成一行**空文本** → 浏览器什么都收不到，且**只在实时路径**复现（REST 重放逐条成帧，刷新页面反而正常，与 C18/N12 同形）。守卫：`test_live_sse_keeps_domain_events_as_named_frames` |
 | C25 | 背压丢弃**必须留痕**（`stream/overrun`），且 `stream/closed` 属**控制帧**、与 `run/*` 同级不可丢 | 只 `dropped += 1` 而不发事件 = 服务端如实记了损失、界面一个像素都没变（"静默丢事件"的又一种形态）。`stream/closed` 的 `is_activity()` 为真，队列满时会被当可丢事件丢掉 → 浏览器唯一的"run 结束了"信号没了 → 界面**永远显示"运行中"**，唯一兜底是 ≈2 分钟后心跳断开重连（症状是"卡住"而不是"报错"） |
 | C26 | 只读预览（`--dry-run` / `GET /api/plan`）**不许另拼一份命令** | 预览的全部价值是"我说的就是待会儿真跑的"；两处分叉是**静默**的，而"预览说的和实跑不一样"比没有预览更坏。故 `builder.build_command()` 抽成函数、`flash`/`debug` 用 `allow_missing_elf=` 开预览口子 —— 命令构造始终只有一处 |
+| C27 | 串口写通道用**无状态往返**（open→write→read→close），**不做常驻会话**；且**不发射事件** | 串口**独占**：常驻会话会与 `elab run` 的 monitor 互斥，且持口线程一旦僵死就没人释放（只能重启驾驶舱）。无状态把占用压进一次请求，**天然与 monitor 串行**。不发射事件是因为写通道不属于任何 run（它与 monitor 互斥，没有可挂的 run 上下文）→ TX/RX 只在本机缓冲、**重载即失**，故用 `TX →`/`←` 前缀与可重放的事件行区分。★ 与 `flash`/`debug_verify`/`monitor` 几步**互斥**：那几步占串口/SWD（N5），检测到就返回 409 并**指名道姓**（否则用户只看到 `ERROR_ACCESS_DENIED`，只会去拔插） |
 
 ---
 
@@ -662,7 +672,8 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | `serial/*` 事件链 + `serial/closed-loop` 时间线 | ✅ **已验证（M3-a）** | `monitor.run()` 三个回调 → `run.py` 发 `serial/open` → `serial/line`(逐行) → `serial/close` → `serial/closed-loop`；**真机 + 真服务**实测全链路到浏览器（见 §9）。`rule`/`evidence` 取 `judge()` 已算好的 `evidence[0]`，**不解析 `reason` 文案** |
 | `elab run`/`loop --dry-run` 只读命令预览 | ✅ **已实现** | 复用各模块 dry-run/print 分支（不另拼命令）；CLI + `GET /api/plan` 两个入口；`--clean` 的**副作用**（删工作目录）被显式标出。守卫：`test_plan_preview_carries_commands_and_effects` / `test_plan_is_read_only` |
 | `/api/runs.active` 的元数据来源 | ✅ **已改为以事件日志为准** | `project`/`steps`/`actor`/`started_at` 回读 `run/start`；内存那份只在"首行未落盘"时当占位，且用 `meta_source` 标明 |
-| 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ❌ 未实现 | M3-**b** 范围；当前输入框明确置灰并注明"将在 M3 落地"，不做假按钮 |
+| 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ✅ **已实现（M3-b）** | `POST /api/serial` + `elab serial`，**共用** `serialterm.roundtrip()`（只有一份实现）；输入框与波特率下拉已启用。真机 + 真浏览器验收见 §9。★ 与正在跑 `flash`/`debug_verify`/`monitor` 的闭环**互斥**（409 + 指名道姓）—— 那几步占着串口/SWD（N5） |
+| 串口写通道的 TX/RX **落盘** | ❌ 未实现 | 写通道不属于任何 run（与 monitor 互斥），没有可挂的 run 事件上下文 → 那些行只在本机缓冲、**重载即失**（界面已用 `TX →`/`←` 前缀标明）。落盘需要一套独立的 console 日志（后续） |
 | 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
 | 前端产物一致性守卫（CI job） | ✅ **已实现** | `web-dist-guard`：`npm ci` → `npm run build` → `git diff --exit-code cockpit/web/dist/`。**本地已验**：重建后 `dist/` 逐字一致（可复现）。Node 用主版本 `22`（精确版本在 runner 上未必可用，取不到会让守卫永久失效） |
 | `stream/overrun`（背压截断事件） | ✅ **已实现** | `_fanout` 溢出时按契约发出（一个 episode 只报一次，`dropped` 就地刷新）；SSE 侧在**去重之前**显式成帧（带 `id` 会让重连游标越过它自己）；前端 `reduce()` 归约 → 证据轨显示"服务端背压截断"。守卫：`tests/test_cockpit_backpressure.py`（14 例） |
