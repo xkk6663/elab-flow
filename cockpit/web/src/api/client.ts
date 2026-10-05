@@ -1,6 +1,7 @@
 import type {
   Capabilities,
   ElabEvent,
+  PlanPreview,
   ProjectsResponse,
   RunsResponse,
   StepId,
@@ -36,6 +37,20 @@ export const api = {
     req<{ events: ElabEvent[] }>(
       `/api/run-events?run=${encodeURIComponent(run)}&from=${from}`,
     ),
+
+  /**
+   * 只读命令预览（M2「先看命令再执行」）。
+   *
+   * ★ 走 **GET**：它没有副作用（不 spawn、不写盘、不发射事件）。
+   *   用 POST 会让人以为"点了就动手了"，与它的语义相反。
+   */
+  plan: (opts: { project: string; steps?: StepId[]; clean?: boolean; jobs?: number }) => {
+    const q = new URLSearchParams({ project: opts.project });
+    if (opts.steps && opts.steps.length) q.set("steps", opts.steps.join(","));
+    if (opts.clean) q.set("clean", "1");
+    if (opts.jobs) q.set("jobs", String(opts.jobs));
+    return req<PlanPreview>(`/api/plan?${q.toString()}`);
+  },
 
   startRun: (opts: {
     project: string;

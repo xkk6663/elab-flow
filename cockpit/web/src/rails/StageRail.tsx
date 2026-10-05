@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
-import type { Capabilities, ProjectCard, StepId, StepResult } from "../api/types";
+import type { Capabilities, PlanPreview, ProjectCard, StepId, StepResult } from "../api/types";
+import { api } from "../api/client";
 import type { RunSnapshot, StepView } from "../store/runStore";
 import { Button } from "../primitives/Button";
 import { DisclosureRow } from "../primitives/DisclosureRow";
+import { Input } from "../primitives/Input";
 import { Menu } from "../primitives/Menu";
 import { PathLabel } from "../primitives/PathLabel";
 import { StateDot } from "../primitives/StateDot";
+import { Switch } from "../primitives/Switch";
 import { Tag, Pill } from "../primitives/Tag";
 import { TextShimmer } from "../primitives/TextShimmer";
 import { Tooltip } from "../primitives/Tooltip";
@@ -34,6 +37,18 @@ export interface StageRailProps {
   onRunSteps: (steps: StepId[]) => void;
   onCancel: () => void;
   onRefresh: () => void;
+  /** M2 运行参数：`--clean` 会**真删**工作目录，`-j` 只影响构建并行度 */
+  clean: boolean;
+  onCleanChange: (v: boolean) => void;
+  jobs: number | null;
+  onJobsChange: (v: number | null) => void;
+}
+
+/** 把 argv 还原成一条可读命令行（只做展示，不参与任何执行）。 */
+function shellJoin(argv: string[]): string {
+  return argv
+    .map((a) => (a.includes(" ") || a.includes("(") ? `"${a}"` : a))
+    .join(" ");
 }
 
 /** 运行中每秒重绘一次"已用时"。不跑时完全不触发重渲染。 */
@@ -65,9 +80,38 @@ export function StageRail({
   onRunSteps,
   onCancel,
   onRefresh,
+  clean,
+  onCleanChange,
+  jobs,
+  onJobsChange,
 }: StageRailProps) {
   const running = run.status === "running";
   useSecondTick(running);
+
+  // ── M2 命令预览（只读）──────────────────────────────────────
+  const [pv, setPv] = useState<PlanPreview | null>(null);
+  const [pvBusy, setPvBusy] = useState(false);
+  const [pvErr, setPvErr] = useState<string | null>(null);
+
+  const doPreview = async (steps?: StepId[]) => {
+    const name = card?.name;
+    if (!name) return;
+    setPvBusy(true);
+    setPvErr(null);
+    try {
+      setPv(await api.plan({ project: name, steps, clean, jobs: jobs ?? undefined }));
+    } catch (e) {
+      setPvErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPvBusy(false);
+    }
+  };
+
+  // 切工程 / 换参数后旧的预览就失效了 —— 留着它比不留更坏（会指错工程）。
+  useEffect(() => {
+    setPv(null);
+    setPvErr(null);
+  }, [card?.name, clean, jobs]);
 
   if (!card) {
     return (
@@ -215,6 +259,19 @@ export function StageRail({
           取消
         </Button>
         <span className={s.barSpacer} />
+        {/* ★ M2「先看命令再执行」：预览是**只读**的（GET /api/plan），
+            不 spawn、不写盘、不发射事件 —— 与「跑全闭环」形成对照。
+            它存在的理由：`--clean` 会真删工作目录、flash 会真烧板，
+            按下之前必须能看清"到底会执行什么"。 */}
+        <Button
+          icon={<IconShield />}
+          busy={pvBusy}
+          disabled={!card}
+          onClick={() => void doPreview()}
+          title="只读预览：本轮将执行的命令与副作用，什么都不执行"
+        >
+          预览
+        </Button>
         {run.status !== "idle" ? (
           <Pill
             tone={
@@ -232,6 +289,92 @@ export function StageRail({
           </Pill>
         ) : null}
       </div>
+
+      {/* ── M2 运行参数（clean / jobs）── */}
+      <div className={s.bar}>
+        <div className={s.pvFlags}>
+          <Switch
+            id="clean"
+            checked={clean}
+            disabled={running}
+            onChange={onCleanChange}
+            label="--clean"
+          />
+          <span className={s.pvNote}>先清空工作目录</span>
+        </div>
+        <span className={s.barSpacer} />
+        <div className={s.pvFlags}>
+          <span className={s.pvNote}>-j</span>
+          <Input
+            className={s.pvJobs}
+            mono
+            disabled={running}
+            placeholder="自动"
+            value={jobs === null ? "" : String(jobs)}
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              const n = Number(v);
+              onJobsChange(v === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n));
+            }}
+            aria-label="并行任务数"
+          />
+        </div>
+      </div>
+
+      {/* ── M2 命令预览（只读）── */}
+      {pvErr ? (
+        <section className={s.sect}>
+          <div className={s.pvWarn}>预览失败：{pvErr}</div>
+        </section>
+      ) : null}
+      {pv ? (
+        <section className={s.sect}>
+          <h3 className={s.sectTitle}>
+            命令预览 · {pv.project}
+            <button className={s.pvClose} onClick={() => setPv(null)} type="button">
+              关闭
+            </button>
+          </h3>
+          <div className={s.pvNote}>
+            只读预览：下列命令**不会**被执行
+            {pv.clean ? " · 已勾选 --clean" : ""}
+            {pv.jobs ? ` · -j ${pv.jobs}` : ""}
+          </div>
+          {pv.warnings.map((w, i) => (
+            <div className={s.pvWarn} key={`w${i}`}>
+              ⚠ {w}
+            </div>
+          ))}
+          {pv.plan.map((e) => (
+            <div className={s.pvStep} key={e.step}>
+              <div className={s.pvStepHead}>
+                {stepLabel(e.step)}
+                {e.blocked ? <Tag dense tone="amber">需前置产物</Tag> : null}
+                {!e.spawns ? <Tag dense tone="neutral">不派生子进程</Tag> : null}
+              </div>
+              {e.effects.map((x, i) => (
+                <div className={s.pvEffect} key={`e${i}`}>
+                  ⚠ {x}
+                </div>
+              ))}
+              {e.commands
+                .filter((c) => c.length > 0)
+                .map((c, i) => (
+                  <pre className={s.pvCmd} key={`c${i}`}>
+                    $ {shellJoin(c)}
+                  </pre>
+                ))}
+              {e.serial ? (
+                <div className={s.pvNote}>
+                  串口 {e.serial.port}@{e.serial.baud}
+                  {e.serial.idle_timeout_s ? ` · 静默超时 ${e.serial.idle_timeout_s}s` : ""}
+                </div>
+              ) : null}
+              {e.note ? <div className={s.pvNote}>· {e.note}</div> : null}
+            </div>
+          ))}
+        </section>
+      ) : null}
 
       {/* ── R2 内存占位 ── */}
       <section className={s.sect}>
@@ -323,8 +466,12 @@ export function StageRail({
             <Pill tone={run.closedLoop.verdict === "ok" ? "green" : run.closedLoop.verdict === "failed" ? "red" : "amber"}>
               {run.closedLoop.verdict}
             </Pill>
-            <span className={s.guardText} title={run.closedLoop.evidence}>
-              命中判据 {run.closedLoop.rule}
+            <span className={s.guardText} title={run.closedLoop.evidence || run.closedLoop.rule}>
+              {run.closedLoop.rule
+                ? `命中判据 ${run.closedLoop.rule}`
+                : run.closedLoop.verdict === "failed"
+                  ? "命中 fail_on"
+                  : "未命中任何判据"}
             </span>
           </div>
         </section>

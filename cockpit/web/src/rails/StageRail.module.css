@@ -183,6 +183,75 @@
   color: var(--elab-fg-muted);
 }
 
+/* ── 命令预览（M2「先看命令再执行」）── */
+.pvWarn {
+  margin: 0 0 var(--elab-space-2);
+  padding: var(--elab-space-2);
+  border-radius: var(--elab-radius-sm);
+  border: 1px solid var(--elab-status-warn);
+  background: var(--elab-status-warn-bg, transparent);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.6;
+  color: var(--elab-fg-secondary);
+}
+.pvStep {
+  margin: 0 0 var(--elab-space-3);
+}
+.pvStepHead {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  font-size: var(--elab-fs-xs);
+  font-weight: 600;
+  color: var(--elab-fg-secondary);
+  margin-bottom: var(--elab-space-1);
+}
+.pvEffect {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-warn);
+  line-height: 1.6;
+}
+.pvCmd {
+  margin: var(--elab-space-1) 0;
+  padding: var(--elab-space-2);
+  border-radius: var(--elab-radius-sm);
+  background: var(--elab-bg-inset, var(--elab-bg-canvas));
+  border: 1px solid var(--elab-border);
+  font-family: var(--elab-font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--elab-fg-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.pvNote {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  line-height: 1.6;
+}
+.pvClose {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  padding: 0 var(--elab-space-1);
+}
+.pvClose:hover {
+  color: var(--elab-fg-primary);
+}
+.pvFlags {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+.pvJobs {
+  width: 3.2rem;
+}
+
 .none {
   font-size: var(--elab-fs-xs);
   color: var(--elab-fg-faint);

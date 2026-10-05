@@ -34,8 +34,20 @@ export interface RunSnapshot {
   endedAt: number | null;
   lastSeq: number;
   currentStep: string | null;
-  /** 串口闭环判定（§16；M3 填充） */
+  /** 串口闭环判定（§16；M3-a 起由 `run.py` 的 monitor 分支发射） */
   closedLoop: null | { verdict: string; rule: string; evidence: string };
+  /**
+   * 服务端背压丢弃计数（`stream/overrun`，契约 §3.2 / §17.3）。
+   *
+   * ★ 与 `logs.ts` 的 `stats.dropped` **不是一回事**，别混：
+   *   - `logs.ts.dropped` = **浏览器自己**的环形缓冲挤出条数（容量 4000，丢了能重来）；
+   *   - 这里的 `overrun` = **服务端**因为这条 SSE 连接太慢而**没发出来**的条数。
+   *     它是**这一条连接**的损失，真值仍在服务端的 `.proc.jsonl` 里 ——
+   *     所以 UI 的正确动作是"提示 + 建议重载"，而不是"当作没发生"。
+   */
+  overrun: number;
+  /** 溢出的通道范围（服务端给的 `topic_scope`，如 `proc/*` / `run/*`） */
+  overrunScope: string;
   /** 最近一次 build 的内存/产物（供阶段轨复用，不必翻事件） */
   lastBuild: StepResult | null;
 }
@@ -51,6 +63,8 @@ const IDLE: RunSnapshot = {
   lastSeq: 0,
   currentStep: null,
   closedLoop: null,
+  overrun: 0,
+  overrunScope: "",
   lastBuild: null,
 };
 
@@ -168,6 +182,22 @@ export function reduce(s: RunSnapshot, e: ElabEvent): RunSnapshot {
             ? { ...v, state: "cancelled" as StepState }
             : v,
         ),
+      });
+    }
+
+    // 服务端因背压丢弃了活动事件（§3.2 / §17.3）。**必须归约**，否则这条
+    // 契约事件在界面上不存在 —— 那正是"静默丢事件"本身：
+    // 服务端已经如实报告了损失，界面却一个像素都没变。
+    // `Math.max` 而非赋值：服务端在同一 episode 内会就地刷新计数，
+    // 乱序/重复到达时也不能让计数回退。
+    case "stream/overrun": {
+      const d = e as Record<string, unknown>;
+      const dropped = Number(d.dropped || 0);
+      const scope = String(d.topic_scope || "");
+      return patch(s, {
+        lastSeq: seq > s.lastSeq ? seq : s.lastSeq,
+        overrun: Math.max(s.overrun, dropped),
+        overrunScope: scope || s.overrunScope,
       });
     }
 

@@ -215,6 +215,13 @@ export interface ActiveRunInfo {
   alive: boolean;
   dropped: number;
   last_seq: number;
+  /**
+   * 元数据从哪来（契约 §5.3："元数据以事件日志为准"）。
+   * - `event-log` ：已回读到 `run/start`，字段与日志逐字一致（稳态）；
+   * - `provisional`：子进程刚 spawn、首行还没落盘，用的是内存占位值。
+   *   UI 若要显示"即将运行 doctor, build"，此时**允许**显示；但不要说成"已确认"。
+   */
+  meta_source?: "event-log" | "provisional";
 }
 
 // ── /api/runs ────────────────────────────────────────────────────
@@ -232,4 +239,36 @@ export interface RunMeta {
 export interface RunsResponse {
   runs: RunMeta[];
   active: ActiveRunInfo[];
+}
+
+// ── /api/plan（只读命令预览，M2）─────────────────────────────────
+export interface PlanStepPreview {
+  step: StepId | string;
+  /** 是否会派生子进程（`monitor` 同进程内读串口，故为 false） */
+  spawns: boolean;
+  /** 待执行的命令行（argv 数组；空数组 = 该步没有命令行，看 note） */
+  commands: string[][];
+  /** **副作用**（尤其是 `--clean` 会真删工作目录）。这是预览最该突出的东西 */
+  effects: string[];
+  /** 需要前置产物（如 ELF 还没 build）→ 真跑会失败 */
+  blocked: boolean;
+  note: string;
+  work_dir?: string;
+  /** 仅 `monitor`：没有命令行，但有等效的确定性参数 */
+  serial?: {
+    port: string;
+    baud: number;
+    close_on: unknown[];
+    fail_on: unknown[];
+    idle_timeout_s?: number | null;
+  };
+}
+
+export interface PlanPreview {
+  project: string;
+  steps: string[];
+  clean: boolean;
+  jobs: number | null;
+  plan: PlanStepPreview[];
+  warnings: string[];
 }

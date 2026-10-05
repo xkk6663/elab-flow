@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Capabilities } from "../api/types";
 import { logs, type LogTab } from "../store/logs";
+import { useRun } from "../store/runStore";
 import { LogView, ringToText } from "../render/LogView";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
@@ -62,6 +63,8 @@ export function EvidenceRail({
 
   const ring = logs.for(tab);
   const st = counts[tab];
+  // 只读 run 快照 —— 低频（run/* 与背压告警才变），不会拖累这里的日志渲染路径
+  const run = useRun();
 
   const tabs: Array<SegTab<LogTab>> = [
     { id: "build", label: "构建", badge: counts.build.lines },
@@ -121,6 +124,20 @@ export function EvidenceRail({
           {st.alerts > 0 ? ` · ${st.alerts} 告警` : ""}
         </span>
       </div>
+
+      {/* 服务端背压截断（`stream/overrun`，契约 §3.2 / §17.3）。
+          ★ 与下面那条**必须分开显示**，因为它们的含义完全不同：
+            下面那条是"浏览器自己的环形缓冲挤掉了旧行"（本地、可重来）；
+            这条是"服务端来不及发给你"（传输层、真值只在服务端）。
+            以前服务端丢弃只写了 `dropped += 1`，界面上没有任何痕迹 ——
+            即"服务端如实报告了损失，界面却一个像素都没变"。 */}
+      {run.overrun > 0 ? (
+        <div className={s.warn}>
+          服务端背压截断：为跟上消费速度，本条连接已丢弃 {run.overrun} 条
+          {run.overrunScope ? ` ${run.overrunScope}` : ""} 事件。
+          完整内容仍在服务端 <code>.proc.jsonl</code> 里，重载本页即可从事件日志补齐。
+        </div>
+      ) : null}
 
       {st.dropped > 0 ? (
         <div className={s.warn}>

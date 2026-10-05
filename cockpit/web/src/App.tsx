@@ -44,6 +44,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [conn, setConn] = useState<"idle" | "connecting" | "open" | "reconnecting">("idle");
+  // M2 运行参数。**故意不放 localStorage**：`--clean` 会真删工作目录，
+  // 把它持久化成"下次默认开启"是一个会咬人的默认值。
+  const [clean, setClean] = useState(false);
+  const [jobs, setJobs] = useState<number | null>(null);
 
   const streamRef = useRef<StreamHandle | null>(null);
   const selectedRef = useRef("");
@@ -157,7 +161,12 @@ export default function App() {
       setBusy(true);
       setNotice(null);
       try {
-        const res = await api.startRun({ project, steps });
+        const res = await api.startRun({
+          project,
+          steps,
+          clean: clean || undefined,
+          jobs: jobs ?? undefined,
+        });
         closeStream();
         resetRun();
         logs.clearAll();
@@ -169,7 +178,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [attach, closeStream],
+    [attach, closeStream, clean, jobs],
   );
 
   const cancelRun = useCallback(async () => {
@@ -295,6 +304,10 @@ export default function App() {
             onRunSteps={(steps) => void startRun(steps)}
             onCancel={() => void cancelRun()}
             onRefresh={() => void loadAll(false)}
+            clean={clean}
+            onCleanChange={setClean}
+            jobs={jobs}
+            onJobsChange={setJobs}
           />
         }
         evidence={
