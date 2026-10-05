@@ -217,6 +217,21 @@ SSE 层为压掉"一秒上万行"的编译输出，会把**只有进程输出**�
 界面在切换工程/启动闭环时用最近 60 条回填（按 `project` 过滤），行首带
 `✎ hh:mm:ss` 时间戳与留档分隔线，与实时行可区分。
 
+### 3.6 一键适配也**不产生事件**（M5.6）
+
+`POST /api/adapt`（probe 只读 / write 落盘两段式）同样不在上面的 topic 表里 —— 它是
+一次**同步的文件操作**，不属于任何 run。与 §3.5 的差别在于它的"验证"如何补：
+
+- 适配**写入本身**不发射事件（没有 run 上下文，理由同 §3.5）；
+- 但接口返回 `next.steps = ["doctor_deep", "build"]`，引导界面走**现有** run 通道
+  跑三绿灯 —— 那段验证**完全在本契约内**（`run/*` + `proc/*` + guard 证据随
+  `run/step-exit` 落档），可重放、可观测。
+
+★ 适配真写出了新的 `projects/<name>.yaml` 时，服务端必须**热重载 Config**
+（替换 handler 配置与 RunManager 的 cfg），否则新工程对 `/api/projects` 与
+`/api/run` 双双不可见 —— "写入成功、工程消失"比报错更迷惑。
+真浏览器实测抓出，集成守卫：`test_adapt_write_creates_new_project_file`。
+
 ---
 
 ## 4. 步骤序列（stage pipeline）

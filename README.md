@@ -210,6 +210,7 @@ python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方
 | 只读**命令预览**（`GET /api/plan`、`elab run/loop --dry-run`） | `--clean` 会真删工作目录、flash 会真烧板 —— 按下前必须能看清"到底会执行什么"（约束 C26） |
 | 串口**手写通道**（`POST /api/serial`、`elab serial`）：写一条 → 收一段回显 | 串口是**独占资源**：常驻会话会与 `elab run` 的 monitor 互斥，且持口线程一旦僵死就没人释放（只能重启驾驶舱）。"无状态往返"把占用压进**一次请求**，天然与 monitor 串行（约束 C27） |
 | 手写通道的 TX/RX **独立留档**（`serial-console.jsonl`） | 写通道不属于任何 run，那些行**不能**进 run 事件流（会破坏 C17 单写者）。故另立一份**有上限、会滚动**的 console 日志（约束 C28）：CLI 与界面写**同一份**，重载页面可从它回填"最近敲过什么" —— 但它**不是 state**，滚动会丢最旧的，不可当验收判据 |
+| UI **一键适配**（probe/write 两段式） | "落不落盘"必须是用户看得见的独立动作：先只读探测（tier/置信度/芯片/证据链），再显式写入。三绿灯 verify **不在 HTTP 里同步做**（build 级长任务会钉死服务线程），由 `next.steps` 引导走现有 run 通道。写入与 CLI `elab adapt` 共用同一份实现（`adapt.write`），未决项不猜、人工接管不覆盖 |
 
 **实测验收（真浏览器点「跑全闭环」，doctor + build）**：实时日志滚动到 36 行、
 状态 `ok`、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP** 齐全、
@@ -270,6 +271,21 @@ python -m cockpit.server             # → http://127.0.0.1:3333/
 > 驾驶舱的**前端产物 `cockpit/web/dist/` 已随仓库提交**，所以最终用户不需要装 Node；
 > 只有在改前端时才需要 `npm --prefix cockpit/web run build`。
 
+### 接入你自己的工程（三种方式，同一份实现）
+
+把图形配置器（AT32 WorkBench / STM32CubeMX）**以 CMake 工具链导出**的工程接进 elab：
+
+| 方式 | 操作 | 适合 |
+|---|---|---|
+| **驾驶舱一键适配**（M5.6） | 工程轨标题栏「＋ 适配」→ 粘贴工程根目录**绝对路径** → 「探测」（只读，显示 T1/T3、置信度、芯片、波特率与证据链）→ 「写入」→ 新卡片自动出现并选中 → 点「体检 + 编译」看三绿灯 | 日常使用，全程不碰命令行 |
+| CLI | `./elab adapt <path> --write` → `./elab adapt <path> --verify`（三绿灯自证） | agent / 脚本化 |
+| 手写 YAML | 照 `projects/at32_test.yaml` 抄一份 | 探测器覆盖不了的特殊工程 |
+
+三者的**写入与拒绝逻辑是同一份代码**（`adapt.write`）：有未决项不猜（`--force` 可越）、
+芯片未匹配拒绝、**人工接管保护**（接入文件头部的 `generated-by` 标记被删 → 视为手改，
+一律不覆盖）。`T3`（没有 CMakeLists.txt）不是错误而是探测结论 —— 请回图形配置器把
+工具链切到 CMake 重新导出。
+
 ### 自测
 
 ```bash
@@ -277,7 +293,9 @@ python tests/test_kernel_events.py        # 事件流：seq 前缀性质、并�
 python tests/test_map_memory.py           # .map → 内存口径（11 例）
 python tests/test_monitor_judge.py        # ★ 串口判据引擎三态 + 两条铁律（38 例，无需硬件）
 python tests/test_cockpit_backpressure.py # ★ 背压留痕 / run/* 不可丢 / list_active 以日志为准（14 例）
-python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（19 例，会真编译，约 40s）
+python tests/test_serialterm.py           # ★ 串口写通道：载荷/对症报错/往返（30 例）
+python tests/test_serialconsole.py        # ★ TX/RX 落盘：滚动/原子替换/坏行容错（26 例）
+python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（33 例，会真编译，约 1min）
 ```
 
 > `tests/test_monitor_judge.py` 是补上的：`monitor.py` 的 docstring 与本文档此前都声称
@@ -388,7 +406,7 @@ elab-flow/                          ← 项目根
 | `elab run -p N [--steps S] [--emit-events] [--dry-run] [--clean] [-j J] [--actor agent\|human] [--keep-going] …` | ★ 事件驱动运行：跑一串步骤，可选发射驾驶舱事件流；`--dry-run` = **只读预览** |
 | `elab ci [--onhw] [--job J\|-p N] [--clean] [--json]` | 按 `ci/matrix.yaml` 跑 CI 矩阵 |
 | `elab skill [--all\|-p N\|--chip C] [--json]` | 由 `chips/*.yaml` 生成 per-chip skill |
-| `elab adapt [path] [--probe\|--write\|--check\|--verify] [-n NAME] [--force]` | ★ 确定性适配图形配置器工程 → 生成 `projects/*.yaml`（带 `provenance` 证据链） |
+| `elab adapt [path] [--probe\|--write\|--check\|--verify] [-n NAME] [--force]` | ★ 确定性适配图形配置器工程 → 生成 `projects/*.yaml`（带 `provenance` 证据链）。M5.6 起驾驶舱有**同源**入口：`POST /api/adapt`（probe/write 两段式）+ 工程轨「＋ 适配」面板 |
 | `python -m cockpit.server [--port P] [--reload] [-v]` | ★ L7 闭环驾驶舱后端（零第三方依赖；`--reload` 只提供 API 不托管 dist） |
 
 全局：`--root` 覆盖 ELAB_ROOT，`--json` 机器可读输出（AI/CI 用）。
@@ -597,6 +615,7 @@ $ ./elab ci
 | **串口事件链到浏览器** | — | — | ✅ **真服务 + 真板子**：`serial/open`(id=6) → `serial/line`×2 → `serial/close` → `serial/closed-loop`(id=10, `verdict=ok`, `rule`/`evidence` 均非空) 全部以**命名帧**到达 SSE |
 | **串口手写通道**（M3-b） | — | — | ✅ **真机 + 真浏览器**：界面输入 `status` → `TX → status` / `✓ 已发送 8B → COM10@115200（ctypes/L1）` / `← [alive] tick=1235`；CLI `elab serial` 同源同结果 |
 | **手写通道 TX/RX 落盘 + 读回**（M3-b2） | — | — | ✅ **真机 + 真服务**：写一条 → `serial-console.jsonl` 落一对 (tx, rx)，均带 `project`；**失败的写也留痕**；`GET /api/serial/console` 全部读回（`count 2 → 6`）。闭环（monitor）写事件流、手写通道写留档，**互不污染**（闭环后留档条数不变） |
+| **UI 一键适配**（M5.6） | — | — | ✅ **真浏览器 + 真服务**：`＋ 适配` → 粘贴路径 → 探测（`T1 · 可适配 / 置信度 medium / artery/at32f421g8`）→ 写入新名 → 卡片**立即出现并自动选中**；对已被人工接管的工程正确拒绝（A7 保护）。探测/写入与 CLI 共用 `adapt.py`，集成守卫 6 例 |
 | **全闭环** | ✅ 五步全绿 | ⚠️ 未上板 | ✅ **`elab loop` 五步全绿**；事件版 `elab run --emit-events`（同五步）`r-7ba259ce` 落档 66 条事件，驾驶舱 `GET /api/run-events` 全量读回、5 步全 `ok` |
 
 **"串口闭环落在时间线上"的一次完整验收**（`POST /api/run {at32f421g8u7, monitor}` + 真 SSE 客户端）：
@@ -668,6 +687,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | C26 | 只读预览（`--dry-run` / `GET /api/plan`）**不许另拼一份命令** | 预览的全部价值是"我说的就是待会儿真跑的"；两处分叉是**静默**的，而"预览说的和实跑不一样"比没有预览更坏。故 `builder.build_command()` 抽成函数、`flash`/`debug` 用 `allow_missing_elf=` 开预览口子 —— 命令构造始终只有一处 |
 | C27 | 串口写通道用**无状态往返**（open→write→read→close），**不做常驻会话**；且**不发射事件** | 串口**独占**：常驻会话会与 `elab run` 的 monitor 互斥，且持口线程一旦僵死就没人释放（只能重启驾驶舱）。无状态把占用压进一次请求，**天然与 monitor 串行**。不发射事件是因为写通道不属于任何 run（它与 monitor 互斥，没有可挂的 run 上下文）。★ 与 `flash`/`debug_verify`/`monitor` 几步**互斥**：那几步占串口/SWD（N5），检测到就返回 409 并**指名道姓**（否则用户只看到 `ERROR_ACCESS_DENIED`，只会去拔插） |
 | C28 | 手写通道的 TX/RX 落**独立的** console 留档（`serial-console.jsonl`），**绝不**写进 run 事件流；留档**有上限、会滚动**（尾部 N 条 + `os.replace` 原子替换）；CLI 与界面写**同一份** | 写进 run 流会同时破坏"每条事件带 run"与**单写者**（C17）。滚动是必要之恶：留一份"永不清理"的文件不是好习惯 —— 代价是可能丢最旧的记录。**正因为它会改写，它就不是 state**：不可当验收判据、不可做增量同步；界面渲染的只是"最近的历史"。实测边界：`elab loop` 五步全绿后留档条数**不变**（monitor 走事件流、手写通道走留档，两条道互不污染） |
+| C29 | 一键适配**真写出**新 `projects/<name>.yaml` 后，服务端必须**热重载 Config**（替换 handler 配置与 `RunManager.cfg`） | 服务进程的 `Config` 在启动时固化 —— 不重载则新工程对 `/api/projects` 与 `/api/run` **双双不可见**，症状是"写入成功、卡片永远不出现"，比报错更迷惑。CLI `_adapt_verify` 早有"写入后重载"的对应逻辑，服务端漏了同款（**真浏览器实测抓出**，集成守卫：`test_adapt_write_creates_new_project_file`）。赋值原子，在途请求仍握旧引用跑完 —— 旧配置对旧工程自洽 |
 
 ---
 
@@ -685,6 +705,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | `/api/runs.active` 的元数据来源 | ✅ **已改为以事件日志为准** | `project`/`steps`/`actor`/`started_at` 回读 `run/start`；内存那份只在"首行未落盘"时当占位，且用 `meta_source` 标明 |
 | 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ✅ **已实现（M3-b）** | `POST /api/serial` + `elab serial`，**共用** `serialterm.roundtrip()`（只有一份实现）；输入框与波特率下拉已启用。真机 + 真浏览器验收见 §9。★ 与正在跑 `flash`/`debug_verify`/`monitor` 的闭环**互斥**（409 + 指名道姓）—— 那几步占着串口/SWD（N5） |
 | 串口写通道的 TX/RX **落盘** | ✅ **已实现（M3-b2）** | 独立 console 留档 `.work/.cockpit/serial-console.jsonl`（**不是** run 事件流 —— 约束 C28）：`POST /api/serial` 与 `elab serial` 写**同一份**；有上限（512 KB）、会滚动（保尾部 2000 条，原子替换）；`GET /api/serial/console?limit=N` 读回、`capabilities.serial.console` 报位置与条数；界面进工程/起闭环时自动回填最近 60 条（按工程过滤，带时间戳与前缀 `✎ hh:mm:ss TX →` / `←`）。**失败的写也留痕**。真机验收见 §9 |
+| UI 一键适配新工程 | ✅ **已实现（M5.6）** | `POST /api/adapt`（probe/write **两段式**，probe 只读在前）+ 工程轨「＋ 适配」面板（探测结果带 tier/置信度/芯片/证据链 → 写入 → 卡片自动出现并选中）。三绿灯 verify **刻意不**在 HTTP 里同步做（build 级长任务会钉死服务线程），由 `next.steps` 引导走现有 run 通道跑 `doctor_deep + build`。写入与 CLI 共用 `adapt.write`（未决项拒写 / 人工接管保护）。★ 适配真写出文件后**热重载 Config**（真浏览器实测抓出的缺陷：不重载则新工程对驾驶舱不可见）。守卫：集成 6 例 |
 | 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
 | 前端产物一致性守卫（CI job） | ✅ **已实现** | `web-dist-guard`：`npm ci` → `npm run build` → `git diff --exit-code cockpit/web/dist/`。**本地已验**：重建后 `dist/` 逐字一致（可复现）。Node 用主版本 `22`（精确版本在 runner 上未必可用，取不到会让守卫永久失效） |
 | `stream/overrun`（背压截断事件） | ✅ **已实现** | `_fanout` 溢出时按契约发出（一个 episode 只报一次，`dropped` 就地刷新）；SSE 侧在**去重之前**显式成帧（带 `id` 会让重连游标越过它自己）；前端 `reduce()` 归约 → 证据轨显示"服务端背压截断"。守卫：`tests/test_cockpit_backpressure.py`（14 例） |
