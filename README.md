@@ -13,7 +13,11 @@
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 [![stars](https://img.shields.io/github/stars/xkk6663/elab-flow?style=flat&color=08C)](https://github.com/xkk6663/elab-flow/stargazers)
 
-[快速上手](#quickstart) · [主要功能](#features) · [实测证据](#evidence) · [接入新芯片](#addchip) · [文档索引](#docs) · [CHANGELOG](CHANGELOG.md)
+[快速上手](#quickstart) · [主要功能](#features) · [驾驶舱使用](#cockpit) · [实测证据](#evidence) · [接入新芯片](#addchip) · [文档索引](#docs) · [CHANGELOG](CHANGELOG.md)
+
+<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱：工程轨 → 阶段轨 → 证据轨" width="100%">
+
+*闭环驾驶舱（L7）：工程卡与芯片卡 → 阶段状态带（内存占位 / 产物 / 零改动守卫）→ 实时日志证据轨*
 
 </div>
 
@@ -59,6 +63,28 @@ python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:3333/
 **接入你自己的工程（三种方式，同一份实现）**：驾驶舱「＋ 适配」一键探测→写入；
 或 CLI `./elab adapt <path> --write && ./elab adapt <path> --verify`；
 或照 `projects/at32_test.yaml` 手写一份。人工接管的文件**绝不覆盖**（A7 保护）。
+
+<a id="cockpit"></a>
+
+## 驾驶舱使用（五分钟）
+
+| 步骤 | 操作 | 你会看到 |
+|---|---|---|
+| ① 启动 | 双击 `cockpit.cmd`（或 `python -m cockpit.server`） | 独立窗口（Edge `--app`）；已在跑则只开 UI，幂等 |
+| ② 接入工程 | 工程轨「＋ 适配」→ 粘贴工程根目录**绝对路径** → 「探测」→「写入」 | 只读探测报告（T1/T3、置信度、芯片、证据链）→ 写入后新卡片**自动出现并选中** |
+| ③ 跑闭环 | 选中卡片 → 「▶ 跑全闭环」 | 阶段带逐步点亮；不可用步骤（如没接板）**自动排除**；日志实时滚进证据轨 |
+| ④ 只跑一步 | 阶段轨一排六颗单步按钮；证据轨各 Tab 内有对应按钮 | 置灰的按钮 tooltip 直接说明原因（如"monitor 不可用：固件无心跳判据"） |
+| ⑤ 看懂阶段轨 | — | **内存占位**取自 `.map`（增量构建也准）；**产物** elf/hex/bin/map 可点击；**零改动守卫**显示"未触碰 N 文件" |
+| ⑥ 串口监视 | 串口 Tab → 「打开监视」 | 设备输出实时流入（600ms 增量轮询，丢行显式报告）；「关闭监视」一键释放 |
+| ⑦ 串口手写 | 底部输入框敲一行回车 | `TX → …` / `← 回显`；落独立留档（重启页面自动回填最近 60 条）；与闭环**双向 409 互斥** |
+| ⑧ 预览 | 阶段轨「预览」 | 只读打印将执行的每条命令（`--clean` 的删目录副作用显式标红），不 spawn、不写盘 |
+
+<img src="assets/cockpit-serial.png" alt="串口 Tab：打开监视 / 手写通道 / 历史回填" width="100%">
+
+*串口 Tab：「打开监视」常驻实时流；输入框手写通道（TX/RX 独立留档，进工程自动回填最近 60 条）*
+
+> 提示：监视是"看"，不是"证据"——它只活环形缓冲；要可复核的判定走闭环 `monitor` 步骤。
+
 
 <a id="features"></a>
 
