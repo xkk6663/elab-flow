@@ -13,12 +13,12 @@
   align-items: center;
   gap: 6px;
   border: 0;
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
   color: var(--elab-fg-muted);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.16s var(--elab-ease), color 0.16s var(--elab-ease);
 }
 
 .tab:hover {
@@ -28,7 +28,7 @@
 .active {
   background: var(--elab-bg-surface);
   color: var(--elab-fg-primary);
-  box-shadow: var(--elab-shadow);
+  box-shadow: var(--elab-shadow-sm), inset 0 -2px 0 var(--elab-accent);
   font-weight: 600;
 }
 

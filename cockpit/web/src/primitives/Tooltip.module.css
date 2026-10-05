@@ -16,10 +16,10 @@
   font-size: var(--elab-fs-xs);
   font-family: var(--elab-font-sans);
   white-space: nowrap;
-  box-shadow: var(--elab-shadow);
+  box-shadow: var(--elab-shadow-lg);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.12s;
+  transition: opacity 0.14s var(--elab-ease);
 }
 
 .top .bubble {

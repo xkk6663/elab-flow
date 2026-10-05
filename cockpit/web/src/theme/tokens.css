@@ -13,6 +13,7 @@
 :root {
   --elab-c-blue-300: #7fb4e8;
   --elab-c-blue-500: #378add;
+  --elab-c-blue-600: #2672c4;
   --elab-c-blue-700: #185fa5;
   --elab-c-green-300: #a5d16b;
   --elab-c-green-500: #639922;
@@ -23,6 +24,8 @@
   --elab-c-red-300: #ef8b8a;
   --elab-c-red-500: #e24b4a;
   --elab-c-red-700: #a32f2e;
+  --elab-c-violet-300: #c9a0e8;
+  --elab-c-violet-500: #9d5fc4;
   --elab-c-gray-50: #f8f7f4;
   --elab-c-gray-100: #f1efe8;
   --elab-c-gray-200: #e3e0d6;
@@ -53,6 +56,9 @@
   --elab-space-3: 12px;
   --elab-space-4: 16px;
   --elab-space-5: 24px;
+
+  /* 全局缓动：所有"非定位"过渡默认走它，保持节奏一致 */
+  --elab-ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ── 第二层：语义别名（alias）—— 主题切换只动这一层 ────────────── */
@@ -73,15 +79,21 @@
 
   --elab-border: rgba(0, 0, 0, 0.14);
   --elab-border-strong: rgba(0, 0, 0, 0.26);
+  --elab-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --elab-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.05);
+  --elab-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.08), 0 12px 32px rgba(0, 0, 0, 0.1);
 
   --elab-accent: var(--elab-c-blue-700);
+  --elab-accent-2: var(--elab-c-blue-500);
+  --elab-accent-grad: linear-gradient(135deg, var(--elab-c-blue-600), var(--elab-c-blue-700));
   --elab-accent-bg: rgba(55, 138, 221, 0.12);
+  --elab-header-grad: linear-gradient(180deg, var(--elab-bg-surface), color-mix(in srgb, var(--elab-bg-surface) 92%, var(--elab-c-gray-100)));
   --elab-status-ok: var(--elab-c-green-700);
   --elab-status-run: var(--elab-c-amber-700);
   --elab-status-fail: var(--elab-c-red-700);
   --elab-status-idle: var(--elab-c-gray-400);
   --elab-shimmer: rgba(255, 255, 255, 0.65);
+  --elab-glass: rgba(255, 255, 255, 0.82);
 
   /* ANSI 16 色 —— 浅色主题一套 */
   --elab-ansi-black: #3b3b38;
@@ -119,15 +131,21 @@
 
   --elab-border: rgba(255, 255, 255, 0.11);
   --elab-border-strong: rgba(255, 255, 255, 0.22);
+  --elab-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --elab-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 18px rgba(0, 0, 0, 0.32);
+  --elab-shadow-lg: 0 2px 8px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.5);
 
   --elab-accent: var(--elab-c-blue-300);
+  --elab-accent-2: var(--elab-c-blue-500);
+  --elab-accent-grad: linear-gradient(135deg, var(--elab-c-blue-500), var(--elab-c-blue-300));
   --elab-accent-bg: rgba(55, 138, 221, 0.2);
+  --elab-header-grad: linear-gradient(180deg, var(--elab-bg-surface), color-mix(in srgb, var(--elab-bg-surface) 88%, var(--elab-c-gray-950)));
   --elab-status-ok: var(--elab-c-green-300);
   --elab-status-run: var(--elab-c-amber-300);
   --elab-status-fail: var(--elab-c-red-300);
   --elab-status-idle: #5c5a55;
   --elab-shimmer: rgba(255, 255, 255, 0.16);
+  --elab-glass: rgba(35, 35, 34, 0.82);
 
   /* ANSI 16 色 —— 暗色主题**另给一套**（§15.4 规则 2） */
   --elab-ansi-black: #4a4842;

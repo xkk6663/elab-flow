@@ -10,6 +10,7 @@
   color: var(--elab-fg-secondary);
   background: var(--elab-bg-hover);
   white-space: nowrap;
+  transition: background 0.14s var(--elab-ease);
 }
 
 .dense {

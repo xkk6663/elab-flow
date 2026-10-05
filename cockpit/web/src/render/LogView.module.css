@@ -23,6 +23,10 @@
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--elab-fg-secondary);
+  transition: background 0.1s var(--elab-ease);
+}
+.line:hover {
+  background: var(--elab-bg-hover);
 }
 
 .alert {

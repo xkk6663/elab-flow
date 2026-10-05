@@ -15,6 +15,7 @@
   padding: var(--elab-space-3) var(--elab-space-3) var(--elab-space-2);
   border-bottom: 1px solid var(--elab-border);
   flex: 0 0 auto;
+  background: var(--elab-header-grad);
 }
 
 .headSpacer {
@@ -32,11 +33,13 @@
   border: 1px solid var(--elab-border);
   border-radius: var(--elab-radius);
   cursor: pointer;
-  transition: border-color 0.12s, color 0.12s;
+  transition: border-color 0.14s var(--elab-ease), color 0.14s var(--elab-ease),
+    background 0.14s var(--elab-ease);
 }
 .adaptBtn:hover {
   border-color: var(--elab-accent);
   color: var(--elab-fg-primary);
+  background: var(--elab-accent-bg);
 }
 
 .adaptBox {
@@ -146,10 +149,16 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color 0.16s var(--elab-ease), background 0.16s var(--elab-ease),
+    transform 0.14s var(--elab-ease), box-shadow 0.16s var(--elab-ease);
 }
 .card:hover:not(:disabled) {
   border-color: var(--elab-border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--elab-shadow-sm);
+}
+.card:active:not(:disabled) {
+  transform: translateY(0);
 }
 .card:disabled {
   cursor: not-allowed;
@@ -159,6 +168,18 @@
 .sel {
   border-color: var(--elab-accent);
   background: var(--elab-accent-bg);
+  box-shadow: var(--elab-shadow-sm);
+  position: relative;
+}
+.sel::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--elab-accent-grad);
 }
 
 .row1 {

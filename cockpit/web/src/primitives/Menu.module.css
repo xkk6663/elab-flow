@@ -16,7 +16,15 @@
   border-radius: var(--elab-radius);
   border: 1px solid var(--elab-border-strong);
   background: var(--elab-bg-raised);
-  box-shadow: var(--elab-shadow);
+  box-shadow: var(--elab-shadow-lg);
+  animation: menuIn 0.14s var(--elab-ease);
+}
+
+@keyframes menuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
 .left {
@@ -48,6 +56,7 @@
   font-size: var(--elab-fs-sm);
   text-align: left;
   cursor: pointer;
+  transition: background 0.12s var(--elab-ease), color 0.12s var(--elab-ease);
 }
 .item:hover:not(:disabled) {
   background: var(--elab-bg-hover);

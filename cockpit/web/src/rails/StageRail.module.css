@@ -34,7 +34,7 @@
   gap: var(--elab-space-3);
   padding: var(--elab-space-3) var(--elab-space-4);
   border-bottom: 1px solid var(--elab-border);
-  background: var(--elab-bg-surface);
+  background: var(--elab-header-grad);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -133,10 +133,12 @@
 /* 连接线：把"步骤序列"读成一串，而不是一堆孤立的点 */
 .connector {
   width: 20px;
-  height: 1px;
+  height: 2px;
   margin: 0 2px;
   background: var(--elab-border-strong);
   flex: 0 0 20px;
+  border-radius: 2px;
+  transition: background 0.2s var(--elab-ease);
 }
 .connOk {
   background: var(--elab-status-ok);

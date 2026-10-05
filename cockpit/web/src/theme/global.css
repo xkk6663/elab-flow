@@ -28,6 +28,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 选区色走强调色，两套主题都自然 */
+::selection {
+  background: var(--elab-accent-bg);
+  color: var(--elab-fg-primary);
+}
+
 code,
 kbd,
 pre {
@@ -51,6 +57,17 @@ pre {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--elab-fg-faint);
   background-clip: content-box;
+}
+
+:root {
+  /* 背景层在主题切换时平滑落色，避免硬切闪屏 */
+  --elab-theme-t: 0.18s;
+}
+:root[data-theme] body,
+:root[data-theme] .elab-themeable {
+  transition: background-color var(--elab-theme-t) var(--elab-ease),
+    color var(--elab-theme-t) var(--elab-ease),
+    border-color var(--elab-theme-t) var(--elab-ease);
 }
 
 :focus-visible {

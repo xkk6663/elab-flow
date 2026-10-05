@@ -8,10 +8,11 @@
   border: 1px solid var(--elab-border);
   border-radius: var(--elab-radius-sm);
   background: var(--elab-bg-sunken);
-  transition: border-color 0.12s;
+  transition: border-color 0.16s var(--elab-ease), box-shadow 0.16s var(--elab-ease);
 }
 .wrap:focus-within {
   border-color: var(--elab-accent);
+  box-shadow: 0 0 0 3px var(--elab-accent-bg);
 }
 
 .input {

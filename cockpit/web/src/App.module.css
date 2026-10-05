@@ -8,12 +8,24 @@
 
 /* ── 顶栏元素 ── */
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: var(--elab-font-mono);
   font-size: var(--elab-fs-sm);
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--elab-fg-primary);
   white-space: nowrap;
+}
+.brand::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 2px;
+  background: var(--elab-accent-grad);
+  box-shadow: 0 0 0 1px var(--elab-border);
 }
 
 .ver {
@@ -57,10 +69,14 @@
   font: inherit;
   font-size: var(--elab-fs-xs);
   cursor: pointer;
+  transition: background 0.14s var(--elab-ease), color 0.14s var(--elab-ease);
 }
 .fontBtn:hover:not(:disabled) {
   background: var(--elab-bg-hover);
   color: var(--elab-fg-primary);
+}
+.fontBtn:active:not(:disabled) {
+  background: var(--elab-bg-active);
 }
 .fontBtn:disabled {
   opacity: 0.35;
@@ -93,9 +109,19 @@
   max-width: min(46rem, 90vw);
   padding: var(--elab-space-2) var(--elab-space-3);
   border: 1px solid var(--elab-border-strong);
+  border-left: 3px solid var(--elab-status-fail);
   border-radius: var(--elab-radius);
-  background: var(--elab-bg-raised);
-  box-shadow: var(--elab-shadow);
+  background: var(--elab-glass);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  box-shadow: var(--elab-shadow-lg);
+  animation: noticeIn 0.22s var(--elab-ease);
+}
+@keyframes noticeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
 }
 
 .noticeIcon {
@@ -136,9 +162,10 @@
 }
 
 .fatalIcon {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   color: var(--elab-status-fail);
+  filter: drop-shadow(0 2px 6px color-mix(in srgb, var(--elab-status-fail) 40%, transparent));
 }
 
 .fatalTitle {
@@ -149,6 +176,11 @@
 
 .fatalMsg {
   margin: 0;
+  padding: var(--elab-space-3);
+  border-radius: var(--elab-radius);
+  border: 1px solid color-mix(in srgb, var(--elab-status-fail) 35%, transparent);
+  border-left: 3px solid var(--elab-status-fail);
+  background: color-mix(in srgb, var(--elab-status-fail) 8%, transparent);
   font-family: var(--elab-font-mono);
   font-size: var(--elab-fs-sm);
   color: var(--elab-status-fail);
