@@ -189,6 +189,30 @@ class LogBook {
     this.for(tab).push([ln]);
   }
 
+  /**
+   * 回填**服务端留档**（M3-b2）—— 与 `local()` 的唯一区别是**来源**，而这区别必须
+   * 让人看得见，故 step 标为 `"history"`：
+   *
+   *   `manual`   本机刚敲的，**服务端那份里也有一条**（同一件事的两种视图）
+   *   `history`  从服务端 console 日志读回来的，**重载不丢**（但会被滚动淘汰）
+   *
+   * ★ 一次性整批 push（而不是逐行）：回填几十行时只触发**一次**订阅通知，
+   *   省掉几十次 `LogView` 的追加调度 —— 与 `push()` 里那条"别每帧全扫缓冲"的
+   *   理由同源。
+   */
+  history(tab: LogTab, items: Array<{ text: string; tone?: LogLine["tone"] }>): void {
+    if (!items.length) return;
+    this.for(tab).push(
+      items.map((it) => ({
+        raw: it.text,
+        plain: stripAnsi(it.text),
+        tone: it.tone ?? lineTone(it.text),
+        step: "history",
+        kind: "line" as const,
+      })),
+    );
+  }
+
   counts(): Record<LogTab, { lines: number; alerts: number; dropped: number }> {
     return { build: this.build.stats, flash: this.flash.stats, serial: this.serial.stats };
   }

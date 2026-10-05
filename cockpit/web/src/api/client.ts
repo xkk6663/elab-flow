@@ -4,6 +4,7 @@ import type {
   PlanPreview,
   ProjectsResponse,
   RunsResponse,
+  SerialConsoleResponse,
   SerialWriteResult,
   StepId,
 } from "./types";
@@ -110,6 +111,18 @@ export const api = {
         hex: opts.hex,
       }),
     }),
+
+  /**
+   * 手写通道的**服务端留档**（M3-b2）。
+   *
+   * ★ 走 **GET**：纯读，没有副作用 —— 与 `serial()`（POST，会真往设备写字节）
+   *   正好相对。同一个模块里两个端点的动词选择，本身就是"有没有副作用"的声明。
+   *
+   * ★ 这份留档**不是** run 事件流：写通道不属于任何 run，所以它既不能被 SSE
+   *   推送，也没有 `seq` 可增量拉取 —— 只能"进来时拉一段最近的"（见 App 的回填）。
+   */
+  serialConsole: (limit = 50) =>
+    req<SerialConsoleResponse>(`/api/serial/console?limit=${encodeURIComponent(limit)}`),
 };
 
 /**

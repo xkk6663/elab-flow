@@ -115,7 +115,7 @@ export function EvidenceRail({
             <IconDownload />
           </Button>
         </Tooltip>
-        <Tooltip side="bottom" tip="清空三个 Tab 的本地缓冲（不影响服务端 .jsonl）">
+        <Tooltip side="bottom" tip="清空三个 Tab 的本地缓冲（不影响服务端 .jsonl，也不清服务端串口留档）">
           <Button
             variant="toolbar"
             onClick={() => logs.clearAll()}
@@ -222,7 +222,19 @@ function emptyTextFor(tab: LogTab, caps: Capabilities | null): string {
     if (!caps.serial.available) {
       return `串口后端不可用（layer=${caps.serial.layer}）。${caps.serial.hint ?? ""}`;
     }
-    return "尚无串口输出。跑一次含 monitor 的闭环即可看到设备打印。";
+    // 有服务端留档却还是空屏 = 回填被跳过了（例如留档属于别的工程）。
+    // 把这件事说出来，否则用户会以为"我明明敲过，怎么什么都没了"。
+    if (caps.serial.console.count > 0) {
+      return (
+        `服务端存有 ${caps.serial.console.count} 条串口留档，但本工程一条也没有` +
+        `（留档按工程区分）。跑一次含 monitor 的闭环，` +
+        `或在下框手敲一行，即可看到输出。`
+      );
+    }
+    return (
+      "尚无串口输出。跑一次含 monitor 的闭环即可看到设备打印；" +
+      "也可以直接在下方框里手敲一行发给设备。"
+    );
   }
   if (tab === "flash") return "尚无烧录输出。点「跑全闭环」或单步「烧录」。";
   return "尚无构建输出。";

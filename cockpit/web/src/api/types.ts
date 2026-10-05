@@ -202,6 +202,14 @@ export interface Capabilities {
     host_baud: number;
     /** 能否往串口**写**（M3-b）。与 `available` 同源，但单列以免前端去猜。 */
     write_available: boolean;
+    /**
+     * 手写通道的服务端留档（M3-b2）。
+     *
+     * ★ 为什么这件事必须由服务端告诉界面：本地环形缓冲**重载即失**，
+     *   而服务端那份 console 日志是持久的。界面要能诚实地说出
+     *   "服务端还存着 N 条"，就不能自己去猜 —— 猜的代价是两边数字对不上。
+     */
+    console: SerialConsoleInfo;
   };
   active_runs: ActiveRunInfo[];
   steps: { all: StepId[]; default: StepId[]; onhw: StepId[] };
@@ -301,4 +309,49 @@ export interface SerialWriteResult {
   /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
   eol: string;
   error: string | null;
+}
+
+// ── 串口 console 留档（M3-b2）────────────────────────────────────
+/**
+ * console 日志里的一条记录。
+ *
+ * ★ 它**不是事件**（ICD §2 的信封）：没有 `run`、没有 `seq`，因为写通道不属于
+ *   任何 run。所以它**不能**被当作可重放的真值 —— 文件有上限、会滚动，
+ *   界面渲染的只是"最近发生过什么"。
+ */
+export interface SerialConsoleRecord {
+  /** unix 秒（与事件信封同一单位，便于并排显示） */
+  ts: number;
+  /** 人类可读时间（服务端已格式化，前端不必自己算时区） */
+  t: string;
+  /** `tx` = 人敲出去的；`rx` = 设备回显的整行 */
+  dir: "tx" | "rx";
+  text: string;
+  /** 这条命令是发给哪个工程的（端口会复用，工程不会） */
+  project?: string;
+  port?: string;
+  baud?: number;
+  /** 仅 tx：这一次往返成不成功 */
+  ok?: boolean;
+  written?: number;
+  payload_bytes?: number;
+  hex?: boolean;
+  newline?: boolean;
+  error?: string | null;
+}
+
+export interface SerialConsoleInfo {
+  path: string;
+  count: number;
+  max_records: number;
+  /** 读文件失败时的原因（不致命：留档读不出来不该让 caps 整个失败） */
+  error: string | null;
+}
+
+export interface SerialConsoleResponse {
+  records: SerialConsoleRecord[];
+  /** 服务端**总共**有多少条（可能远多于 `records.length` —— 说明被 limit 截了） */
+  count: number;
+  requested: number;
+  path: string;
 }

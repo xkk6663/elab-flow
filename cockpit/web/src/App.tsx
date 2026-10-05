@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Capabilities, ProjectsResponse, StepId } from "./api/types";
+import type {
+  Capabilities,
+  ProjectsResponse,
+  SerialConsoleRecord,
+  StepId,
+} from "./api/types";
 import { api, assertSchema } from "./api/client";
 import { openRunStream, type StreamHandle } from "./events/sse";
-import { logs, type LogTab } from "./store/logs";
+import { logs, type LogLine, type LogTab } from "./store/logs";
 import {
   markStreamClosed,
   reset as resetRun,
@@ -29,6 +34,35 @@ const THEME_ICON: Record<ThemeMode, typeof IconSun> = {
   dark: IconMoon,
   system: IconMonitor,
 };
+
+/**
+ * 进入串口 Tab 时回填多少条服务端留档。
+ *
+ * ★ 60 条 ≈ 30 次手敲往返 —— 够看清"我刚做过什么"，又不至于把证据轨淹掉。
+ *   取多了还有一个坏处：留档是**会滚动**的（`MAX_RECORDS=2000`），
+ *   一次回填 2000 行会让人误以为"这些永远不会丢"，与本文件里反复强调的
+ *   那句"留档不是 state"相矛盾。
+ */
+const SERIAL_HISTORY_LIMIT = 60;
+
+/**
+ * console 留档的一条 → 证据轨的一行。
+ *
+ * ★ 前缀刻意与**实时**手写通道逐字一致（`TX →` / `←`）：同一件事不该因为
+ *   "这行是读回来的"就换一种写法。区别体现在**行首的时间戳**上 ——
+ *   实时行没有（它刚发生），留档行有（它可能发生在几小时前）。
+ */
+function serialRecToLine(rec: SerialConsoleRecord): { text: string; tone?: LogLine["tone"] } {
+  // `t` 形如 "2026-10-05T14:03:11"（服务端本地时间，已格式化好）
+  const stamp = String(rec.t || "").slice(11, 19) || "--:--:--";
+  if (rec.dir === "tx") {
+    return {
+      text: `✎ ${stamp}  TX → ${rec.text}`,
+      tone: rec.ok === false ? "alert" : "warn",
+    };
+  }
+  return { text: `   ${stamp}  ← ${rec.text}` };
+}
 
 export default function App() {
   const layout = useLayout();
@@ -87,6 +121,42 @@ export default function App() {
     [closeStream],
   );
 
+  /**
+   * 回填**服务端**的串口留档（M3-b2）。
+   *
+   * ★ 时机是"每次清空本地缓冲之后、挂上 SSE 之前"，而不是"进串口 Tab 时"：
+   *   证据轨的 `LogView` 是纯追加渲染，**没有**"插入历史到顶部"的能力。
+   *   若等用户切到串口 Tab 再回填，那时实时 monitor 行可能已经在缓冲里了，
+   *   回填只会接在后面 —— 看起来就是**时间倒错**（旧命令排在新的设备输出之后）。
+   *   在清空之后立刻回填，顺序天然正确：留档在前、实时在后。
+   *
+   * ★ 失败**静默**：留档读不出来不该挡住跑闭环。串口本身能用才是要紧事 ——
+   *   这正是"console 日志不是 state"的另一面：它是锦上添花，不是判据。
+   */
+  const backfillSerial = useCallback(async (project: string) => {
+    if (!project) return;
+    try {
+      const r = await api.serialConsole(SERIAL_HISTORY_LIMIT);
+      // 留档是**全局**的（同一个端口可能被多个工程用过），按 `project` 过滤。
+      // 没写 project 的老记录一律保留 —— 宁可多显示一行，也别把历史吞掉。
+      const mine = r.records.filter((x) => !x.project || x.project === project);
+      if (!mine.length) return;
+      const more = r.count > r.records.length;
+      logs.history("serial", [
+        {
+          text:
+            `── 服务端串口留档：本工程 ${mine.length} 条` +
+            (more ? `（服务端共 ${r.count} 条，已载入最近 ${r.records.length} 条）` : "") +
+            " ──",
+        },
+        ...mine.map(serialRecToLine),
+        { text: "── 留档到此为止，以下是本次会话 ──" },
+      ]);
+    } catch {
+      /* 静默：见上 */
+    }
+  }, []);
+
   const selectProject = useCallback(
     async (name: string) => {
       if (!name) return;
@@ -95,6 +165,8 @@ export default function App() {
       closeStream();
       resetRun();
       logs.clearAll();
+      // ★ 必须 await：要保证留档先落进缓冲，attach() 的实时重放才接在它后面
+      await backfillSerial(name);
       setAutoScroll(true);
       setNotice(null);
       try {
@@ -120,7 +192,7 @@ export default function App() {
         setNotice(`读取运行列表失败：${errmsg(e)}`);
       }
     },
-    [attach, closeStream],
+    [attach, backfillSerial, closeStream],
   );
 
   const loadAll = useCallback(
@@ -172,6 +244,9 @@ export default function App() {
         closeStream();
         resetRun();
         logs.clearAll();
+        // 与 selectProject 同理：留档先落，实时 monitor 行再接上去。
+        // 手写通道与闭环互斥（N5），所以这里的留档必定是**这次**跑之前的 —— 不会串味。
+        await backfillSerial(project);
         setAutoScroll(true);
         attach(res.run);
       } catch (e) {
@@ -180,7 +255,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [attach, closeStream, clean, jobs],
+    [attach, backfillSerial, closeStream, clean, jobs],
   );
 
   const cancelRun = useCallback(async () => {
