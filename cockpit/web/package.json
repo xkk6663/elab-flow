@@ -1,7 +1,7 @@
 {
   "name": "elab-cockpit-web",
   "private": true,
-  "version": "0.1.0-m1",
+  "version": "1.0.0",
   "type": "module",
   "description": "elab-Flow 闭环驾驶舱前端（独立工程；产物 dist/ 提交入仓，运行时无需 Node）",
   "scripts": {

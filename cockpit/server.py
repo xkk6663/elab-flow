@@ -51,7 +51,7 @@ PROC_BATCH_S = 0.10           # §17.3：proc 行 100ms 合并，事件数降 1~
 QUEUE_MAX = 2000              # §17.3：每连接有界队列
 MAX_SSE_CONNS = 8
 DIST_DIR = _HERE / "web" / "dist"
-COCKPIT_VERSION = "0.1.0-m1"
+COCKPIT_VERSION = "1.0.0"
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
