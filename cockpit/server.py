@@ -36,6 +36,7 @@ if str(_ROOT / "services") not in sys.path:
     sys.path.insert(0, str(_ROOT / "services"))
 
 from elab import run as run_mod                      # noqa: E402
+from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
@@ -581,12 +582,28 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
                    # 写能力与读能力同后端（ctypes L1 也已支持写，见 SerialIO.for_write）。
                    # 单列一个字段是因为前端要据此决定输入框是否可写 —— 不该让它去
                    # 猜"available 是不是也包括写"。
-                   "write_available": bool(caps["available"])},
+                   "write_available": bool(caps["available"]),
+                   # TX/RX 的 console 日志（M3-b2）—— 界面据此提示"服务端存有 N 条历史"
+                   "console": _console_info(cfg)},
         "active_runs": mgr.list_active(),
         "steps": {"all": list(run_mod.ALL_STEPS),
                   "default": list(run_mod.DEFAULT_STEPS),
                   "onhw": sorted(run_mod.ONHW_STEPS)},
     }
+
+
+def _console_info(cfg: Config) -> dict:
+    """手写通道 console 日志的位置与条数。
+
+    ★ 为什么值得进 capabilities：那里是界面判断"要不要提示/提示什么"的唯一来源。
+      没有它，前端只能猜"服务端到底存了多少历史"。
+    """
+    try:
+        clog = serialconsole_mod.ConsoleLog(serialconsole_mod.console_path_for(cfg))
+        return {"path": to_fwd(clog.path), "count": clog.count(),
+                "max_records": clog.max_records, "error": None}
+    except Exception as exc:                          # noqa: BLE001
+        return {"path": "", "count": 0, "max_records": 0, "error": str(exc)}
 
 
 def _plan_preview(cfg: Config, qs: dict) -> dict:
@@ -743,6 +760,19 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 run_id = (qs.get("run") or [""])[0]
                 after = int((qs.get("from") or ["0"])[0])
                 return self._json({"events": ev_mod.read_run(self.mgr.runs_dir, run_id, after_seq=after)})
+            if path == "/api/serial/console":
+                # 手写通道的 TX/RX 历史（M3-b2）。**独立的** console 日志，
+                # 不是 run 事件流（写通道不属于任何 run，见 ICD §3.5）。
+                raw = (qs.get("limit") or [""])[0]
+                try:
+                    limit = int(raw) if raw else serialconsole_mod.DEFAULT_TAIL
+                except ValueError:
+                    raise ElabError(f"limit 必须是整数：{raw!r}")
+                limit = max(1, min(limit, serialconsole_mod.MAX_RECORDS))
+                clog = serialconsole_mod.ConsoleLog(serialconsole_mod.console_path_for(self.cfg))
+                recs = clog.tail(limit)
+                return self._json({"records": recs, "count": clog.count(),
+                                   "requested": limit, "path": to_fwd(clog.path)})
             if path.startswith("/api/"):
                 return self._err(404, f"未知 API：{path}")
             return self._static(path)
@@ -794,15 +824,19 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         f"有闭环正在跑（run={busy.get('run')}，"
                         f"步骤 {'/'.join(busy.get('steps') or [])}）—— 它要用串口/SWD，"
                         f"手写通道已在让路（约束 N5）。等它跑完，或先取消它。"))
+                project = body.get("project") or ""
                 res = serialterm_mod.roundtrip(
                     self.cfg,
-                    body.get("project") or "",
+                    project,
                     data=data,
                     port=body.get("port") or "",
                     baud=body.get("baud") or 0,
                     read_ms=body.get("read_ms") or serialterm_mod.DEFAULT_READ_MS,
                     newline=bool(body.get("newline", True)),
                     hex_=bool(body.get("hex")),
+                    # ★ 落盘：写通道**不属于任何 run**，所以落到独立的 console 日志，
+                    #   绝不写进 run 的 .jsonl（那会破坏单写者模型，约束 C17）。
+                    journal=serialconsole_mod.journal_for(self.cfg, project=project),
                 )
                 return self._json(res, 200)
             return self._err(404, f"未知 API：{u.path}")
