@@ -94,15 +94,69 @@ jobs:
                           print(f"::error::[{j['job']}/{p['project']}/{s['step']}] {det}")
           PY
 
+      # ★ 产物文件名**按工程而定**（at32_test → TEST.elf，at32f421g8u7 → AT32F421G8U7.elf），
+      #   所以这里**不许写死 glob**：早先的 `.work/*/TEST.*` 会让新工程构建绿、
+      #   固件却静默传不上来（`if-no-files-found: warn` 不报错）。接入新工程现在
+      #   **不需要改 workflow** —— 路径由 `elab ci --json` 的 build 步骤自报。
+      - name: 收集固件产物（按 CI 报告自报的路径）
+        if: always()
+        shell: bash
+        env:
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil
+
+          # 门禁本身失败时"没有产物"是必然的、且已被上面的注解报过 → 只提示，不重复报错。
+          soft = os.environ.get("GATE", "") != "success"
+
+          try:
+              d = json.load(open("ci-host.json", encoding="utf-8"))
+          except Exception as e:
+              print(f"::warning::读不到 ci-host.json（{e}），跳过产物收集")
+              raise SystemExit(0)
+
+          os.makedirs("ci-firmware", exist_ok=True)
+          copied, missing = 0, []
+          for job in d.get("jobs", []):
+              for proj in job.get("projects", []):
+                  for st in proj.get("steps", []):
+                      if st.get("step") != "build" or not st.get("ok"):
+                          continue
+                      for kind, art in (st.get("artifacts") or {}).items():
+                          src = (art or {}).get("path") or ""
+                          if src and os.path.isfile(src):
+                              dst = "ci-firmware/{}.{}".format(
+                                  proj["project"], os.path.basename(src))
+                              shutil.copy2(src, dst)
+                              copied += 1
+                          else:
+                              missing.append("{} / {} → {}".format(
+                                  proj["project"], kind, src or "(未自报)"))
+
+          print("收集到 {} 个产物：".format(copied))
+          for f in sorted(os.listdir("ci-firmware")):
+              print("  {}  {} B".format(f, os.path.getsize(os.path.join("ci-firmware", f))))
+          for m in missing:
+              print("::error::声明了产物却未生成：{}".format(m))
+
+          bad = bool(missing) or copied == 0
+          if not bad:
+              raise SystemExit(0)
+          if soft:
+              print("::warning::门禁未通过，产物缺失属预期，不重复报错")
+              raise SystemExit(0)
+          # ★ 门禁绿、却一个产物都没有 → 这正是"假绿"，必须红灯。
+          raise SystemExit(1)
+          PY
+
       - name: 上传固件产物
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: .work/*/TEST.*
-          # ★ .work/ 是【点开头的隐藏目录】，而 upload-artifact v4 默认跳过隐藏文件，
-          #   不显式打开会得到 "No files were found"（构建其实成功）。
-          include-hidden-files: true
+          # ci-firmware/ 非隐藏目录，故这里**不需要** include-hidden-files
+          path: ci-firmware/
           if-no-files-found: warn
 
       - name: 上传 CI 报告
@@ -140,3 +194,42 @@ jobs:
           name: ci-onhw-report
           path: ci-onhw.json
           if-no-files-found: warn
+
+  # ── 前端产物守卫：dist/ 入库，必须与源码同步 ─────────────────────
+  # 为什么需要它：`cockpit/web/dist/` 是**提交入仓**的（运行时零 Node，Python 直接托管），
+  # 于是"改了源码忘了重建 dist"会静默上线一个旧界面 —— 本地怎么点都正常，
+  # 因为本地跑的是 dev server。本 job 重建一遍并比对，把"忘了重建"变成红灯。
+  #
+  # ★ Node 版本用主版本号（22）而非精确版本：精确版本在 runner 上未必可用，
+  #   一旦取不到则本守卫**永久无法运行**（比误红更糟）。若哪天因 Node 小版本差异
+  #   导致 dist 逐字不同而误红，按提示在 cockpit/web 下重建并提交 dist/ 即可 ——
+  #   那正是本守卫想让你做的事。
+  web-dist-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cockpit/web/package-lock.json
+
+      - name: 安装依赖（严格按锁文件）
+        working-directory: cockpit/web
+        run: npm ci
+
+      # = tsc --noEmit && vite build —— 顺带把类型检查也变成门禁
+      - name: 重建前端产物
+        working-directory: cockpit/web
+        run: npm run build
+
+      - name: 校验 dist/ 与源码同步
+        shell: bash
+        run: |
+          if git diff --exit-code cockpit/web/dist/; then
+            echo "✓ cockpit/web/dist/ 与源码一致（可复现）"
+          else
+            echo "::error::cockpit/web/dist/ 与源码不同步 —— 请在 cockpit/web 下执行 npm run build，并把 dist/ 一并提交"
+            exit 1
+          fi

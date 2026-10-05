@@ -17,11 +17,15 @@ jobs:
   # ── 档 1：主机门禁（无探针依赖）────────────────────────────────
   - name: host-gate
     desc: 环境体检 + 深度漂移校验 + 全芯片编译（云端可跑）
-    projects: [at32_test, stm32_test]
+    projects: [at32_test, stm32_test, at32f421g8u7]
     steps:
       - doctor_deep       # 真跑 configure，校验实际编译命令与 chip.yaml 一致
       - build             # 编译 + 统一产出 hex/bin + 零改动快照
-    artifacts: ".work/{project}/TEST.*"
+    # ★ 产物路径**刻意不在这里写**：它由 `projects/<name>.yaml` 的 artifacts 段声明，
+    #   由 `elab ci --json` 的 build 步骤**自报**（含 path/bytes），工作流据此收集上传。
+    #   早先这里写过 ".work/{project}/TEST.*" —— 那个字段是死的（`ci.py` 从不读它），
+    #   而且对 at32f421g8u7（产物叫 AT32F421G8U7.*）**是错的**：会让云端跑绿、
+    #   固件却静默传不上来。接入新工程现在**不需要改 workflow**。
     runner: ubuntu-latest
 
   # ── 档 2：上板门禁（需要探针，self-hosted）─────────────────────

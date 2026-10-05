@@ -34,31 +34,43 @@ def load_matrix(cfg: Config) -> dict:
 
 
 def _run_step(cfg: Config, step: str, project: str, *, clean: bool, verbose: bool, log):
-    """执行单个步骤，返回 (ok, detail)。"""
+    """执行单个步骤，返回 ``(ok, detail, extra)``。
+
+    ``extra`` 会**原样并进 CI 报告**（目前只有 ``build`` 用，放产物路径）。
+
+    ★ 为什么产物清单必须进报告：**产物文件名是按工程定的**
+      （``at32_test`` → ``TEST.elf``，``at32f421g8u7`` → ``AT32F421G8U7.elf``）。
+      早先工作流把上传路径硬编码成 ``.work/*/TEST.*`` —— 接入新工程的后果是
+      **云端跑绿、固件却传不上来**（``if-no-files-found: warn`` 静默降级），
+      属于典型的"假绿"。报告自带清单后，工作流不必猜名字，
+      接入第 4 个工程**无需改 workflow**，可接入性因此不再依赖改 CI 脚本。
+    """
     if step == "doctor_deep":
         rep = doctor_mod.run(cfg, only=project, deep=True)
-        return rep.passed, _doctor_detail(rep)
+        return rep.passed, _doctor_detail(rep), {}
     if step == "doctor":
         rep = doctor_mod.run(cfg, only=project, deep=False)
-        return rep.passed, _doctor_detail(rep)
+        return rep.passed, _doctor_detail(rep), {}
     if step == "build":
         plan = plan_for(cfg, project)
         res = builder.build_project(plan, clean=clean, verbose=verbose, log=log)
         if res["status"] != "ok":
             # ★ 必须带上编译/配置错误正文：否则 CI 只剩 "build-failed" 四个字，无从排障。
-            return False, f"{res['status']}: {res.get('error', '')}"
+            return False, f"{res['status']}: {res.get('error', '')}", {}
         mem = res.get("memory") or {}
         detail = " ".join(f"{k} {v['pct']}%" for k, v in mem.items()) or res["status"]
-        return True, detail
+        return True, detail, {"artifacts": res.get("artifacts") or {},
+                              "memory": mem,
+                              "memory_source": res.get("memory_source")}
     if step == "flash":
         plan = plan_for(cfg, project)
         res = flash_mod.flash(plan, verbose=verbose, log=log)
-        return res["status"] == "ok", res["status"]
+        return res["status"] == "ok", res["status"], {}
     if step == "debug_verify":
         plan = plan_for(cfg, project)
         res = flash_mod.debug(plan, mode="verify", log=log)
         hit = res.get("evidence", [])
-        return res["status"] == "ok", (hit[0] if hit else res["status"])
+        return res["status"] == "ok", (hit[0] if hit else res["status"]), {}
     raise ElabError(f"未知 CI 步骤：{step}")
 
 
@@ -91,12 +103,14 @@ def run(cfg: Config, *, onhw: bool = False, only_job: str | None = None,
                 continue
             proj_entry = {"project": project, "steps": []}
             for step in steps:
+                extra: dict = {}
                 try:
-                    ok, detail = _run_step(cfg, step, project, clean=clean,
-                                           verbose=verbose, log=log)
+                    ok, detail, extra = _run_step(cfg, step, project, clean=clean,
+                                                  verbose=verbose, log=log)
                 except ElabError as exc:
                     ok, detail = False, str(exc)
-                proj_entry["steps"].append({"step": step, "ok": ok, "detail": detail})
+                proj_entry["steps"].append({"step": step, "ok": ok, "detail": detail,
+                                            **extra})
                 mark = "✓" if ok else "✗"
                 log(f"[ci]   [{mark}] {project:<12} {step:<14} {detail}")
                 if not ok:
