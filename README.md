@@ -203,9 +203,11 @@ python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方
 | 事件**只追加**、每 run 一个文件、`seq` 全局单调 | 重放不需要额外机制：读文件按 `seq` 过滤即可；断线续传直接复用 `Last-Event-ID` |
 | **单写者**：只有 `elab run --emit-events` 一个进程写 | 不加文件锁；唯一豁免是「取消」时父进程补一条 `run/cancel`（此时写者已死） |
 | 推送走 **SSE**（stdlib 手写）、触发走 `POST` | SSE 有浏览器原生重连 + `Last-Event-ID`，零实现成本；长任务在**子进程**里跑，绝不钉死服务线程 |
-| `proc/*` **100ms 合并**成一帧 | 一次编译上万行；不合并会把 SSE 打成"每行一个 HTTP 帧" |
+| `proc/*` **100ms 合并**成一帧 | 一次编译上万行；不合并会把 SSE 打成"每行一个 HTTP 帧"。★ **只有"进程输出"才合并**（`is_batched`）—— `serial/*` 是域事件，必须各自成帧（见约束 C24） |
 | 日志渲染**不进 React 树**（环形缓冲 + 命令式 DOM 追加） | 上万行走 reconciler 会直接卡死界面 |
 | 内存占位**取自 `.map`** | 增量构建不 relink 时链接器不输出 `--print-memory-usage`，`.map` 是唯一可得的口径（与链接器自报逐字节一致） |
+| 背压丢弃**留痕**（`stream/overrun`） | 客户端太慢时丢 `proc/*` 是允许的，但**不允许悄悄丢**：服务端如实报告损失，界面显示"服务端背压截断"。`run/*` 与 `stream/closed` 绝不丢 |
+| 只读**命令预览**（`GET /api/plan`、`elab run/loop --dry-run`） | `--clean` 会真删工作目录、flash 会真烧板 —— 按下前必须能看清"到底会执行什么"（约束 C26） |
 
 **实测验收（真浏览器点「跑全闭环」，doctor + build）**：实时日志滚动到 36 行、
 状态 `ok`、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP** 齐全、
@@ -217,6 +219,12 @@ python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方
 > （`cockpit/server.py` 的 `SSE_TOPICS` + `cockpit/web/src/api/types.ts` 的
 > `KNOWN_TOPICS`），否则该 topic 的全部事件在浏览器里**静默消失**。
 > 已加守卫用例 `tests/it_cockpit_server.py::test_known_topics_covers_server_emitted` 拦截。
+>
+> ⚠️ 第二条同族的坑（C24）：**能把事件发出去 ≠ 前端收得到**。事件会先经过
+> "合并成 `proc/stdout-batch`"这一步 —— 若把域事件（`serial/*`）也合并进去，
+> 它们就变成一行**空文本**。判断"哪些该合并"必须用 `is_batched()`（只有进程输出），
+> **不能**用落盘通道分类 `is_activity()`。守卫：
+> `test_live_sse_keeps_domain_events_as_named_frames`（已做变异检验）。
 
 ---
 
@@ -251,8 +259,16 @@ python -m cockpit.server             # → http://127.0.0.1:3333/
 ```bash
 python tests/test_kernel_events.py        # 事件流：seq 前缀性质、并发写、明文通道（16 例）
 python tests/test_map_memory.py           # .map → 内存口径（11 例）
-python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（12 例，会真编译，约 40s）
+python tests/test_monitor_judge.py        # ★ 串口判据引擎三态 + 两条铁律（38 例，无需硬件）
+python tests/test_cockpit_backpressure.py # ★ 背压留痕 / run/* 不可丢 / list_active 以日志为准（14 例）
+python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（19 例，会真编译，约 40s）
 ```
+
+> `tests/test_monitor_judge.py` 是补上的：`monitor.py` 的 docstring 与本文档此前都声称
+> 判据引擎"单测 12/12"，但那份用例跑在**会话临时文件**里、从未入库 ——
+> 于是两条铁律（`fail_on` 绝对优先、`settle` 后再收工）的修复**完全没有守卫**。
+> 它们看起来都可以被"顺手简化"成一个逐行 `if`，而退化的症状是
+> **HardFault 的板子被报成通过**（假通过比失败难发现得多）。
 
 ### 实测输出（真实硬件）
 
@@ -351,8 +367,8 @@ elab-flow/                          ← 项目根
 | `elab flash -p N [--dry-run] [--json]` | openocd 烧录 + `verify` |
 | `elab debug -p N [--run\|--verify]` | `--run` 交互式 gdb；`--verify` 非交互断到 main 自检 |
 | `elab monitor -p N [--port P] [--seconds S] [--reset-port] [--caps] [-q] [--json]` | ★ 串口闭环判据：读串口 → 判 `ok` / `failed` / `inconclusive` |
-| `elab loop -p N [--clean] [--no-debug] [--no-monitor] [--dry-run] [-v]` | ★ 一键闭环：doctor → build → flash → debug → monitor |
-| `elab run -p N [--steps S] [--emit-events] [--actor agent\|human] [--keep-going] …` | ★ 事件驱动运行：跑一串步骤，可选发射驾驶舱事件流 |
+| `elab loop -p N [--clean] [--no-flash] [--no-debug] [--no-monitor] [--dry-run] [-v]` | ★ 一键闭环：doctor → build → flash → debug → monitor |
+| `elab run -p N [--steps S] [--emit-events] [--dry-run] [--clean] [-j J] [--actor agent\|human] [--keep-going] …` | ★ 事件驱动运行：跑一串步骤，可选发射驾驶舱事件流；`--dry-run` = **只读预览** |
 | `elab ci [--onhw] [--job J\|-p N] [--clean] [--json]` | 按 `ci/matrix.yaml` 跑 CI 矩阵 |
 | `elab skill [--all\|-p N\|--chip C] [--json]` | 由 `chips/*.yaml` 生成 per-chip skill |
 | `elab adapt [path] [--probe\|--write\|--check\|--verify] [-n NAME] [--force]` | ★ 确定性适配图形配置器工程 → 生成 `projects/*.yaml`（带 `provenance` 证据链） |
@@ -362,6 +378,38 @@ elab-flow/                          ← 项目根
 
 `elab run` 的 `--steps` 可取：`doctor` / `doctor_deep` / `build` / `flash` / `debug_verify` / `monitor`
 （默认 `doctor,build`；默认失败即停，`--keep-going` 改为继续）。
+
+### `--dry-run` 只有一个意思：**只读预览**
+
+```bash
+$ elab loop -p at32f421g8u7 --dry-run
+project=at32f421g8u7  steps=doctor,build,flash,debug_verify,monitor
+（只读预览：下列命令**不会**被执行）
+
+── build
+   ⚠ 先删除工作目录（不可逆）：…/.work/at32f421g8u7
+   $ cmake -S …/examples/AT32F421G8U7 -B …/.work/at32f421g8u7 -G Ninja \
+       -DCMAKE_TOOLCHAIN_FILE=…/toolchains/gcc.cmake … -DELAB_CPU=cortex-m4 …
+   $ cmake --build …/.work/at32f421g8u7
+── flash
+   $ openocd.exe -s …/scripts -f interface/atlink.cfg -f target/at32f421xx.cfg \
+       -c "adapter speed 5000" -c "program {…AT32F421G8U7.elf} verify reset exit"
+── monitor
+   串口 auto@115200  close_on=[{kind:regex, pattern:^\[(boot|alive)\]} …]
+```
+
+预览**复用各模块自己的 dry-run/print 分支**（`builder.build_command()` / `plan.shell_preview()` /
+`flash(dry_run=True)` / `debug(mode="print")`），不另拼一份命令 —— 预览与实跑分叉是**静默**的，
+而"预览说的和实跑的不一样"比没有预览更坏。硬件层同样有守卫：`flash`/`debug` 新增
+`allow_missing_elf=`，只在预览时放开"ELF 还没 build"这一条，命令构造仍只有一处。
+
+> ⚠ **兼容性说明**：`elab loop --dry-run` 早期是"跑到 build 就停"（**真编译**、不烧录），
+> 与 `elab build/flash --dry-run` 的"只打印命令"**同名不同义** —— 用户以为在预览，
+> 结果真编译了（带 `--clean` 时还会删掉工作目录）。现已统一为"只读预览"；
+> 原来那个能力**没有丢**，用 `--no-flash --no-debug --no-monitor` 即可（新增 `--no-flash` 以补齐对称性）。
+>
+> 同一份预览也通过 HTTP 暴露：`GET /api/plan?project=N&steps=…&clean=1&jobs=4`
+> —— **只读**（不 spawn、不写盘、不发射事件），驾驶舱的「预览」按钮就用它。
 
 `--json` 契约示例：
 
@@ -529,7 +577,27 @@ $ ./elab ci
 | 烧录 | ✅ `Verified OK`（读回逐字节比对） | ⚠️ 未上板（需 STM32 板） | ✅ `Verified OK` |
 | 调试 | ✅ 断在 `main.c:78`，`pc=0x8000ecc <main+4>` | ⚠️ 未上板 | ✅ 断在 `main.c:103`，`pc=0x8001714 <main+4>` |
 | 串口闭环 | — | — | ✅ `monitor` OK：`COM10@115200`（排除 6 个蓝牙口），2.6s 内命中 `[alive] tick=N` |
+| **串口事件链到浏览器** | — | — | ✅ **真服务 + 真板子**：`serial/open`(id=6) → `serial/line`×2 → `serial/close` → `serial/closed-loop`(id=10, `verdict=ok`, `rule`/`evidence` 均非空) 全部以**命名帧**到达 SSE |
 | **全闭环** | ✅ 五步全绿 | ⚠️ 未上板 | ✅ **`elab loop` 五步全绿** |
+
+**"串口闭环落在时间线上"的一次完整验收**（`POST /api/run {at32f421g8u7, monitor}` + 真 SSE 客户端）：
+
+```text
+event=serial/open        id=6  {"port":"COM10","baud":115200,"backend":"ctypes"}
+event=serial/line        id=7  {"line":"[alive] tick=19","t":0.94}
+event=serial/line        id=8  {"line":"[alive] tick=20","t":1.94}
+event=serial/close       id=9  {"port":"COM10","bytes":32,"lines":2}
+event=serial/closed-loop id=10 {"verdict":"ok",
+                                "rule":"regex:^\\[(boot|alive)\\] within_s=10",
+                                "evidence":"[alive] tick=20"}
+event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
+```
+
+> 这条验收抓出的缺陷值得单独记：`serial/*` 事件**写进了文件**、REST 回放也能读到，
+> 但**实时 SSE** 把它们合并进 `proc/stdout-batch` 了 —— 而 `serial/open`/`close`/`closed-loop`
+> 都没有 `line` 字段，合并出来是一行**空文本**。于是驾驶舱「串口闭环」那段永远是死的，
+> 且只在**实时**路径上复现（刷新页面反而正常）。根因是把**落盘通道**的分类
+> `is_activity()` 当成了**传输层**的合并判据。这就是约束 **C24**。
 
 `at32f421g8u7` 是第三个样本，价值在于：**它的 `projects/*.yaml` 不是人写的**，而是
 `elab adapt` 从工程结构里确定性探测出来的（`--verify` 跑三绿灯：`doctor --deep` +
@@ -576,6 +644,9 @@ $ ./elab ci
 | C21 | `/api/runs.active` 只能是**活着的** run；登记簿 ≠ 活动列表 | 登记簿要保留已结束的条目（SSE 靠它判"已结束→重放完收尾"），但把它当活动列表返回会让前端挂到**最早那条已结束的 run**（症状：跑新 run 显示旧 run 的日志） |
 | C22 | CI **不许写死产物路径**；产物路径必须由 `elab ci --json` 的 `build` 步骤自报 | 文件基名是**按工程定的**（`at32_test` → `TEST.*`，`at32f421g8u7` → `AT32F421G8U7.*`）。写死 glob 的后果是**绿着却没有固件产物**（`if-no-files-found: warn` 静默降级）。自报之后，接入新工程无需改 workflow —— 这是"可接入性"的直接体现 |
 | C23 | 门禁为 success 却**零产物**，收集步骤必须 `exit 1` | "假绿"比"红"危险得多：绿着、工件为空，问题会被带到下一次。门禁本身失败时只告警（不重复报错），但门禁绿时缺失一律红灯 |
+| C24 | SSE 的**合并**判据只能用"**是进程输出**"（`is_batched`），**不许**用落盘通道分类 `is_activity` | 落盘通道把 `serial/*`/`stream/*` 也算了进去，而"合并"是**传输层**动作。**实测事故**：`serial/open`/`close`/`closed-loop` 没有 `line` 字段 → 被合并成一行**空文本** → 浏览器什么都收不到，且**只在实时路径**复现（REST 重放逐条成帧，刷新页面反而正常，与 C18/N12 同形）。守卫：`test_live_sse_keeps_domain_events_as_named_frames` |
+| C25 | 背压丢弃**必须留痕**（`stream/overrun`），且 `stream/closed` 属**控制帧**、与 `run/*` 同级不可丢 | 只 `dropped += 1` 而不发事件 = 服务端如实记了损失、界面一个像素都没变（"静默丢事件"的又一种形态）。`stream/closed` 的 `is_activity()` 为真，队列满时会被当可丢事件丢掉 → 浏览器唯一的"run 结束了"信号没了 → 界面**永远显示"运行中"**，唯一兜底是 ≈2 分钟后心跳断开重连（症状是"卡住"而不是"报错"） |
+| C26 | 只读预览（`--dry-run` / `GET /api/plan`）**不许另拼一份命令** | 预览的全部价值是"我说的就是待会儿真跑的"；两处分叉是**静默**的，而"预览说的和实跑不一样"比没有预览更坏。故 `builder.build_command()` 抽成函数、`flash`/`debug` 用 `allow_missing_elf=` 开预览口子 —— 命令构造始终只有一处 |
 
 ---
 
@@ -587,11 +658,15 @@ $ ./elab ci
 | `at32f421g8u7` 上板 | ✅ **已验证** | `elab loop` 五步全绿：烧录 `Verified OK`、断到 `main.c:103`、串口闭环 OK |
 | GitHub Actions 云端运行 | ✅ **已验证** | `host-gate` 在 `ubuntu-latest` 上全绿（见 §8.1）；`onhw-gate` 仍需 self-hosted 探针 |
 | 云端 `host-gate` 含新工程 | ⚠️ 已加入，**待首跑** | `at32f421g8u7` 已进 `ci/matrix.yaml`；本地同矩阵三工程全绿，云端待下一次 push 确认 |
-| `elab monitor`（串口读） | ✅ **已验证** | 判据引擎（`close_on`/`fail_on`/静默超时 → `ok`/`failed`/`inconclusive`）单测 12/12；真机实测：`loop` 第 5 步自动选到 `COM10`（排除 6 个蓝牙口）、`ctypes` L1 后端、2.6s 命中 `[alive]`。**无需 `--reset-port`** —— `loop` 的顺序（…→debug→monitor）天然保证 `openocd` 完全退出后才读串口（详见 N5 约束） |
-| 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ❌ 未实现 | M3 范围；当前输入框明确置灰并注明"将在 M3 落地"，不做假按钮 |
+| `elab monitor`（串口读） | ✅ **已验证** | 判据引擎（`close_on`/`fail_on`/静默超时 → `ok`/`failed`/`inconclusive`）单测 **38/38**（`tests/test_monitor_judge.py`，离线、不插板）；真机实测：`loop` 第 5 步自动选到 `COM10`（排除 6 个蓝牙口）、`ctypes` L1 后端、2.6s 命中 `[alive]`。**无需 `--reset-port`** —— `loop` 的顺序（…→debug→monitor）天然保证 `openocd` 完全退出后才读串口（详见 N5 约束） |
+| `serial/*` 事件链 + `serial/closed-loop` 时间线 | ✅ **已验证（M3-a）** | `monitor.run()` 三个回调 → `run.py` 发 `serial/open` → `serial/line`(逐行) → `serial/close` → `serial/closed-loop`；**真机 + 真服务**实测全链路到浏览器（见 §9）。`rule`/`evidence` 取 `judge()` 已算好的 `evidence[0]`，**不解析 `reason` 文案** |
+| `elab run`/`loop --dry-run` 只读命令预览 | ✅ **已实现** | 复用各模块 dry-run/print 分支（不另拼命令）；CLI + `GET /api/plan` 两个入口；`--clean` 的**副作用**（删工作目录）被显式标出。守卫：`test_plan_preview_carries_commands_and_effects` / `test_plan_is_read_only` |
+| `/api/runs.active` 的元数据来源 | ✅ **已改为以事件日志为准** | `project`/`steps`/`actor`/`started_at` 回读 `run/start`；内存那份只在"首行未落盘"时当占位，且用 `meta_source` 标明 |
+| 驾驶舱串口 Tab 的**写通道** / 波特率切换 | ❌ 未实现 | M3-**b** 范围；当前输入框明确置灰并注明"将在 M3 落地"，不做假按钮 |
 | 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
 | 前端产物一致性守卫（CI job） | ✅ **已实现** | `web-dist-guard`：`npm ci` → `npm run build` → `git diff --exit-code cockpit/web/dist/`。**本地已验**：重建后 `dist/` 逐字一致（可复现）。Node 用主版本 `22`（精确版本在 runner 上未必可用，取不到会让守卫永久失效） |
-| `stream/overrun`（背压截断事件） | ❌ 未实现 | 契约 §6.2 已规定语义（队列溢出时先丢 `proc/*`、补发一条截断提示），服务端**尚未发出**该事件（`_fanout` 只累加 `ar.dropped`） |
+| `stream/overrun`（背压截断事件） | ✅ **已实现** | `_fanout` 溢出时按契约发出（一个 episode 只报一次，`dropped` 就地刷新）；SSE 侧在**去重之前**显式成帧（带 `id` 会让重连游标越过它自己）；前端 `reduce()` 归约 → 证据轨显示"服务端背压截断"。守卫：`tests/test_cockpit_backpressure.py`（14 例） |
+| SSE 合并判据 | ✅ **已修正** | 原来用 `is_activity()`（**落盘通道**分类，范围过大）→ `serial/*` 被合并成空文本、实时路径整条静默丢失。现改用 `is_batched()`（**只有进程输出**）。守卫：`test_live_sse_keeps_domain_events_as_named_frames`（已做**变异检验**：改回旧判据必红） |
 | SVD 在 IDE 中实际加载 | ⚠️ 未验证 | 路径已解析正确，IDE 寄存器视图未实测 |
 
 ---

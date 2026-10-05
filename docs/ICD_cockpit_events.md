@@ -107,10 +107,28 @@
 | `proc/stdout` | 子进程一行 stdout | `line: string`（**已 strip，不含换行**） |
 | `proc/stderr` | 子进程一行 stderr | `line: string` |
 | `proc/exit` | 子进程退出 | `rc: int` |
-| `stream/overrun` | **服务端背压丢弃**（§17.3） | `dropped: int`, `topic_scope: string` |
+| `stream/overrun` | **服务端背压丢弃**（§17.3） | `dropped: int`, `topic_scope: string`, `reason: string` |
 
 **允许丢弃**：`proc/*` 在慢客户端/队列溢出时可被服务端丢弃（并补一条 `stream/overrun`），
 **`run/*` 永不丢弃**。这是"编译日志可以截断、但'现在在第几步'绝不能错"的取舍。
+
+`stream/closed` 由服务端**合成**（不在事件文件里，因为它是"父进程对这条流的观察"），
+但它与 `run/*` 同级**不可丢弃** —— 它是浏览器**唯一**的"run 结束了、可以收尾了"信号；
+丢了它，界面会永远停在"运行中"，唯一兜底是心跳断开重连（≈2 分钟，症状是"卡住"而非"报错"）。
+
+**`stream/overrun` 的三个约定**（实现见 `cockpit/server.py::_signal_overrun`）：
+
+1. **它是"传输"的事实，不是 run 的事实**，故**不落盘**、也**不消耗 run 的 `seq` 计数器**
+   （`seq` 字段里放的是"当前已推进到的游标"，仅作定位锚点）。
+   真相一条没少地躺在 `.proc.jsonl` 里，浏览器断线重连即可按 `seq` 补齐；
+   这条事件的作用是把"你此刻看到的不是全部"**当场说出来**。
+2. **同一个溢出 episode 只报一次**（队列恢复后再次溢出则重新报）。
+   否则队列里会全是标记、把真实内容彻底挤出去，界面反而更瞎。
+   标记里的 `dropped` 是**同一个 dict 对象**，后续每次丢弃都**就地刷新**，
+   故读到的是最新数字 —— 且与 `/api/runs.active[].dropped` **是同一个数**。
+3. SSE 层必须**在去重之前**处理它：它带的 `seq <= Last-Event-ID`，
+   若走普通去重分支会被当成"与重放重叠"**丢掉自己发出来的告警**。
+   发帧时**不带 `id:`**（不写进 `Last-Event-ID`）。
 
 ### 3.3 Capability 事件 · `serial/*` · `fs/*` —— 半持久
 
@@ -121,15 +139,49 @@
 |---|---|---|
 | `serial/open` | 串口打开成功 | `port`, `baud`, `backend`, `layer` |
 | `serial/line` | 收到一行 | `line: string`, `t: float`（相对开流的秒数） |
-| `serial/close` | 关闭 | `reason: string` |
+| `serial/close` | 关闭 | `port`, `bytes: int`, `lines: int`, `backend` |
 | `serial/error` | 打开/读取失败 | `errno: int?`, `message: string`, `hint: string?` |
-| `serial/closed-loop` | **闭环判据命中**（§16） | `verdict: "ok"\|"failed"\|"inconclusive"`, `rule`, `evidence: string`, `at: float` |
+| `serial/closed-loop` | **闭环判据命中/未命中**（§16） | `verdict: "ok"\|"failed"\|"inconclusive"`, `rule: string`, `evidence: string`, `detail: string` |
+
+对这几个字段形状，有两条是**被实测纠正过**的（初稿写错过，记下来免得改回去）：
+
+- **`serial/close` 没有 `reason`**。"为什么关闭"不是传输层能回答的问题：它要么是撞上
+  `failed` 早退、要么是跑满窗口、要么是异常。**判定的结论在 `serial/closed-loop` 里**，
+  这里只报"关了什么、读了多少"这类**传输事实**（`bytes`/`lines` 就是"这个窗口到底有没有内容"
+  的第一手数字）。`serial/close` 与 `serial/open` **成对出现**：开失败时两个都不发
+  （孤儿事件比缺失事件更坏 —— 它看起来"一切正常"）。
+- **`serial/closed-loop` 的 `verdict` 是字符串三态，不是 `ok: true/false`**。
+  布尔量装不下三态，会把"没读到约定关键字"塌成"失败" —— 正好触犯判据引擎最核心的
+  那条铁律（缺证据 ≠ 有失败证据）。`rule`/`evidence` **在未命中时允许为空**：
+  没有任何规则被命中时，引用一条"命中判据"本身就是假话。逐行原始证据始终在
+  `.serial.log`（给人 grep）与 `serial/line`（给界面）里，`elapsed_s` 在
+  `run/step-exit.extra.serial` 的完整 `Verdict` 里。
 
 `serial/error` 的 `hint` 用来直接回答"为什么打不开"。当前唯一的高频原因是**约束 N5**：
 DAP-Link 是复合 USB 设备，openocd 占着 SWD 时其虚拟串口不可读 → hint 必须直说是这个，
 而不是丢一个 `ERROR_ACCESS_DENIED(5)` 让用户猜。
 
 `fs/*` 保留给后续（产物扫描、文件监听），M1 不实现。
+
+### 3.4 哪些 topic 会被**合并**成一帧（`is_batched`）
+
+> ★ 这是一条**传输层**规则，与上面的**落盘通道**分类（§3.1/§3.2）是**两回事**，
+> 混用的后果已经实测过一次（C24）。
+
+SSE 层为压掉"一秒上万行"的编译输出，会把**只有进程输出**（`proc/stdout`、`proc/stderr`）
+在 100ms 窗口内合并成一帧 `proc/stdout-batch`。判据是 `events.is_batched(topic)`，
+等价于 `topic in {proc/stdout, proc/stderr}`。
+
+**绝不能用 `is_activity()` 当这个判据**：那是**落盘通道**的分类，范围大得多 ——
+`serial/*`、`stream/*` 都在里面。实测事故：`serial/open`/`serial/close`/`serial/closed-loop`
+**都没有 `line` 字段**，被合并时拼出的是**空字符串**，于是整条串口事件链在
+**实时**路径上静默消失（`serial/closed-loop` 不见了 → 驾驶舱「串口闭环」那段永远是死的）。
+它极具迷惑性：这些事件**确实写进了文件**、REST 回放（`/api/run-events`）也逐条成帧，
+所以"刷新页面反而正常" —— 与 §6.1 那次"漏登记 `proc/stdout-batch`"**完全同形**：
+**历史有、实时没有**。
+
+守卫：`tests/it_cockpit_server.py::test_live_sse_keeps_domain_events_as_named_frames`
+（已做变异检验：把判据改回 `is_activity` 必红）。
 
 ---
 
