@@ -37,6 +37,7 @@ if str(_ROOT / "services") not in sys.path:
 
 from elab import run as run_mod                      # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
+from elab import serialterm as serialterm_mod        # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 
@@ -576,7 +577,11 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "runs_dir": to_fwd(mgr.runs_dir),
         "serial": {**caps, "backend": backend, "ports": ports,
                    "host_default": (host.get("serial") or {}).get("default", "auto"),
-                   "host_baud": (host.get("serial") or {}).get("baud", 115200)},
+                   "host_baud": (host.get("serial") or {}).get("baud", 115200),
+                   # 写能力与读能力同后端（ctypes L1 也已支持写，见 SerialIO.for_write）。
+                   # 单列一个字段是因为前端要据此决定输入框是否可写 —— 不该让它去
+                   # 猜"available 是不是也包括写"。
+                   "write_available": bool(caps["available"])},
         "active_runs": mgr.list_active(),
         "steps": {"all": list(run_mod.ALL_STEPS),
                   "default": list(run_mod.DEFAULT_STEPS),
@@ -603,6 +608,27 @@ def _plan_preview(cfg: Config, qs: dict) -> dict:
     jobs_raw = (qs.get("jobs") or [""])[0]
     jobs = int(jobs_raw) if jobs_raw.strip().isdigit() else None
     return run_mod.preview(cfg, project, steps=steps, clean=clean, jobs=jobs)
+
+
+#: 会占用串口 / SWD 的步骤 —— 它们运行期间，手写通道必须让路。
+#:   flash/debug_verify 起 openocd（占 SWD → N5 会连带锁住 VCP）；
+#:   monitor 自己就握着串口。
+_SERIAL_STEPS = frozenset({"flash", "debug_verify", "monitor"})
+
+
+def _serial_blocker(mgr: "RunManager") -> dict | None:
+    """有没有「会用到串口的闭环」正在跑？有就返回它，否则 None。
+
+    ★ 为什么**提前**拦，而不是让写入自己失败：openocd 占着 SWD 时，VCP 会以
+      ``ERROR_ACCESS_DENIED`` 打不开，用户只看到"端口被拒"，却不知道是自己刚点的
+      闭环占着 —— 于是去拔插、去杀进程。在这里拦下就能**指名道姓**地说清楚。
+    """
+    for a in mgr.list_active():
+        if not a.get("alive"):
+            continue
+        if set(a.get("steps") or []) & _SERIAL_STEPS:
+            return a
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -752,6 +778,33 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     return self._err(400, "缺少 run")
                 res = self.mgr.cancel(run_id, reason=body.get("reason") or "用户取消")
                 return self._json(res, 200 if res.get("ok") else 409)
+            if u.path == "/api/serial":
+                # 手写通道（M3-b）：写一条出去、收一小段回显，一次请求内闭环。
+                # ★ 返回 **200 + ok:false**（而不是 5xx）承载"执行了但没成功"：
+                #   前端要渲染的字段在两种结果下完全一样（port/baud/error），
+                #   用 5xx 只会让它走异常分支、丢掉这些结构化信息。
+                #   400 只留给"请求本身不合法"，409 留给"串口正被闭环占着"。
+                body = self._body()
+                data = body.get("data")
+                if not isinstance(data, str) or not data.strip():
+                    return self._err(400, "缺少 data（要发送的内容）")
+                busy = _serial_blocker(self.mgr)
+                if busy:
+                    return self._err(409, (
+                        f"有闭环正在跑（run={busy.get('run')}，"
+                        f"步骤 {'/'.join(busy.get('steps') or [])}）—— 它要用串口/SWD，"
+                        f"手写通道已在让路（约束 N5）。等它跑完，或先取消它。"))
+                res = serialterm_mod.roundtrip(
+                    self.cfg,
+                    body.get("project") or "",
+                    data=data,
+                    port=body.get("port") or "",
+                    baud=body.get("baud") or 0,
+                    read_ms=body.get("read_ms") or serialterm_mod.DEFAULT_READ_MS,
+                    newline=bool(body.get("newline", True)),
+                    hex_=bool(body.get("hex")),
+                )
+                return self._json(res, 200)
             return self._err(404, f"未知 API：{u.path}")
         except ElabError as exc:
             return self._err(400, str(exc))
