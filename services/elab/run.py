@@ -25,7 +25,8 @@ from pathlib import Path
 from . import builder, doctor as doctor_mod, flash as flash_mod
 from . import monitor as monitor_mod
 from .config import Config, ElabError, to_fwd
-from .kernel.events import ACTOR_AGENT, EventLog
+from .kernel.events import (ACTOR_AGENT, SERIAL_CLOSE, SERIAL_CLOSED_LOOP,
+                            SERIAL_LINE, SERIAL_OPEN, EventLog)
 from .plan import plan_for
 
 #: 可执行的步骤。前 5 个与 ``ci/matrix.yaml`` 的 ``steps`` 取值**同源**（K9：不复制流程），
@@ -126,8 +127,13 @@ def _detail_memory(res: dict) -> str:
 
 
 def _execute(cfg: Config, step: str, project: str, *, clean: bool, jobs: int | None,
-             verbose: bool, sink) -> StepOutcome:
-    """执行一步。**只调用既有库函数**，不改它们的行为。"""
+             verbose: bool, sink, elog=None) -> StepOutcome:
+    """执行一步。**只调用既有库函数**，不改它们的行为。
+
+    ``elog`` 只被 ``monitor`` 步用：串口是**域事件**（`serial/*`），不能只塞进
+    `run/step-exit` 的 detail，否则驾驶舱的串口 Tab / 闭环时间线拿不到逐行数据。
+    其余步骤不需要它 —— 它们的结果本来就是"一步一次"的标量。
+    """
     if step in ("doctor", "doctor_deep"):
         rep = doctor_mod.run(cfg, only=project, deep=(step == "doctor_deep"))
         # 把逐条证据也推进事件流 —— 界面上的"证据轨"就靠它，而不是靠猜
@@ -179,14 +185,183 @@ def _execute(cfg: Config, step: str, project: str, *, clean: bool, jobs: int | N
                            {"evidence": evidence})
 
     if step == "monitor":
-        v = monitor_mod.run(cfg, project, echo=False, log=sink)
+        # ★ 串口事件由**本进程**（这个 run 的唯一写者）发出 —— 契约 §5.3 / §16.5：
+        #     serial/open → serial/line（逐行）→ serial/close → serial/closed-loop
+        #   monitor.py 是纯库（判据可离线单测），用回调把"串口发生了什么"交出来；
+        #   接线放这里，于是"判定"与"传输"不焊死。
+        def _ev(topic: str, **fields):
+            if elog is not None:
+                elog.emit(topic, project=project, **fields)
+
+        v = monitor_mod.run(
+            cfg, project, echo=False, log=sink,
+            on_open=lambda port, baud, backend, layer: _ev(
+                SERIAL_OPEN, port=port, baud=baud, backend=backend, layer=layer),
+            on_line=lambda ts, line: _ev(SERIAL_LINE, line=line, t=round(ts, 3)),
+            on_close=lambda verdict: _ev(
+                SERIAL_CLOSE, port=verdict.port, bytes=verdict.bytes_seen,
+                lines=len(verdict.lines), backend=verdict.backend),
+        )
         # ★ 三态不能塌成两态：inconclusive（没读到约定关键字）**不是失败**。
         #   与 cmd_loop 的语义保持一致；verdict 原样带给界面，让它分三色渲染。
         ok = v.status != "failed"
         extra = {"verdict": v.status, "serial": v.to_dict()}
+        # §16.5：命中即发 ``serial/closed-loop`` 并**带证据行**。
+        # ★ rule/evidence 直接取 judge() 已算好的 ``evidence[0]``（它本来就带 rule 键），
+        #   不去解析 reason 文案 —— 靠字符串解析是脆的，文案一改就静默失效。
+        top = (v.evidence or [{}])[0]
+        _ev(SERIAL_CLOSED_LOOP, verdict=v.status,
+            rule=top.get("rule") or "",
+            evidence=top.get("line") or v.reason or "",
+            detail=v.reason or "")
         return StepOutcome(ok, (v.reason or v.status), extra)
 
     raise RunError(f"未知步骤：{step}")
+
+
+# ── 只读预演（M2：「先看命令再执行」）────────────────────────────
+def preview(cfg: Config, project: str, *, steps=None, clean: bool = False,
+            jobs: int | None = None) -> dict:
+    """把每个步骤**将要执行**的东西算出来，**什么都不做**。
+
+    为什么值得单独做（R8「可手动干预」的前置）：
+    驾驶舱里有"跑全闭环"这种高后果按钮，``--clean`` 还会**真删**工作目录。
+    用户按下之前必须能看清它到底会执行什么 —— 尤其是 openocd 用了哪份
+    interface/target cfg、cmake 带了哪些 ``-D``、以及哪个目录会被删掉。
+
+    ★ 本函数**不复制任何命令构造逻辑**，而是复用各模块自己的
+      dry-run / print 分支。理由：预览一旦与实跑分叉，"先看命令再执行"
+      就从保障退化成**误导**，而且分叉是静默的 —— 没人会逐字比对两条命令。
+      为此 `builder.build_command()` 被抽成函数、`flash`/`debug` 各加了
+      `allow_missing_elf`（预览要能在**还没 build** 时也显示命令）。
+
+    :returns: ``{project, steps, clean, jobs, plan:[...], warnings:[...]}``
+              —— 结构直接 JSON 化给 ``/api/plan`` 与 ``elab run --dry-run``。
+    """
+    steps = parse_steps(",".join(steps) if isinstance(steps, (list, tuple)) else steps)
+    plan: list[dict] = []
+    warnings: list[str] = []
+
+    # 需要 ELF 的两步共用一个 plan；只在真用得上时才构造（plan_for 会读 YAML）
+    _plan_cache: dict = {}
+
+    def _p():
+        if "p" not in _plan_cache:
+            _plan_cache["p"] = plan_for(cfg, project)
+        return _plan_cache["p"]
+
+    for step in steps:
+        entry: dict = {"step": step, "spawns": True, "commands": [],
+                       "effects": [], "note": "", "blocked": False}
+
+        if step in ("doctor", "doctor_deep"):
+            deep = step == "doctor_deep"
+            entry["spawns"] = deep
+            entry["note"] = ("静态体检：只读 L0/L1/L4 与工具链描述，**不派生子进程**。"
+                             if not deep else
+                             "深度体检：额外真跑一次 cmake configure（会写工作目录，但不编译）。")
+
+        elif step == "build":
+            p = _p()
+            res = builder.build_project(p, dry_run=True)
+            cmds = [res.get("configure_cmd") or p.configure_cmd(),
+                    builder.build_command(p, jobs)]
+            entry["commands"] = [c for c in cmds if c]
+            entry["work_dir"] = res.get("work_dir", "")
+            if clean:
+                entry["effects"].append(
+                    f"先删除工作目录（不可逆）：{res.get('work_dir', '')}")
+            entry["note"] = (f"generator={p.generator}  type={p.build_type}  "
+                             f"artifact={Path(p.elf).name if p.elf else '(未声明)'}")
+
+        elif step == "flash":
+            p = _p()
+            try:
+                res = flash_mod.flash(p, dry_run=True, allow_missing_elf=True, log=lambda *a: None)
+                entry["commands"] = [res.get("argv") or []]
+                if not res.get("elf_exists"):
+                    entry["blocked"] = True
+                    warnings.append(
+                        f"flash 需要 ELF 已存在：{res.get('elf', '')} 目前不存在 —— "
+                        f"预览按预期路径给出命令；真烧录前必须先 build。")
+                entry["note"] = f"openocd program {{elf}} verify reset exit → {res.get('chip', '')}"
+            except ElabError as exc:
+                entry["blocked"] = True
+                entry["note"] = f"无法给出命令：{exc}"
+
+        elif step == "debug_verify":
+            p = _p()
+            try:
+                res = flash_mod.debug(p, mode="print", allow_missing_elf=True,
+                                      log=lambda *a: None)
+                entry["commands"] = [res.get("openocd") or [], res.get("gdb") or []]
+                if not Path(res.get("elf") or p.elf).exists():
+                    entry["blocked"] = True
+                    warnings.append(
+                        f"debug_verify 需要 ELF 已存在：{p.elf} 目前不存在。")
+                entry["note"] = "非交互自检：断到 main → 打证据 → reset run 退出"
+            except ElabError as exc:
+                entry["blocked"] = True
+                entry["note"] = f"无法给出命令：{exc}"
+
+        elif step == "monitor":
+            # 串口没有"命令行"可预览，但有**等效的确定性参数**：
+            # 选哪个口、什么波特率、按什么判据判 —— 这三样才是"它会做什么"。
+            entry["spawns"] = False
+            ser = (cfg.resolved_project(project).get("serial") or {})
+            mon = (cfg.resolved_project(project).get("monitor") or {})
+            host_ser = (cfg.host or {}).get("serial") or {}
+            entry["serial"] = {
+                "port": ser.get("port") or host_ser.get("default") or "auto",
+                "baud": ser.get("baud") or host_ser.get("baud") or 115200,
+                "close_on": mon.get("close_on") or [],
+                "fail_on": mon.get("fail_on") or [],
+                "idle_timeout_s": mon.get("idle_timeout_s"),
+            }
+            entry["note"] = ("不开子进程：本进程直接读串口（ctypes/pyserial 三层降级），"
+                             "判定用 monitor.judge()。★ 与 openocd 互斥（约束 N5），"
+                             "故必须排在 flash/debug 之后。")
+
+        else:
+            entry["spawns"] = False
+            entry["note"] = f"未知步骤：{step}"
+
+        plan.append(entry)
+
+    return {"project": project, "steps": list(steps), "clean": bool(clean),
+            "jobs": jobs, "plan": plan, "warnings": warnings}
+
+
+def render_preview(pv: dict) -> str:
+    """人读的预览（``elab run --dry-run``）。"""
+    head = f"project={pv['project']}  steps={','.join(pv['steps'])}"
+    if pv.get("clean"):
+        head += "  --clean"
+    if pv.get("jobs"):
+        head += f"  -j {pv['jobs']}"
+    L = [head, "（只读预览：下列命令**不会**被执行）"]
+    for e in pv.get("plan", []):
+        L.append("")
+        L.append(f"── {e['step']}" + ("  [需前置产物]" if e.get("blocked") else ""))
+        for x in e.get("effects") or []:
+            L.append(f"   ⚠ {x}")
+        for cmd in e.get("commands") or []:
+            if cmd:
+                L.append("   $ " + " ".join(_q(a) for a in cmd))
+        s = e.get("serial")
+        if s:
+            L.append(f"   串口 {s['port']}@{s['baud']}  "
+                     f"close_on={s['close_on'] or '无'}  fail_on={s['fail_on'] or '无'}")
+        if e.get("note"):
+            L.append(f"   · {e['note']}")
+    for w in pv.get("warnings") or []:
+        L.append("")
+        L.append(f"⚠ {w}")
+    return "\n".join(L)
+
+
+def _q(a: str) -> str:
+    return f'"{a}"' if (" " in a or "(" in a) else a
 
 
 # ── 主流程 ───────────────────────────────────────────────────────
@@ -219,7 +394,7 @@ def run(cfg: Config, project: str, *, steps=None, clean: bool = False,
             t0 = time.time()
             try:
                 oc = _execute(cfg, step, project, clean=clean, jobs=jobs,
-                              verbose=verbose, sink=io.sink(step))
+                              verbose=verbose, sink=io.sink(step), elog=elog)
             except ElabError as exc:
                 oc = StepOutcome(False, str(exc))
             dt = time.time() - t0

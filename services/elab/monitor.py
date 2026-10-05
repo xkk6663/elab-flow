@@ -215,7 +215,14 @@ def judge(lines: list[tuple[float, str]], close_on: list[Rule],
                              f"> idle_timeout_s={idle_timeout_s:g}（疑似挂死）"), ev
 
     if not lines:
-        return _INCONCL, "整个观察窗口内一个字节都没收到（固件无输出？接线/波特率？）", ev
+        # ★ 这里必须把"MCU 还停在 halt 态"也列出来 —— 实测踩过：
+        #   上一轮 debug 若没走到收尾的 `reset run`（被取消、异常退出），
+        #   MCU 一直是 held 状态，USART 自然一个字节都不发，而**端口照常能打开**
+        #   （所以 `serial/open` 有、`serial/close` 有、只有数据没有）。
+        #   只写"固件无输出？接线/波特率？"会让人去查错方向（见 ICD §4.1）。
+        return _INCONCL, ("整个观察窗口内一个字节都没收到（端口已打开 → 不是占用问题；"
+                          "固件无 printf？波特率不符？或 **MCU 还停在 halt 态**"
+                          "（debug 收尾若未执行 `reset run`）？）"), ev
     return _INCONCL, (f"收到 {len(lines)} 行，但没有任何一行命中 close_on "
                       f"（板子会说话，只是没说出约定的关键字）"), ev
 
@@ -230,8 +237,22 @@ def _window(close_on: list[Rule], idle_timeout_s: float, override: float) -> flo
 
 
 def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
-        echo: bool = True, reset_port: bool = False, log=print) -> Verdict:
-    """开串口 → 收行 → 判定。返回值可直接 JSON 化。"""
+        echo: bool = True, reset_port: bool = False, log=print,
+        on_open=None, on_line=None, on_close=None) -> Verdict:
+    """开串口 → 收行 → 判定。返回值可直接 JSON 化。
+
+    三个**可选回调**把"串口发生了什么"暴露给调用方，本模块因此**不认识事件**：
+
+    - ``on_open(port, baud, backend, layer)`` —— 端口真的打开了才调（开失败不调）。
+      ``layer`` 是三层降级里**真正生效**的那一层（L1=ctypes / L2=pyserial / …），
+      它属于"我是怎么打开的"，故随 open 一起交付，而不是让人去别处反查。
+    - ``on_line(elapsed_s, line)`` —— 收到一行就调一次（ctx 是**读**方向）
+    - ``on_close(verdict)`` —— 端口关闭后调，**无论正常结束/失败/异常**都会调
+
+    ★ 为什么要回调而不是在本模块里 emit：``monitor.py`` 是纯库（判据引擎可离线单测），
+      一旦让它 import ``kernel.events`` 就把"判定"和"传输"焊死了。
+      ``run.py`` 负责把回调接到事件流上（契约 §5.3「读行 → serial/line 事件」）。
+    """
     proj = cfg.resolved_project(name)
     ser = proj.get("serial") or {}
     mon = proj.get("monitor") or {}
@@ -276,49 +297,65 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
         if ok:
             time.sleep(2.5)          # 等设备重新枚举、驱动重新绑定
 
+    opened = False
     try:
-        with sp.SerialIO(chosen, baud) as s:
-            log(f"[monitor] 已打开 {chosen}@{baud}（backend={s.backend}），开始收行…")
-            t0 = time.time()
-            lines: list[tuple[float, str]] = []
-            buf = b""
-            ok_at = None
-            while True:
-                now = time.time() - t0
-                # ★ ok 之后不立刻收工：再观察 settle_s，让「启动后马上崩」仍能翻盘成 failed
-                if ok_at is not None and now - ok_at >= settle:
-                    break
-                if now > win:
-                    break
-                chunk = s.read(4096)
-                now = time.time() - t0
-                if not chunk:
-                    time.sleep(0.02)
-                    continue
-                v.bytes_seen += len(chunk)
-                buf += chunk
-                while b"\n" in buf:
-                    raw_line, buf = buf.split(b"\n", 1)
-                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
-                    lines.append((now, line))
-                    if echo:
-                        log(f"[serial] +{now:6.2f}s  {line}")
-                st, why2, ev = judge(lines, close_on, fail_on,
-                                     idle_timeout_s=idle, elapsed_s=now)
-                v.status, v.reason, v.evidence = st, why2, ev
-                if st == _FAILED:
-                    v.lines = [ln for _t, ln in lines]
-                    v.elapsed_s = now
-                    return v
-                if st == _OK and ok_at is None:
-                    ok_at = now
+        try:
+            with sp.SerialIO(chosen, baud) as s:
+                opened = True
+                log(f"[monitor] 已打开 {chosen}@{baud}（backend={s.backend}），开始收行…")
+                if on_open is not None:
+                    on_open(chosen, baud, s.backend, v.layer)
+                t0 = time.time()
+                lines: list[tuple[float, str]] = []
+                buf = b""
+                ok_at = None
+                while True:
+                    now = time.time() - t0
+                    # ★ ok 之后不立刻收工：再观察 settle_s，让「启动后马上崩」仍能翻盘成 failed
+                    if ok_at is not None and now - ok_at >= settle:
+                        break
+                    if now > win:
+                        break
+                    chunk = s.read(4096)
+                    now = time.time() - t0
+                    if not chunk:
+                        time.sleep(0.02)
+                        continue
+                    v.bytes_seen += len(chunk)
+                    buf += chunk
+                    while b"\n" in buf:
+                        raw_line, buf = buf.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                        lines.append((now, line))
+                        if echo:
+                            log(f"[serial] +{now:6.2f}s  {line}")
+                        if on_line is not None:
+                            on_line(now, line)
+                    st, why2, ev = judge(lines, close_on, fail_on,
+                                         idle_timeout_s=idle, elapsed_s=now)
+                    v.status, v.reason, v.evidence = st, why2, ev
+                    if st == _FAILED:
+                        v.lines = [ln for _t, ln in lines]
+                        v.elapsed_s = now
+                        return v
+                    if st == _OK and ok_at is None:
+                        ok_at = now
 
-            v.elapsed_s = time.time() - t0
-            v.lines = [ln for _t, ln in lines]
-            st, why2, ev = judge(lines, close_on, fail_on,
-                                 idle_timeout_s=idle, elapsed_s=v.elapsed_s)
-            v.status, v.reason, v.evidence = st, why2, ev
-            return v
+                v.elapsed_s = time.time() - t0
+                v.lines = [ln for _t, ln in lines]
+                st, why2, ev = judge(lines, close_on, fail_on,
+                                     idle_timeout_s=idle, elapsed_s=v.elapsed_s)
+                v.status, v.reason, v.evidence = st, why2, ev
+                return v
+        finally:
+            # ★ 放在 finally 的原因：上面有【三条】return 路径（失败早退 / 正常结束 / 抛异常），
+            #   少覆盖一条就会漏发 ``serial/close`` —— 而"端口还开着"是会咬人的状态。
+            #   回调异常**不吞**，但也不能掩盖真正的异常，故只记一笔。
+            if opened and on_close is not None:
+                try:
+                    on_close(v)
+                except Exception as exc:          # noqa: BLE001
+                    log(f"[monitor] — on_close 回调异常（未掩盖原异常）：{exc}")
     except OSError as exc:
         v.status = _INCONCL
         v.reason = f"打开串口失败：{exc}"
