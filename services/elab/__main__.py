@@ -23,6 +23,7 @@ from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, f
 from . import monitor as monitor_mod
 from . import run as run_mod
 from . import serialport as serialport_mod
+from . import serialterm as serialterm_mod
 from . import skillgen
 from .plan import plan_for
 
@@ -94,6 +95,21 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--reset-port", action="store_true",
                    help="先尝试软复位该 USB 设备（等价拔插一次 DAP-Link，通常需管理员权限）")
     p.add_argument("--caps", action="store_true", help="只打印串口后端能力并退出")
+
+    p = sub.add_parser("serial",
+                       help="手写通道：往串口写一条、收一小段回显（M3-b）")
+    _add_common(p)
+    p.add_argument("-p", "--project", required=True, help="项目名（决定默认端口/波特率）")
+    p.add_argument("--data", required=True,
+                   help="要发送的内容（默认按 UTF-8 文本发，见 --hex）")
+    p.add_argument("--port", help="覆盖 serial.port（默认取 projects/*.yaml）")
+    p.add_argument("--baud", type=int, help="覆盖 serial.baud")
+    p.add_argument("--read-ms", type=int, default=serialterm_mod.DEFAULT_READ_MS,
+                   help=f"写完之后收多久回显（默认 {serialterm_mod.DEFAULT_READ_MS}ms）")
+    p.add_argument("--no-newline", action="store_true",
+                   help="不自动附加 CRLF（默认附加）")
+    p.add_argument("--hex", action="store_true",
+                   help="按十六进制解析 --data（如 '01 A0 FF'）；此时不附加 CRLF")
 
     p = sub.add_parser("ci", help="按 ci/matrix.yaml 跑 CI 矩阵")
     _add_common(p)
@@ -188,6 +204,8 @@ def _dispatch(args) -> int:
         return cmd_adapt(cfg, args)
     if args.cmd == "monitor":
         return cmd_monitor(cfg, args)
+    if args.cmd == "serial":
+        return cmd_serial(cfg, args)
     return 2
 
 
@@ -362,6 +380,24 @@ def cmd_monitor(cfg: Config, args) -> int:
     else:
         print(monitor_mod.render(v))
     return monitor_mod.exit_code(v)
+
+
+def cmd_serial(cfg: Config, args) -> int:
+    """手写通道（M3-b）。退出码：0=写成功（**不代表**设备一定回应），1=写失败。
+
+    ★ 与驾驶舱的 `POST /api/serial` 共用 `serialterm.roundtrip()` —— 只有一份实现，
+      所以"CLI 能发、界面发不出"这类不一致在结构上就不可能出现。
+    """
+    res = serialterm_mod.roundtrip(
+        cfg, args.project, data=args.data, port=args.port or "",
+        baud=args.baud or 0, read_ms=args.read_ms,
+        newline=not args.no_newline, hex_=args.hex,
+        log=(lambda *a, **k: None) if args.json else print)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print(serialterm_mod.render(res))
+    return 0 if res["ok"] else 1
 
 
 # ── loop：一键闭环 ────────────────────────────────────────────────

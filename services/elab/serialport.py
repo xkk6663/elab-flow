@@ -93,6 +93,10 @@ def _win32():
             wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
             ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
         k32.ReadFile.restype = wintypes.BOOL
+        k32.WriteFile.argtypes = [
+            wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        k32.WriteFile.restype = wintypes.BOOL
         k32.BuildCommDCBW.argtypes = [wintypes.LPCWSTR, wintypes.LPVOID]
         k32.BuildCommDCBW.restype = wintypes.BOOL
         k32.SetCommState.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
@@ -327,13 +331,38 @@ def diagnose_denied(com: str) -> str:
             f"          · 设备处于残留状态 —— 拔插一次 DAP-Link，或试 `elab monitor --reset-port`。")
 
 
+def _open_error(com: str, err: int) -> str:
+    """按 ``GetLastError`` 给**对症**的提示。
+
+    ★ 必须区分错误码：原实现无条件拼上 `diagnose_denied()`，于是"COM 号写错/设备没插"
+      （``ERROR_FILE_NOT_FOUND=2``）被报成"被 openocd 占用"—— 用户会照着错误提示去
+      杀进程、拔插，而真正的问题是端口名。**错误提示指错方向比不提示更坏。**
+    """
+    head = f"CreateFileW(\\\\.\\{com}) 失败，GetLastError={err}"
+    if err == 2:      # ERROR_FILE_NOT_FOUND
+        return (f"{head}（ERROR_FILE_NOT_FOUND）\n"
+                f"          {com} **不存在** —— 端口名写错了？设备没插？"
+                f"拔插过（重新枚举后 COM 号会变）？")
+    if err == 5:      # ERROR_ACCESS_DENIED
+        return f"{head}（ERROR_ACCESS_DENIED）\n          " + diagnose_denied(com)
+    return head
+
+
 # ── 开一个口：统一 read/close 接口 ────────────────────────────────
 class SerialIO:
-    """只读串口。优先 pyserial，退到 ctypes。用法：``with SerialIO(p, 115200) as s``"""
+    """串口 IO。**默认只读**（monitor 的语义）；``for_write=True`` 才请求写权限。
 
-    def __init__(self, port: str, baud: int = 115200):
+    ★ 为什么默认只读：monitor 是"旁观者"，只读能减少对目标的影响；而**写权限**
+      意味着我们**有能力**打断固件 —— 那必须是一个**显式决定**，不该是顺手就有的
+      能力。用法：``with SerialIO(p, 115200, for_write=True) as s: s.write(b"help\\r\\n")``
+
+    优先 pyserial，退到 ctypes（约束 N5 的三层降级见模块 docstring）。
+    """
+
+    def __init__(self, port: str, baud: int = 115200, *, for_write: bool = False):
         self.port = port
         self.baud = baud
+        self.for_write = for_write
         self.backend = ""
         self._h = None
         self._ser = None
@@ -358,11 +387,14 @@ class SerialIO:
         if env is None:
             raise OSError(f"无法打开串口：本机既无 pyserial 也无 Win32 后端（{err}）")
         ctypes, wintypes, k32, _winreg = env
-        GENERIC_READ, OPEN_EXISTING, INVALID = 0x80000000, 3, ctypes.c_void_p(-1).value
+        GENERIC_READ, GENERIC_WRITE = 0x80000000, 0x40000000
+        OPEN_EXISTING, INVALID = 3, ctypes.c_void_p(-1).value
+        # 只有显式声明写意图才申请 GENERIC_WRITE —— 见类 docstring。
+        access = GENERIC_READ | (GENERIC_WRITE if self.for_write else 0)
         # ERROR_ACCESS_DENIED = 5：刚跑完 openocd 时设备句柄可能还没释放完，
         # 短暂重试几次通常就好了 —— 直接报错对用户太不友好，死等又太蠢，折中。
         for k in range(max(1, attempts)):
-            h = k32.CreateFileW(f"\\\\.\\{self.port}", GENERIC_READ, 0, None,
+            h = k32.CreateFileW(f"\\\\.\\{self.port}", access, 0, None,
                                 OPEN_EXISTING, 0, None)
             if h != INVALID:
                 break
@@ -370,9 +402,7 @@ class SerialIO:
                 break
             time.sleep(delay)
         if h == INVALID:
-            raise OSError(f"CreateFileW(\\\\.\\{self.port}) 失败，"
-                          f"GetLastError={ctypes.get_last_error()}\n          "
-                          + diagnose_denied(self.port))
+            raise OSError(_open_error(self.port, ctypes.get_last_error()))
         # ★ 用 BuildCommDCBW 从字符串填 DCB，避免手写脆弱的位域布局；
         #   我们只需把 DCB 当不透明缓冲传下去（sizeof(DCB)=28，给 64 足够）。
         dcb = ctypes.create_string_buffer(64)
@@ -387,6 +417,10 @@ class SerialIO:
         to[0] = 50        # ReadIntervalTimeout
         to[1] = 0         # ReadTotalTimeoutMultiplier
         to[2] = 200       # ReadTotalTimeoutConstant（阻塞上限 200ms）
+        # ★ 写超时：0/0 = 无上限，WriteFile 会一直阻塞到写完或出错。写通道是
+        #   交互式的（用户正等着回显），**卡死比报错更糟** → 给 2s 上限。
+        to[3] = 0         # WriteTotalTimeoutMultiplier
+        to[4] = 2000 if self.for_write else 0   # WriteTotalTimeoutConstant
         if not k32.SetCommTimeouts(h, to):
             k32.CloseHandle(h)
             raise OSError(f"SetCommTimeouts 失败，GetLastError={ctypes.get_last_error()}")
@@ -410,6 +444,35 @@ class SerialIO:
         if not k32.ReadFile(self._h, buf, n, ctypes.byref(got), None):
             return b""
         return buf.raw[:got.value]
+
+    def write(self, data: bytes) -> int:
+        """写字节，返回**实际写出**的字节数（写失败返回 0，不抛）。
+
+        ★ 只读打开的实例**拒绝**写：pyserial 后端天然可写，若不加这道闸门，
+          "只读"就只是个口号 —— 一次笔误就能把数据发给固件。
+        """
+        if not self.for_write:
+            raise OSError("SerialIO 以只读方式打开（for_write=False）—— "
+                          "写入必须显式声明写意图")
+        if not data:
+            return 0
+        if self._ser is not None:
+            n = self._ser.write(data)
+            self._ser.flush()
+            return int(n or 0)
+        if self._h is None:
+            return 0
+        import ctypes
+        from ctypes import wintypes
+        env, _e = _win32()
+        if env is None:
+            return 0
+        _ctypes, _wintypes, k32, _winreg = env
+        buf = ctypes.create_string_buffer(bytes(data), len(data))
+        put = wintypes.DWORD(0)
+        if not k32.WriteFile(self._h, buf, len(data), ctypes.byref(put), None):
+            return 0
+        return int(put.value)
 
     def close(self) -> None:
         if self._ser is not None:
