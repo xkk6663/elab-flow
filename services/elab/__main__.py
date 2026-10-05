@@ -75,9 +75,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("-p", "--project", required=True, help="项目名")
     p.add_argument("--clean", action="store_true", help="先清空工作目录")
+    p.add_argument("--no-flash", action="store_true", help="跳过 flash 烧录（无探针环境）")
     p.add_argument("--no-debug", action="store_true", help="跳过 debug 自检")
     p.add_argument("--no-monitor", action="store_true", help="跳过串口闭环判据")
-    p.add_argument("--dry-run", action="store_true", help="只跑到 build，不烧录")
+    p.add_argument("--dry-run", action="store_true",
+                   help="只读预览本轮将执行的命令与效果（什么都不执行）。"
+                        "想\"只跑 doctor+build 不烧录\"请用 --no-flash --no-debug --no-monitor")
     p.add_argument("-v", "--verbose", action="store_true")
 
     p = sub.add_parser("monitor",
@@ -118,6 +121,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-q", "--quiet", action="store_true", help="不回显逐行输出")
     p.add_argument("--keep-going", action="store_true",
                    help="失败也继续跑后续步骤（默认失败即停）")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="只读预览：打印每步将执行的命令/效果，**不执行任何东西**")
 
     p = sub.add_parser("skill", help="由 chips/*.yaml 生成 per-chip AI skill")
     _add_common(p)
@@ -367,11 +372,40 @@ def cmd_loop(cfg: Config, args) -> int:
       DAP-Link 是复合 USB 设备，openocd 占着 SWD 时它的虚拟串口打不开（约束 N5）。
     """
     name = args.project
-    steps = []
-    n_steps = 4 if args.no_monitor else 5
 
-    def step(no, title):
-        print(f"\n{'=' * 62}\n[{no}/{n_steps}] {title}\n{'=' * 62}")
+    # ★ `--dry-run` 在本仓库**只有一个意思**：只读预览，什么都不执行。
+    #   历史包袱：本命令早先把它实现成"跑到 build 就停"（真编译、不烧录），
+    #   而同族的 `elab build/flash --dry-run` 是"只打印命令"。同一个 flag
+    #   在两条子命令上意思相反，是最容易误伤的那类陷阱 ——
+    #   用户以为"预览一下"，结果真编译了（还有 `--clean` 时甚至会删掉工作目录）。
+    #   故统一到"只读预览"；原来那个能力**并未丢失**，用现成的
+    #   `--no-flash --no-debug --no-monitor` 即可（或直接 `elab build`）。
+    if args.dry_run:
+        # 预览的步骤序列必须**与下面真正要跑的一致**（含 --no-* 开关的影响），
+        # 否则预览又变成"说的和做的不一样"。
+        pv_steps = ["doctor", "build"]
+        if not args.no_flash:
+            pv_steps.append("flash")
+        if not args.no_debug:
+            pv_steps.append("debug_verify")
+        if not args.no_monitor:
+            pv_steps.append("monitor")
+        return cmd_run(cfg, argparse.Namespace(
+            project=name, steps=",".join(pv_steps), clean=args.clean, jobs=None,
+            verbose=args.verbose, actor="agent", emit_events=False,
+            run_id=None, quiet=False, events_dir=None, keep_going=False,
+            json=getattr(args, "json", False), dry_run=True))
+
+    steps = []
+    # 步骤总数随 --no-* 开关变化；**别再手写编号**（旧版写死 [3/5]/[4/5]，
+    # 加了 --no-flash 之后编号就会自相矛盾）。
+    n_steps = 2 + (0 if args.no_flash else 1) + \
+        (0 if args.no_debug else 1) + (0 if args.no_monitor else 1)
+    _no = [0]
+
+    def step(_unused, title):
+        _no[0] += 1
+        print(f"\n{'=' * 62}\n[{_no[0]}/{n_steps}] {title}\n{'=' * 62}")
 
     # ① doctor
     step(1, f"doctor —— 环境体检 + 漂移校验（{name}）")
@@ -392,17 +426,19 @@ def cmd_loop(cfg: Config, args) -> int:
         print("\n[elab] ✗ 构建失败，闭环中止")
         return 1
 
-    if args.dry_run:
-        print("\n[elab] --dry-run：已停在 build，未烧录")
-        return 0
-
     # ③ flash
-    step(3, "flash —— openocd 烧录 + verify")
-    f = flash_mod.flash(plan, verbose=args.verbose)
-    steps.append(("flash", f["status"] == "ok"))
-    if f["status"] != "ok":
-        print("\n[elab] ✗ 烧录失败，闭环中止")
-        return 1
+    if not args.no_flash:
+        step(3, "flash —— openocd 烧录 + verify")
+        f = flash_mod.flash(plan, verbose=args.verbose)
+        steps.append(("flash", f["status"] == "ok"))
+        if f["status"] != "ok":
+            print("\n[elab] ✗ 烧录失败，闭环中止")
+            return 1
+    else:
+        # 无探针环境（CI/笔记本上没插板）：doctor+build 仍然可跑，这正是
+        # `--no-flash --no-debug --no-monitor` 的用途 —— 它替换掉了旧版
+        # `--dry-run` 那个"跑到 build 就停"的语义（见 cmd_loop 顶部注释）。
+        steps.append(("flash", None))
 
     # ④ debug verify
     if not args.no_debug:
@@ -471,6 +507,18 @@ def cmd_run(cfg: Config, args) -> int:
     退出码：0 = 全部步骤通过；1 = 有步骤失败。**与 `elab ci` 一致**，
     方便驾驶舱/脚本直接看码而不必解析输出。
     """
+    # ★ `--dry-run` 走**另一条路**：预览是只读的，绝不发射事件、绝不写工作目录。
+    #   退出码恒为 0（"能不能预览出来"不是"预览出来的东西能不能跑通"）。
+    if getattr(args, "dry_run", False):
+        pv = run_mod.preview(cfg, args.project, steps=args.steps,
+                             clean=args.clean, jobs=args.jobs)
+        if args.json:
+            print(json.dumps(pv, ensure_ascii=False, indent=2))
+        else:
+            print()
+            print(run_mod.render_preview(pv))
+        return 0
+
     res = run_mod.run(
         cfg, args.project,
         steps=args.steps, clean=args.clean, jobs=args.jobs,

@@ -263,6 +263,23 @@ def _tail(text: str, n: int = 25) -> str:
     return "\n".join(lines[-n:])
 
 
+def build_command(plan: Plan, jobs: int | None = None) -> list[str]:
+    """构建命令行。**预览（`elab run --dry-run` / `/api/plan`）与实跑共用这一个来源。**
+
+    ★ 为什么必须抽成函数，而不是预览那边照着抄一遍：
+      预览的全部价值在于"我说的就是待会儿真跑的"。一旦两处分叉，
+      预览就从"先看命令再执行"退化成**误导** —— 那比没有预览更坏，
+      而且分叉是静默的（没人会去逐字比对两条命令）。
+
+    另：``jobs`` 走 ``-j`` 而不是 ``--parallel``，因为 ``cmake --build`` 两者都收，
+    但 ``-j`` 与用户脑子里那条手工命令一致（本仓库的历史约定）。
+    """
+    cmd = plan.build_cmd()
+    if jobs:
+        cmd += ["-j", str(jobs)]
+    return cmd
+
+
 # ── 主流程 ────────────────────────────────────────────────────────
 def build_project(
     plan: Plan,
@@ -318,9 +335,7 @@ def build_project(
     log("[elab] ✓ configure")
 
     # ② build
-    cmd = plan.build_cmd()
-    if jobs:
-        cmd += ["-j", str(jobs)]
+    cmd = build_command(plan, jobs)
     log(f"[elab] build  → {plan.generator}")
     rc, out, err = _run(cmd, env, plan.cfg.root, verbose)
     if rc != 0:

@@ -66,14 +66,26 @@ def _salient(text: str) -> list[str]:
     return out
 
 
-def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print) -> dict:
+def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print,
+          allow_missing_elf: bool = False) -> dict:
+    """烧录。
+
+    :param allow_missing_elf: **仅预览用**。默认 ``False``（真烧录时 ELF 不在就必须报错，
+        否则 openocd 会去 program 一个不存在的文件，报出来的错离根因很远）。
+        预览（``elab run --dry-run`` / ``/api/plan``）要能在**还没 build** 时
+        就显示待执行的 openocd 命令行，故允许显式放开这一条 —— 用参数而不是
+        "预览自己拼一遍命令"，是为了让命令构造**只有一个来源**。
+    """
     elf = plan.elf
-    if not elf or not Path(elf).exists():
+    if not elf or (not allow_missing_elf and not Path(elf).exists()):
         raise ElabError(f"ELF 不存在，请先 `elab build -p {plan.name}`：{elf}")
+    if not elf:
+        raise ElabError(f"项目未声明产物 artifacts.elf：{plan.name}")
 
     argv = _openocd_argv(plan, f"program {{{to_fwd(elf)}}} verify reset exit")
     res = {"project": plan.name, "chip": plan.chip.get("id"), "elf": to_fwd(elf),
-           "argv": argv, "status": "dry-run" if dry_run else "pending"}
+           "argv": argv, "status": "dry-run" if dry_run else "pending",
+           "elf_exists": Path(elf).exists()}
     if dry_run:
         return res
 
@@ -115,17 +127,22 @@ def _wait_port(port: int = 3333, timeout: float = 20.0, host: str = "127.0.0.1")
     return False
 
 
-def debug(plan: Plan, *, mode: str = "print", log=print) -> dict:
+def debug(plan: Plan, *, mode: str = "print", log=print,
+          allow_missing_elf: bool = False) -> dict:
     """调试闭环。
 
     mode:
       print  —— 只打印 openocd + gdb 命令（不连板）
       run    —— 起 openocd 服务 + 交互式 gdb（人在终端里调试）
       verify —— 非交互自检：断到 main 后打印证据并退出（可被判 PASS/FAIL）
+
+    ``allow_missing_elf`` 语义同 :func:`flash`（仅预览放开）。
     """
     elf = plan.elf
-    if not elf or not Path(elf).exists():
+    if not elf or (not allow_missing_elf and not Path(elf).exists()):
         raise ElabError(f"ELF 不存在，请先 `elab build -p {plan.name}`：{elf}")
+    if not elf:
+        raise ElabError(f"项目未声明产物 artifacts.elf：{plan.name}")
 
     server = _openocd_argv(plan, "")
     gdb_bin = plan.host.gdb or "arm-none-eabi-gdb"
