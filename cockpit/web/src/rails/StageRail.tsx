@@ -5,7 +5,6 @@ import type { RunSnapshot, StepView } from "../store/runStore";
 import { Button } from "../primitives/Button";
 import { DisclosureRow } from "../primitives/DisclosureRow";
 import { Input } from "../primitives/Input";
-import { Menu } from "../primitives/Menu";
 import { PathLabel } from "../primitives/PathLabel";
 import { StateDot } from "../primitives/StateDot";
 import { Switch } from "../primitives/Switch";
@@ -13,7 +12,7 @@ import { Tag, Pill } from "../primitives/Tag";
 import { TextShimmer } from "../primitives/TextShimmer";
 import { Tooltip } from "../primitives/Tooltip";
 import { MemoryGauge } from "../render/MemoryGauge";
-import { IconPlay, IconRefresh, IconShield, IconStop, IconWrench } from "../icons";
+import { IconPlay, IconRefresh, IconShield, IconStop } from "../icons";
 import s from "./StageRail.module.css";
 
 const STEP_LABEL: Record<string, string> = {
@@ -26,6 +25,25 @@ const STEP_LABEL: Record<string, string> = {
 };
 
 export const stepLabel = (id: string): string => STEP_LABEL[id] ?? id;
+
+/**
+ * 「跑全闭环」的步序（C30）。
+ *
+ * ★ 必须**显式**传给 `POST /api/run`：后端不传 steps 时只跑
+ *   `DEFAULT_STEPS = doctor + build`（那是 M1 验收范围的"默认两步"，不是全闭环）
+ *   —— 此前「跑全闭环」按钮恰恰不传 steps，于是跑完编译就停，与按钮承诺不符。
+ *
+ * 全闭环 = 全部步骤去掉 `doctor_deep`（它是 doctor 的重型变体、会真跑一次
+ * configure，不是流水线上独立的一站），再按当前工程可用性过滤 ——
+ * 没接板就把 flash / debug_verify / monitor 滤掉，否则是"点一下必然失败"。
+ */
+export function fullLoopSteps(
+  card: ProjectCard | null,
+  caps: Capabilities | null,
+): StepId[] {
+  const all = (caps?.steps.all ?? Object.keys(STEP_LABEL)) as StepId[];
+  return all.filter((id) => id !== "doctor_deep" && (card?.steps[id]?.ok ?? true));
+}
 
 export interface StageRailProps {
   card: ProjectCard | null;
@@ -126,11 +144,13 @@ export function StageRail({
     );
   }
 
-  // run 未开始时，用默认步序画"待跑"骨架；run 起来后以 run/start 声明的序列为准
+  // run 未开始时，用"全闭环"的步序画"待跑"骨架；run 起来后以 run/start 声明的序列为准。
+  // ★ 骨架必须与 onRunAll 实际传的步序同源（同一个 fullLoopSteps），否则
+  //   "骨架画着五步、点下去只跑两步"这种自相矛盾会直接暴露给用户。
   const declared: StepView[] =
     run.steps.length > 0
       ? run.steps
-      : (caps?.steps.default ?? []).map((id, index) => ({
+      : fullLoopSteps(card, caps).map((id, index) => ({
           id,
           index,
           state: "pending" as const,
@@ -225,30 +245,10 @@ export function StageRail({
           busy={busy}
           disabled={running}
           onClick={onRunAll}
-          title="按 ci/matrix.yaml 的全量步序跑一遍（含上板）"
+          title="完整闭环：体检 → 编译 → 烧录 → 调试校验 → 串口闭环（不可用的步骤自动排除）"
         >
           跑全闭环
         </Button>
-        <Menu
-          align="left"
-          title="只跑指定步骤"
-          trigger={
-            <Button icon={<IconWrench />} disabled={running} title="单步执行">
-              单步
-            </Button>
-          }
-          items={(caps?.steps.all ?? (Object.keys(STEP_LABEL) as StepId[])).map((id) => {
-            const ok = card.steps[id]?.ok ?? true;
-            return {
-              id,
-              label: stepLabel(id),
-              hint: ok ? "" : "不可用",
-              disabled: !ok,
-              checked: (caps?.steps.default ?? []).includes(id),
-            };
-          })}
-          onSelect={(id) => onRunSteps([id as StepId])}
-        />
         <Button
           variant="danger"
           icon={<IconStop />}
@@ -288,6 +288,32 @@ export function StageRail({
             {run.status}
           </Pill>
         ) : null}
+      </div>
+
+      {/* ── 单步执行：一步一颗独立按钮（不再藏在下拉菜单里）──
+          每颗按钮的可用性来自 `card.steps[id].ok`（服务端已算好"不可用的理由"），
+          置灰时 tooltip 直接说出原因 —— 不让用户点了才知道失败。 */}
+      <div className={[s.bar, s.stepBar].join(" ")} role="group" aria-label="单步执行">
+        <span className={s.stepBarLabel}>单步</span>
+        {(caps?.steps.all ?? (Object.keys(STEP_LABEL) as StepId[])).map((id) => {
+          const st = card.steps[id];
+          const ok = st?.ok ?? true;
+          const onhw = (caps?.steps.onhw ?? []).includes(id);
+          const tip = !ok
+            ? st?.reason || "不可用"
+            : `只跑这一步：${stepLabel(id)}${onhw ? "（需探针在位）" : ""}`;
+          return (
+            <Tooltip key={id} tip={tip}>
+              <Button
+                size="sm"
+                disabled={running || !ok}
+                onClick={() => onRunSteps([id as StepId])}
+              >
+                {stepLabel(id)}
+              </Button>
+            </Tooltip>
+          );
+        })}
       </div>
 
       {/* ── M2 运行参数（clean / jobs）── */}

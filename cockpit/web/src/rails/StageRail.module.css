@@ -159,6 +159,19 @@
   flex: 1 1 auto;
 }
 
+/* ── 单步按钮排（六步独立按钮，替代原「单步」下拉菜单）── */
+.stepBar {
+  flex-wrap: wrap;
+  padding-top: var(--elab-space-2);
+  padding-bottom: var(--elab-space-2);
+}
+.stepBarLabel {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-xs);
+  letter-spacing: 0.08em;
+  color: var(--elab-fg-faint);
+}
+
 /* ── 区块 ── */
 .sect {
   flex: 0 0 auto;

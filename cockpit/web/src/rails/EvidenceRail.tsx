@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Capabilities } from "../api/types";
+import type { Capabilities, ProjectCard, StepId } from "../api/types";
 import { logs, type LogTab } from "../store/logs";
 import { useRun } from "../store/runStore";
 import { LogView, ringToText } from "../render/LogView";
@@ -9,10 +9,17 @@ import { SegmentedTabs, type SegTab } from "../primitives/SegmentedTabs";
 import { Switch } from "../primitives/Switch";
 import { Tooltip } from "../primitives/Tooltip";
 import { IconDownload, IconTerminal, IconTrash } from "../icons";
+import { stepLabel } from "./StageRail";
 import s from "./EvidenceRail.module.css";
 
 export interface EvidenceRailProps {
   caps: Capabilities | null;
+  /** 当前工程卡片 —— 单步按钮的可用性（`steps[id].ok` 与理由）来自它 */
+  card: ProjectCard | null;
+  /** 有 run 在跑时单步按钮全部置灰（串口/调试与 run 互斥） */
+  running: boolean;
+  /** 在本 Tab 内直接触发对应单步；null = 上层未接线（按钮置灰并说明） */
+  onRunSteps: ((steps: StepId[]) => void) | null;
   tab: LogTab;
   onTab: (t: LogTab) => void;
   autoScroll: boolean;
@@ -24,6 +31,17 @@ export interface EvidenceRailProps {
   /** 改波特率**立即生效** —— 下一次发送就用新值（无状态往返，不需要先"重开端口"） */
   onSerialBaudChange: (baud: number) => void;
 }
+
+/**
+ * 每个 Tab 对应的单步按钮 —— 单步执行就该出现在"干这件事的界面"里：
+ * 构建 Tab 里有「编译」、烧录 Tab 里有「烧录 / 调试校验」、串口 Tab 里有「串口闭环」。
+ * 按钮可用性与阶段轨同一份来源（`card.steps[id].ok`），两处置灰理由永远一致。
+ */
+const TAB_STEPS: Record<LogTab, StepId[]> = {
+  build: ["build"],
+  flash: ["flash", "debug_verify"],
+  serial: ["monitor"],
+};
 
 /** 常用波特率。工程配置里若是非标值，也插进列表 —— 否则 select 显示不出当前值 */
 const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
@@ -42,6 +60,9 @@ type Counts = Record<LogTab, { lines: number; alerts: number; dropped: number }>
  */
 export function EvidenceRail({
   caps,
+  card,
+  running,
+  onRunSteps,
   tab,
   onTab,
   autoScroll,
@@ -134,6 +155,27 @@ export function EvidenceRail({
           label="跟随"
         />
         <span className={s.spacer} />
+        {/* ── 本 Tab 的单步按钮（用户要求：单步执行要出现在具体界面里）── */}
+        {TAB_STEPS[tab].map((id) => {
+          const av = card?.steps[id];
+          const ok = av?.ok ?? true;
+          const tip = !running
+            ? !ok
+              ? av?.reason || "不可用"
+              : `只跑这一步：${stepLabel(id)}`
+            : "有 run 在跑：串口/调试与 run 互斥，等它结束";
+          return (
+            <Tooltip key={id} tip={tip}>
+              <Button
+                size="sm"
+                disabled={running || !ok || !onRunSteps}
+                onClick={() => onRunSteps?.([id])}
+              >
+                {stepLabel(id)}
+              </Button>
+            </Tooltip>
+          );
+        })}
         <span className={s.meta}>
           {st.lines} 行
           {st.alerts > 0 ? ` · ${st.alerts} 告警` : ""}

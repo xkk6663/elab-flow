@@ -17,7 +17,7 @@ import { cycleTheme, useTheme, type ThemeMode } from "./store/themeStore";
 import { LIMITS, setFontScale, setTab, useLayout } from "./store/layoutStore";
 import { AppFrame } from "./AppFrame";
 import { ProjectsRail } from "./rails/ProjectsRail";
-import { StageRail } from "./rails/StageRail";
+import { StageRail, fullLoopSteps } from "./rails/StageRail";
 import { EvidenceRail } from "./rails/EvidenceRail";
 import { Button } from "./primitives/Button";
 import { Pill } from "./primitives/Tag";
@@ -433,7 +433,7 @@ export default function App() {
             run={run}
             caps={caps}
             busy={busy}
-            onRunAll={() => void startRun()}
+            onRunAll={() => void startRun(fullLoopSteps(card, caps))}
             onRunSteps={(steps) => void startRun(steps)}
             onCancel={() => void cancelRun()}
             onRefresh={() => void loadAll(false)}
@@ -446,6 +446,9 @@ export default function App() {
         evidence={
           <EvidenceRail
             caps={caps}
+            card={card}
+            running={run.status === "running"}
+            onRunSteps={(steps: StepId[]) => void startRun(steps)}
             tab={layout.tab}
             onTab={(t: LogTab) => setTab(t)}
             autoScroll={autoScroll}
