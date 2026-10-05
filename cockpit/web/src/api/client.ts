@@ -1,4 +1,5 @@
 import type {
+  AdaptResponse,
   Capabilities,
   ElabEvent,
   PlanPreview,
@@ -123,6 +124,27 @@ export const api = {
    */
   serialConsole: (limit = 50) =>
     req<SerialConsoleResponse>(`/api/serial/console?limit=${encodeURIComponent(limit)}`),
+
+  /**
+   * 一键适配（M5.6）。**两段式**：`action:"probe"`（只读）永远在前，
+   * `action:"write"`（写 `projects/<name>.yaml`）是用户看得见的独立第二段 ——
+   * 与 `plan`（GET，纯读）→ `startRun`（POST，真跑）的动词纪律同一条：
+   * "落不落盘"不许藏在一个按钮里。
+   *
+   * 抛错 = 400（路径不合法 / 有未决项拒绝写入 / 人工接管保护命中）。
+   * `tier:"T3"` **不是**错误 —— 它是探测数据（"需要真改造"），界面要能说清原因。
+   */
+  adapt: (opts: {
+    action: "probe" | "write";
+    path: string;
+    name?: string;
+    force?: boolean;
+  }) =>
+    req<AdaptResponse>("/api/adapt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    }),
 };
 
 /**

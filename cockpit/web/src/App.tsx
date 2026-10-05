@@ -276,6 +276,21 @@ export default function App() {
     [selectProject],
   );
 
+  /**
+   * 一键适配写入成功后的收尾（M5.6）：刷新目录（让新 `projects/<name>.yaml`
+   * 变成卡片）并选中新工程。顺序不能反 —— selectProject 不依赖 catalog，
+   * 但用户看到的列表必须已经包含新卡片。
+   */
+  const onAdapted = useCallback(
+    (name: string) => {
+      void (async () => {
+        await loadAll(false);
+        await selectProject(name);
+      })();
+    },
+    [loadAll, selectProject],
+  );
+
   const card = catalog?.projects.find((p) => p.name === selected) ?? null;
   // 波特率优先级：用户显式选的 → 工程配置 → 宿主默认 → 115200。
   // ★ 必须与后端 `serialterm.resolve_target()` 的顺序**一致**，否则会出现
@@ -409,6 +424,7 @@ export default function App() {
             caps={caps}
             locked={run.status === "running"}
             loading={loading}
+            onAdapted={onAdapted}
           />
         }
         stage={

@@ -355,3 +355,73 @@ export interface SerialConsoleResponse {
   requested: number;
   path: string;
 }
+
+// ── /api/adapt（一键适配，M5.6）─────────────────────────────────
+export interface AdaptFact {
+  key: string;
+  value: string;
+  /** 证据等级（与 ProjectCard.provenance 的 level 同一套语言） */
+  level: string;
+  evidence: string;
+}
+
+/**
+ * `adapt.probe_project()` 的前端镜像。
+ *
+ * ★ 只声明界面**真正要渲染**的字段，其余走索引签名 —— 后端探测是纯数据透传，
+ *   为每个字段造 TS 类型会让"探测多了一个事实"变成跨端同步负担，
+ *   而界面从来只展示那几样。消费者必须忽略不认识的字段（与事件信封同一纪律）。
+ */
+export interface AdaptProbe {
+  root: string;
+  vendor: string;
+  generator: string;
+  archetype: string;
+  project_name: string;
+  chip_ref: string;
+  chip_evidence: string;
+  linker_script: string;
+  toolchain_cmake: string;
+  cpu: string;
+  fpu: string;
+  baud: number;
+  usart: string;
+  /** 固件是否真有串口输出能力（有 `__io_putchar` 定义 + printf 调用） */
+  can_print: boolean;
+  /** T1 = 可直接适配；T3 = 没有 CMakeLists.txt，需在图形配置器里切 CMake 后重导出 */
+  tier: string;
+  facts: AdaptFact[];
+  conflicts: string[];
+  /** 阻断项：探测**不猜**，须人工/agent 裁决（有它时 write 会被拒） */
+  ambiguities: string[];
+  /** 提示项：已解决/仅供参考，不阻断 */
+  notes: string[];
+  confidence: "high" | "medium" | "low";
+  [k: string]: unknown;
+}
+
+export interface AdaptWriteResult {
+  name: string;
+  path: string;
+  written: boolean;
+  /** ★ 与 CLI `elab adapt --write` 的退出码语义同源 */
+  status: "written" | "identical" | "differs" | "hand-edited" | "missing" | "drift";
+  existed?: boolean;
+  backup?: string;
+  bytes?: number;
+}
+
+export interface AdaptResponse {
+  action: "probe" | "write";
+  probe: AdaptProbe;
+  tier: string;
+  confidence: AdaptProbe["confidence"];
+  /** 将要/已经写入的工程名（用户没给就用目录名推导） */
+  name: string;
+  result?: AdaptWriteResult;
+  /**
+   * 下一步引导：三绿灯 verify 是 build 级长任务，**刻意不**在 /api/adapt 里同步做
+   * （会钉死服务线程，§5.1 K1）—— 引导前端走现有 run 通道跑 doctor_deep + build。
+   */
+  next: { steps: string[]; hint: string };
+}

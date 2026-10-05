@@ -1,7 +1,15 @@
-import type { Capabilities, ProjectCard, StepId } from "../api/types";
+import { useState } from "react";
+import type { AdaptResponse, Capabilities, ProjectCard, StepId } from "../api/types";
+import { api } from "../api/client";
+import { Button } from "../primitives/Button";
+import { Input } from "../primitives/Input";
 import { Pill, Tag } from "../primitives/Tag";
 import { IconAlert, IconChip, IconPlug } from "../icons";
 import s from "./ProjectsRail.module.css";
+
+function errmsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 export interface ProjectsRailProps {
   cards: ProjectCard[];
@@ -11,6 +19,8 @@ export interface ProjectsRailProps {
   /** 有 run 在跑时禁用切换（避免"看着 A 的日志、实际跑的是 B"） */
   locked: boolean;
   loading: boolean;
+  /** 适配写入成功后由 App 收尾：刷新目录 + 选中新工程（M5.6） */
+  onAdapted: (name: string) => void;
 }
 
 /**
@@ -28,15 +38,17 @@ export function ProjectsRail({
   caps,
   locked,
   loading,
+  onAdapted,
 }: ProjectsRailProps) {
   // 串口能力来自 /api/capabilities（后端能力协商结果），不是前端猜的
   const serialOk = caps?.serial.available ?? false;
-
   return (
     <div className={s.rail}>
       <div className={s.head}>
         <span className={s.title}>工程</span>
         <span className={s.count}>{cards.length}</span>
+        <span className={s.headSpacer} />
+        <AdaptPanel onAdapted={onAdapted} locked={locked} />
       </div>
 
       <div className={s.list}>
@@ -159,6 +171,186 @@ export function ProjectsRail({
           </div>
         );
       })()}
+    </div>
+  );
+}
+
+/**
+ * 一键适配面板（M5.6）—— 收起时只是标题栏里的一个小按钮。
+ *
+ * ★ 流程刻意做成**两段**：先「探测」（只读，把将生成的接入文件摆在明面上），
+ *   再「写入」。与后端 probe/write 两段式一一对应 —— "落不落盘"不许藏在一个
+ *   按钮里（与 /api/plan → /api/run 的动词纪律同一条）。
+ * ★ 三绿灯 verify **不在这里做**：那是 build 级长任务，写完引导用户去点
+ *   「体检 + 编译」—— 复用现有 run 通道，进度走 SSE、结果落事件流。
+ */
+function AdaptPanel({
+  onAdapted,
+  locked,
+}: {
+  onAdapted: (name: string) => void;
+  locked: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [path, setPath] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState<"probe" | "write" | null>(null);
+  const [res, setRes] = useState<AdaptResponse | null>(null);
+  const [err, setErr] = useState("");
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className={s.adaptBtn}
+        aria-label="适配新工程"
+        title="把图形配置器导出的工程接进 elab（先探测，再写入）"
+        onClick={() => {
+          setOpen(true);
+          setRes(null);
+          setErr("");
+        }}
+      >
+        ＋ 适配
+      </button>
+    );
+  }
+
+  const p = res?.probe;
+  const blocked = !!p && (p.tier === "T3" || p.ambiguities.length > 0);
+  const writeStatus = res?.action === "write" ? res.result?.status : undefined;
+  const writeOk = writeStatus === "written" || writeStatus === "identical";
+
+  async function run(action: "probe" | "write") {
+    setBusy(action);
+    setErr("");
+    try {
+      const r = await api.adapt({ action, path, name: name || undefined });
+      setRes(r);
+      setName(r.name);
+      if (action === "write" &&
+          (r.result?.status === "written" || r.result?.status === "identical")) {
+        onAdapted(r.name);
+      }
+    } catch (e) {
+      setErr(errmsg(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className={s.adaptBox} role="group" aria-label="适配新工程">
+      <div className={s.adaptRow}>
+        <Input
+          mono
+          value={path}
+          onChange={(e) => setPath(e.currentTarget.value)}
+          placeholder="工程根目录（绝对路径，含 CMakeLists.txt）"
+          aria-label="待适配工程路径"
+        />
+        <Button
+          variant="toolbar"
+          disabled={!path.trim() || busy !== null}
+          onClick={() => void run("probe")}
+        >
+          {busy === "probe" ? "探测中…" : "探测"}
+        </Button>
+        <Button
+          variant="toolbar"
+          disabled={blocked || busy !== null || !res}
+          title={
+            blocked
+              ? "先解决探测给出的阻断项（或用 CLI elab adapt --write --force）"
+              : "写入 projects/<name>.yaml"
+          }
+          onClick={() => void run("write")}
+        >
+          {busy === "write" ? "写入中…" : "写入"}
+        </Button>
+        <button
+          type="button"
+          className={s.adaptBtn}
+          aria-label="收起适配面板"
+          onClick={() => setOpen(false)}
+        >
+          收起
+        </button>
+      </div>
+
+      {err ? (
+        <div className={s.adaptErr} role="alert">
+          <IconAlert className={s.warnIcon} />
+          {err}
+        </div>
+      ) : null}
+
+      {p ? (
+        <div className={s.adaptResult}>
+          <div className={s.adaptTags}>
+            {p.tier === "T3" ? (
+              <Tag tone="red" mono dense>T3 · 无 CMakeLists</Tag>
+            ) : (
+              <Tag tone="green" mono dense>{p.tier} · 可适配</Tag>
+            )}
+            <Tag dense tone={p.confidence === "high" ? "blue" : "neutral"}>
+              置信度 {p.confidence}
+            </Tag>
+            {p.generator ? <Tag dense tone="neutral">{p.generator}</Tag> : null}
+            {p.chip_ref ? <Tag tone="blue" mono dense>{p.chip_ref}</Tag> : null}
+            {p.baud ? <Tag dense tone="neutral">{p.usart || "串口"} @ {p.baud}</Tag> : null}
+          </div>
+
+          {p.tier === "T3" ? (
+            <div className={s.adaptNote}>
+              在图形配置器（AT32 WorkBench / STM32CubeMX）里把工具链切换到 CMake
+              后重新导出，再回来探测。
+            </div>
+          ) : null}
+
+          {p.ambiguities.length > 0 ? (
+            <div className={s.adaptErr}>
+              <IconAlert className={s.warnIcon} />
+              <span>
+                阻断项（探测不猜，须人工裁决）：
+                {p.ambiguities.join("；")}
+              </span>
+            </div>
+          ) : null}
+
+          <label className={s.adaptNameRow}>
+            <span className={s.adaptNameLabel}>工程名</span>
+            <Input
+              mono
+              value={name}
+              onChange={(e) => setName(e.currentTarget.value)}
+              aria-label="写入的工程名"
+            />
+          </label>
+
+          {writeStatus ? (
+            <div className={writeOk ? s.adaptNote : s.adaptErr}>
+              {writeOk ? (
+                <>
+                  ✓ {writeStatus === "written" ? "已写入" : "内容一致（幂等）"}
+                  {" — "}
+                  {res?.next.hint}（{res?.next.steps.join(" + ")}）
+                </>
+              ) : writeStatus === "hand-edited" ? (
+                "该工程已被人工接管（generated-by 标记缺失），未覆盖 —— 如确需重生成，用 CLI：elab adapt <path> --write --force"
+              ) : writeStatus === "differs" ? (
+                "已存在且内容不同，未覆盖 —— 用 CLI：elab adapt <path> --write --force（会先备份 .bak）"
+              ) : (
+                `写入结果：${writeStatus}`
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {locked ? (
+        <div className={s.adaptNote}>有任务在跑 —— 适配只读不受影响，但写入后请等它结束再验证。</div>
+      ) : null}
     </div>
   );
 }

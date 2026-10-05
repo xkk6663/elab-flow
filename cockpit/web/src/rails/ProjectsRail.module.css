@@ -10,10 +10,96 @@
 .head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;      /* 适配面板展开时整行换行铺满（.adaptBox 的 flex-basis:100%） */
   gap: var(--elab-space-2);
   padding: var(--elab-space-3) var(--elab-space-3) var(--elab-space-2);
   border-bottom: 1px solid var(--elab-border);
   flex: 0 0 auto;
+}
+
+.headSpacer {
+  flex: 1 1 auto;
+}
+
+/* ── 一键适配（M5.6） ── */
+.adaptBtn {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  background: var(--elab-bg-raised);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.adaptBtn:hover {
+  border-color: var(--elab-accent);
+  color: var(--elab-fg-primary);
+}
+
+.adaptBox {
+  flex: 1 0 100%;       /* 展开时换行占满标题栏宽度 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--elab-space-2) 0 var(--elab-space-1);
+  border-top: 1px dashed var(--elab-border);
+}
+
+.adaptRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.adaptRow > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.adaptResult {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.adaptTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.adaptNameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+.adaptNameRow > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.adaptNameLabel {
+  flex: 0 0 auto;
+}
+
+.adaptNote {
+  font-size: var(--elab-fs-xs);
+  line-height: 1.6;
+  color: var(--elab-fg-muted);
+}
+
+.adaptErr {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: var(--elab-fs-xs);
+  line-height: 1.55;
+  color: var(--elab-status-fail);
 }
 
 .title {
