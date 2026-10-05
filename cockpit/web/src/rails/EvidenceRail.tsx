@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import type { Capabilities, ProjectCard, StepId } from "../api/types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Capabilities, ProjectCard, SerialMonitorSnapshot, StepId } from "../api/types";
+import { api } from "../api/client";
 import { logs, type LogTab } from "../store/logs";
 import { useRun } from "../store/runStore";
 import { LogView, ringToText } from "../render/LogView";
@@ -20,6 +21,8 @@ export interface EvidenceRailProps {
   running: boolean;
   /** 在本 Tab 内直接触发对应单步；null = 上层未接线（按钮置灰并说明） */
   onRunSteps: ((steps: StepId[]) => void) | null;
+  /** 当前选中的工程名 —— 打开监视要以它解析端口/波特率 */
+  serialProject: string;
   tab: LogTab;
   onTab: (t: LogTab) => void;
   autoScroll: boolean;
@@ -34,14 +37,19 @@ export interface EvidenceRailProps {
 
 /**
  * 每个 Tab 对应的单步按钮 —— 单步执行就该出现在"干这件事的界面"里：
- * 构建 Tab 里有「编译」、烧录 Tab 里有「烧录 / 调试校验」、串口 Tab 里有「串口闭环」。
+ * 构建 Tab 里有「编译」、烧录 Tab 里有「烧录 / 调试校验」。
+ * ★ 串口 Tab 放的不是「串口闭环」（那是闭环判定，阶段轨已有），而是
+ *   「打开监视 / 关闭监视」—— 人要看设备实时输出，不是跑判定。
  * 按钮可用性与阶段轨同一份来源（`card.steps[id].ok`），两处置灰理由永远一致。
  */
 const TAB_STEPS: Record<LogTab, StepId[]> = {
   build: ["build"],
   flash: ["flash", "debug_verify"],
-  serial: ["monitor"],
+  serial: [],
 };
+
+/** 轮询间隔（ms）。600ms ≈ 人眼"实时"，又远低于服务端环形缓冲的挤出速度。 */
+const MONITOR_POLL_MS = 600;
 
 /** 常用波特率。工程配置里若是非标值，也插进列表 —— 否则 select 显示不出当前值 */
 const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
@@ -63,6 +71,7 @@ export function EvidenceRail({
   card,
   running,
   onRunSteps,
+  serialProject,
   tab,
   onTab,
   autoScroll,
@@ -101,6 +110,72 @@ export function EvidenceRail({
   // 写通道可用性：既要 App 接上了回调，又要后端**真的支持写**（M3-b）。
   // 两者分开判断，是为了让"没接线"与"后端不支持"给出不同的置灰理由。
   const writable = !!onSerialWrite && (caps?.serial.write_available ?? false);
+
+  // ── 常驻串口监视（serialmon）───────────────────────────────
+  // 快照来源优先级：本组件拉到的 → capabilities 里那份（别的标签页开的会话）。
+  const [mon, setMon] = useState<SerialMonitorSnapshot | null>(null);
+  const monSnap: SerialMonitorSnapshot | null = mon ?? caps?.serial.monitor ?? null;
+  const monActive = !!monSnap?.active;
+  const afterRef = useRef(0);
+
+  const toggleMonitor = useCallback(async () => {
+    if (monActive) {
+      try {
+        await api.serialMonitorToggle("close");
+        logs.local("serial", "── 监视已关闭 ──");
+        setMon({ active: false });
+      } catch (e) {
+        logs.local("serial", `✗ 关闭监视失败：${e instanceof Error ? e.message : String(e)}`, "alert");
+      }
+      return;
+    }
+    try {
+      const r = await api.serialMonitorToggle("open", { project: serialProject, baud: serialBaud });
+      if (!r.active) {
+        logs.local("serial", `✗ 打开监视失败：${r.error ?? "未知原因"}`, "alert");
+        return;
+      }
+      afterRef.current = 0;
+      setMon(r);
+      logs.local("serial",
+        `── 监视已打开 ${r.port}@${r.baud}（实时流只在本页缓冲，重载即失；` +
+        `监视期间闭环/CLI 用不了串口 —— 约束 N5）──`);
+    } catch (e) {
+      // 409（闭环占用）等 —— 服务端已指名道姓，原样上屏
+      logs.local("serial", `✗ 打开监视失败：${e instanceof Error ? e.message : String(e)}`, "alert");
+    }
+  }, [monActive, serialProject, serialBaud]);
+
+  // 轮询增量读回。★ 不进 React 渲染树（logs.local 走命令式追加），重渲染极轻。
+  useEffect(() => {
+    if (!monActive) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await api.serialMonitor(afterRef.current);
+        if (cancelled) return;
+        setMon(st);
+        if (st.gap > 0) {
+          logs.local("serial", `── （服务端缓冲追不上：已挤掉 ≥${st.gap} 行）──`, "warn");
+        }
+        for (const ln of st.lines) logs.local("serial", ln.text);
+        if (st.lines.length) afterRef.current = st.lines[st.lines.length - 1].seq;
+        if (!st.active && st.error) {
+          // 读线程异常自愈（拔线/口被抢）—— 服务端已收摊，这边如实收尾
+          logs.local("serial", `✗ 监视已中断：${st.error}`, "alert");
+          setMon({ active: false });
+        }
+      } catch {
+        /* 网络抖动：下一轮再试 */
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, MONITOR_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [monActive]);
 
   const tabs: Array<SegTab<LogTab>> = [
     { id: "build", label: "构建", badge: counts.build.lines },
@@ -176,6 +251,34 @@ export function EvidenceRail({
             </Tooltip>
           );
         })}
+        {/* ── 串口 Tab：打开/关闭监视（常驻会话，不是闭环判定）── */}
+        {tab === "serial" ? (
+          monActive ? (
+            <Tooltip tip={`监视中：${monSnap?.port ?? "?"}@${monSnap?.baud ?? "?"} · 已收 ${monSnap?.seq ?? 0} 行 —— 点击关闭并释放串口`}>
+              <Button size="sm" variant="outline" onClick={() => void toggleMonitor()}>
+                关闭监视
+              </Button>
+            </Tooltip>
+          ) : (
+            <Tooltip tip={
+              !caps?.serial.available
+                ? (caps?.serial.hint ?? "串口后端不可用")
+                : running
+                  ? "有 run 在跑：串口/SWD 与 run 互斥（约束 N5），等它结束"
+                  : !serialProject
+                    ? "先在左侧选一个工程"
+                    : `打开 ${serialPort || "auto"}@${serialBaud} 实时收流（占用串口直到关闭）`
+            }>
+              <Button
+                size="sm"
+                disabled={!caps?.serial.available || running || !serialProject}
+                onClick={() => void toggleMonitor()}
+              >
+                打开监视
+              </Button>
+            </Tooltip>
+          )
+        ) : null}
         <span className={s.meta}>
           {st.lines} 行
           {st.alerts > 0 ? ` · ${st.alerts} 告警` : ""}
@@ -269,12 +372,12 @@ function emptyTextFor(tab: LogTab, caps: Capabilities | null): string {
     if (caps.serial.console.count > 0) {
       return (
         `服务端存有 ${caps.serial.console.count} 条串口留档，但本工程一条也没有` +
-        `（留档按工程区分）。跑一次含 monitor 的闭环，` +
-        `或在下框手敲一行，即可看到输出。`
+        `（留档按工程区分）。点「打开监视」实时看设备输出，` +
+        `或在下框手敲一行发给设备。`
       );
     }
     return (
-      "尚无串口输出。跑一次含 monitor 的闭环即可看到设备打印；" +
+      "尚无串口输出。点「打开监视」实时看设备打印（或跑一次含 monitor 的闭环）；" +
       "也可以直接在下方框里手敲一行发给设备。"
     );
   }

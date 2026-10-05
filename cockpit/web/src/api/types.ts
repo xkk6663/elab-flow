@@ -210,6 +210,13 @@ export interface Capabilities {
      *   "服务端还存着 N 条"，就不能自己去猜 —— 猜的代价是两边数字对不上。
      */
     console: SerialConsoleInfo;
+    /**
+     * 常驻串口监视会话（serialmon）的快照。
+     *
+     * ★ 由服务端告诉界面而不是界面自己记：会话是**服务进程的单例**，
+     *   别的标签页/别处点开时，这边必须能看到"已经在监视了"。
+     */
+    monitor: SerialMonitorSnapshot;
   };
   active_runs: ActiveRunInfo[];
   steps: { all: StepId[]; default: StepId[]; onhw: StepId[] };
@@ -309,6 +316,8 @@ export interface SerialWriteResult {
   /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
   eol: string;
   error: string | null;
+  /** "monitor" = 写通道被路由进了常驻监视会话（不重开口；回显走实时流） */
+  via?: "monitor";
 }
 
 // ── 串口 console 留档（M3-b2）────────────────────────────────────
@@ -354,6 +363,46 @@ export interface SerialConsoleResponse {
   count: number;
   requested: number;
   path: string;
+}
+
+// ── /api/serial/monitor（常驻串口监视会话）────────────────────────
+export interface SerialMonitorSnapshot {
+  active: boolean;
+  project?: string;
+  port?: string;
+  baud?: number;
+  backend?: string;
+  /** 会话内已累计的行数（= 最后一条的 seq） */
+  seq?: number;
+  /** 环形缓冲挤掉的总行数（>0 说明有行没活过缓冲期） */
+  covered?: number;
+  /** 读线程异常自愈时留下的原因（拔线/口被抢）；null = 一切正常 */
+  error?: string | null;
+}
+
+export interface SerialMonitorLine {
+  seq: number;
+  text: string;
+  /** 服务端已格式化的 HH:MM:SS */
+  t: string;
+}
+
+export interface SerialMonitorTail extends SerialMonitorSnapshot {
+  lines: SerialMonitorLine[];
+  /** 浏览器错过（被环形缓冲挤掉）的行数下限 —— 只报告、不抹平 */
+  gap: number;
+}
+
+/** 监视中写一行（路由进会话，不重开口）。与 SerialWriteResult 同形但有 via 标记 */
+export interface SerialMonitorWriteResult {
+  ok: boolean;
+  via: "monitor";
+  written: number;
+  payload_bytes: number;
+  echoed: string[];
+  port: string;
+  baud: number;
+  error: string | null;
 }
 
 // ── /api/adapt（一键适配，M5.6）─────────────────────────────────

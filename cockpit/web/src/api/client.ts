@@ -6,6 +6,8 @@ import type {
   ProjectsResponse,
   RunsResponse,
   SerialConsoleResponse,
+  SerialMonitorSnapshot,
+  SerialMonitorTail,
   SerialWriteResult,
   StepId,
 } from "./types";
@@ -124,6 +126,27 @@ export const api = {
    */
   serialConsole: (limit = 50) =>
     req<SerialConsoleResponse>(`/api/serial/console?limit=${encodeURIComponent(limit)}`),
+
+  /**
+   * 常驻串口监视（serialmon）：增量读回 + 会话状态。
+   *
+   * ★ 走 **GET**：读的是"设备说过什么"，纯读无副作用 —— 与 `serialMonitorToggle`
+   *   （POST，会开关串口会话）相对，动词纪律同 `serial` / `serialConsole`。
+   *   `after` = 浏览器已收到的最大 `seq`；服务端只回 `seq > after` 的行。
+   */
+  serialMonitor: (after: number) =>
+    req<SerialMonitorTail>(`/api/serial/monitor?after=${encodeURIComponent(after)}`),
+
+  /** 打开/关闭监视会话。POST = 明确的副作用（占住/释放一个独占资源）。 */
+  serialMonitorToggle: (action: "open" | "close", opts?: { project?: string; baud?: number }) =>
+    req<SerialMonitorSnapshot & { ok: boolean; note?: string; error?: string | null }>(
+      "/api/serial/monitor",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, project: opts?.project, baud: opts?.baud }),
+      },
+    ),
 
   /**
    * 一键适配（M5.6）。**两段式**：`action:"probe"`（只读）永远在前，

@@ -232,6 +232,16 @@ SSE 层为压掉"一秒上万行"的编译输出，会把**只有进程输出**�
 `/api/run` 双双不可见 —— "写入成功、工程消失"比报错更迷惑。
 真浏览器实测抓出，集成守卫：`test_adapt_write_creates_new_project_file`。
 
+### 3.7 常驻串口监视也**不产生事件**（serialmon，走轮询 HTTP）
+
+串口 Tab 的「打开监视 / 关闭监视」（`POST /api/serial/monitor`，增量读回走
+`GET /api/serial/monitor?after=N`）同样不在 topic 表里 —— 会话不属于任何 run
+（理由同 §3.5），其输出（设备实时行）**不进事件流也不落 console 留档**：
+只活在服务端环形缓冲与浏览器本地缓冲，前端 600ms 轮询、按 `seq` 增量拉取、
+`gap` 显式报告丢行。它是"看"，不是"证据"；要证据走闭环的 `serial/*` 事件链。
+与闭环的双向互斥（监视 ↔ flash/debug_verify/monitor）在 HTTP 层以 **409 指名道姓**，
+不产生任何事件。
+
 ---
 
 ## 4. 步骤序列（stage pipeline）

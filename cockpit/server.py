@@ -38,6 +38,7 @@ if str(_ROOT / "services") not in sys.path:
 from elab import adapt as adapt_mod                      # noqa: E402
 from elab import run as run_mod                      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
+from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
@@ -584,6 +585,8 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
                    # 单列一个字段是因为前端要据此决定输入框是否可写 —— 不该让它去
                    # 猜"available 是不是也包括写"。
                    "write_available": bool(caps["available"]),
+                   # 常驻监视会话快照（active/port/baud）—— 界面据此画「打开/关闭监视」
+                   "monitor": serialmon_mod.status(),
                    # TX/RX 的 console 日志（M3-b2）—— 界面据此提示"服务端存有 N 条历史"
                    "console": _console_info(cfg)},
         "active_runs": mgr.list_active(),
@@ -774,6 +777,14 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 recs = clog.tail(limit)
                 return self._json({"records": recs, "count": clog.count(),
                                    "requested": limit, "path": to_fwd(clog.path)})
+            if path == "/api/serial/monitor":
+                # 常驻监视会话的增量读回（tail）。「after」= 浏览器已收到的最大 seq。
+                raw = (qs.get("after") or ["0"])[0]
+                try:
+                    after = int(raw)
+                except ValueError:
+                    raise ElabError(f"after 必须是整数：{raw!r}")
+                return self._json(serialmon_mod.tail(after))
             if path.startswith("/api/"):
                 return self._err(404, f"未知 API：{path}")
             return self._static(path)
@@ -793,6 +804,15 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 project = body.get("project") or ""
                 if not project:
                     return self._err(400, "缺少 project")
+                # ★ 监视会话 ↔ 闭环互斥（N5 的驾驶舱侧守卫）：flash/debug_verify/monitor
+                #   要用串口/SWD，监视会话握着口 → 与手写通道同款 409，指名道姓。
+                want_steps = set(body.get("steps") or run_mod.DEFAULT_STEPS)
+                if want_steps & _SERIAL_STEPS:
+                    mon = serialmon_mod.status()
+                    if mon.get("active"):
+                        return self._err(409, (
+                            f"串口监视正占用 {mon.get('port')}（project={mon.get('project')}）"
+                            f" —— 先在串口 Tab 点「关闭监视」再跑闭环（约束 N5）"))
                 res = self.mgr.spawn(
                     project=project,
                     steps=body.get("steps"),
@@ -826,6 +846,36 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         f"步骤 {'/'.join(busy.get('steps') or [])}）—— 它要用串口/SWD，"
                         f"手写通道已在让路（约束 N5）。等它跑完，或先取消它。"))
                 project = body.get("project") or ""
+                # ★ 监视会话开着 → 写通道路由**进会话**（同一个口直接 write，
+                #   不重开口 —— 不破坏 N5）。回显不再由本请求带回：读线程会把它
+                #   送进实时流。TX 照旧落 console 留档（"我敲过这一行"不因失败消失）。
+                payload, perr = serialterm_mod.build_payload(
+                    data, newline=bool(body.get("newline", True)),
+                    hex_=bool(body.get("hex")))
+                if perr:
+                    return self._json({"ok": False, "error": perr, "port": "",
+                                       "baud": 0, "written": 0, "echoed": [],
+                                       "via": "monitor"}, 200)
+                n = serialmon_mod.write_through(payload)
+                if n is not None:
+                    via_res = {"ok": n == len(payload), "via": "monitor",
+                               "written": n, "payload_bytes": len(payload),
+                               "echoed": [], "error": None if n == len(payload)
+                               else "只写出部分字节（口可能已失效，试试关闭重开监视）"}
+                    st_ok = serialmon_mod.status()
+                    via_res.update({"port": st_ok.get("port") or "",
+                                    "baud": st_ok.get("baud") or 0})
+                    try:
+                        # TX 照旧落 console 留档（同一条 journal_for 路径，带 project）
+                        serialconsole_mod.journal_for(self.cfg, project=project)({
+                            "dir": "tx", "text": data, "ok": via_res["ok"],
+                            "written": n, "payload_bytes": len(payload),
+                            "via": "monitor",
+                            "port": via_res["port"], "baud": via_res["baud"],
+                            "error": via_res["error"]})
+                    except Exception as exc:               # noqa: BLE001
+                        self.log_message("serialmon journal: %s", exc)
+                    return self._json(via_res, 200)
                 res = serialterm_mod.roundtrip(
                     self.cfg,
                     project,
@@ -840,6 +890,26 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     journal=serialconsole_mod.journal_for(self.cfg, project=project),
                 )
                 return self._json(res, 200)
+            if u.path == "/api/serial/monitor":
+                # 常驻串口监视（「打开监视 / 关闭监视」）。open 前先查闭环占用：
+                # 与手写通道同款 409 指名道姓 —— 不让用户对着 ERROR_ACCESS_DENIED 拔插。
+                body = self._body()
+                action = body.get("action") or ""
+                if action == "open":
+                    busy = _serial_blocker(self.mgr)
+                    if busy:
+                        return self._err(409, (
+                            f"有闭环正在跑（run={busy.get('run')}，"
+                            f"步骤 {'/'.join(busy.get('steps') or [])}）—— "
+                            f"它要用串口/SWD（约束 N5）。等它跑完，或先取消它。"))
+                    res = serialmon_mod.open_session(
+                        self.cfg, body.get("project") or "",
+                        port=body.get("port") or "",
+                        baud=body.get("baud") or 0)
+                    return self._json(res, 200)
+                if action == "close":
+                    return self._json(serialmon_mod.close_session(), 200)
+                raise ElabError(f"action 必须是 open 或 close：{action!r}")
             if u.path == "/api/adapt":
                 # 一键适配（M5.6）：probe 只读在前，write 显式第二段。
                 return self._adapt(self._body())

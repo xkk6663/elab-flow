@@ -311,6 +311,19 @@ export default function App() {
       logs.local("serial", `TX → ${line}`, "warn");
       try {
         const r = await api.serial({ project, data: line, baud: serialBaud });
+        if (r.via === "monitor") {
+          // ★ 监视会话开着：写进了已打开的口，回显会从实时监视流回来 ——
+          //   本请求没有 echo 窗口，渲染话术必须分流（字段语义不同）。
+          if (r.ok) {
+            logs.local(
+              "serial",
+              `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（经监视会话）`,
+            );
+          } else {
+            logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
+          }
+          return;
+        }
         if (!r.ok) {
           logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
           return;
@@ -449,6 +462,7 @@ export default function App() {
             card={card}
             running={run.status === "running"}
             onRunSteps={(steps: StepId[]) => void startRun(steps)}
+            serialProject={selected}
             tab={layout.tab}
             onTab={(t: LogTab) => setTab(t)}
             autoScroll={autoScroll}

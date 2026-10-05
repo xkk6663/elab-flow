@@ -107,6 +107,43 @@ def _fake_roundtrip(cfg, name, **kw):
             "error": None}
 
 
+class _FakeSerialMon:
+    """假监视会话：只提供 server.py 用到的那点接口（status/tail/open/close/write）。
+
+    ★ 为什么整体替换模块而不是 patch 单个函数：server 对 serialmon 的调用点是
+      一个聚合体（路由里 4 个函数），整体替换保证"没被假掉的方法"一调用就炸
+      —— 比部分 mock 静默穿透更响。
+    """
+
+    def __init__(self):
+        self.state: dict = {"active": False}
+        self.written: list[bytes] = []
+
+    def status(self):
+        return dict(self.state)
+
+    def tail(self, after: int):
+        return {**self.state, "lines": [], "seq": self.state.get("seq", 0),
+                "gap": 0}
+
+    def open_session(self, cfg, project, *, port="", baud=0, log=print):
+        self.state.update({"active": True, "project": project,
+                           "port": "COM9", "baud": baud or 115200,
+                           "backend": "fake", "seq": 0, "covered": 0,
+                           "error": None})
+        return {"ok": True, **self.status()}
+
+    def close_session(self, *, log=print):
+        self.state = {"active": False}
+        return {"ok": True}
+
+    def write_through(self, data: bytes):
+        if not self.state.get("active"):
+            return None
+        self.written.append(bytes(data))
+        return len(data)
+
+
 def _read_sse(client: _Client, run_id: str, *, after: int = 0,
               timeout_s: float = 90.0) -> list[dict]:
     """读 SSE 直到 ``stream/closed``（或超时）。返回事件列表（按到达顺序）。"""
@@ -748,6 +785,92 @@ class CockpitIntegration(unittest.TestCase):
         self.assertEqual(lo["records"], [], "空留档不该编造记录")
 
     # ── 一键适配（M5.6）────────────────────────────────────────
+    def test_serial_monitor_endpoints_without_session(self):
+        """没有会话时：GET tail 全默认值、close 幂等 ok、坏 action 400。
+        ★ 用**真** serialmon 模块（进程内无会话 → 无串口、无线程）。"""
+        st = self.client.get_json("/api/serial/monitor")
+        self.assertFalse(st["active"])
+        self.assertEqual(st["lines"], [])
+        cc, r = self.client.post("/api/serial/monitor", {"action": "close"})
+        try:
+            self.assertEqual(r.status, 200)
+            self.assertTrue(json.loads(r.read().decode())["ok"])
+        finally:
+            cc.close()
+        cc, r = self.client.post("/api/serial/monitor", {"action": "nope"})
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            cc.close()
+        cc, r = self.client.get("/api/serial/monitor?after=abc")
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            cc.close()
+
+    def test_serial_monitor_open_close_roundtrip(self):
+        """假会话：open → tail 可见 active → close。全程不碰真串口。"""
+        fake = _FakeSerialMon()
+        with unittest.mock.patch.object(srv_mod, "serialmon_mod", fake):
+            cc, r = self.client.post("/api/serial/monitor",
+                                     {"action": "open", "project": PROJECT})
+            try:
+                self.assertEqual(r.status, 200)
+                res = json.loads(r.read().decode())
+            finally:
+                cc.close()
+            self.assertTrue(res["ok"], res)
+            self.assertTrue(res["active"])
+            st = self.client.get_json("/api/serial/monitor")
+            self.assertTrue(st["active"])
+            self.assertEqual(st["port"], "COM9")
+            cc, r = self.client.post("/api/serial/monitor", {"action": "close"})
+            try:
+                self.assertEqual(r.status, 200)
+            finally:
+                cc.close()
+        self.assertFalse(self.client.get_json("/api/serial/monitor")["active"])
+
+    def test_run_with_serial_steps_conflicts_with_monitor_409(self):
+        """★ 监视会话握着口 → 起含串口步骤的闭环必须 409 指名道姓（N5）。
+        不含串口步骤的步序不受影响（不在此重复跑真 run，那已有别的用例覆盖）。"""
+        fake = _FakeSerialMon()
+        fake.state = {"active": True, "project": PROJECT, "port": "COM9",
+                      "baud": 115200}
+        with unittest.mock.patch.object(srv_mod, "serialmon_mod", fake):
+            cc, r = self.client.post("/api/run",
+                                     {"project": PROJECT, "steps": ["flash"]})
+            try:
+                self.assertEqual(r.status, 409)
+                msg = json.loads(r.read().decode())["error"]
+            finally:
+                cc.close()
+        self.assertIn("串口监视正占用 COM9", msg)
+        self.assertIn("关闭监视", msg)
+
+    def test_serial_write_routes_through_active_monitor(self):
+        """监视开着 → 写通道进会话（via=monitor、不重开口），TX 照落 console 留档。"""
+        fake = _FakeSerialMon()
+        fake.state = {"active": True, "project": PROJECT, "port": "COM9",
+                      "baud": 115200}
+        with unittest.mock.patch.object(srv_mod, "serialmon_mod", fake):
+            cc, r = self.client.post("/api/serial",
+                                     {"project": PROJECT, "data": "status"})
+            try:
+                self.assertEqual(r.status, 200)
+                res = json.loads(r.read().decode())
+            finally:
+                cc.close()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "monitor")
+        self.assertEqual(res["written"], len("status\r\n"))
+        self.assertEqual(res["port"], "COM9")
+        # TX 留档：via=monitor 的 tx 记录要真的落了盘（"我敲过这一行"不消失）
+        recs = self.client.get_json("/api/serial/console?limit=5")["records"]
+        self.assertTrue(any(x.get("via") == "monitor" and x.get("dir") == "tx"
+                            and x.get("text") == "status" for x in recs),
+                        f"留档里没有 via=monitor 的 tx：{recs!r}")
+
     def test_adapt_probe_is_read_only(self):
         """probe 只读：真例给全字段，且**不写任何文件**。"""
         cards_before = sorted(x["name"] for x in

@@ -219,7 +219,8 @@ pywin32）。脚本幂等：3333 端口没起服务就**最小化**起一个（�
 | 串口**手写通道**（`POST /api/serial`、`elab serial`）：写一条 → 收一段回显 | 串口是**独占资源**：常驻会话会与 `elab run` 的 monitor 互斥，且持口线程一旦僵死就没人释放（只能重启驾驶舱）。"无状态往返"把占用压进**一次请求**，天然与 monitor 串行（约束 C27） |
 | 手写通道的 TX/RX **独立留档**（`serial-console.jsonl`） | 写通道不属于任何 run，那些行**不能**进 run 事件流（会破坏 C17 单写者）。故另立一份**有上限、会滚动**的 console 日志（约束 C28）：CLI 与界面写**同一份**，重载页面可从它回填"最近敲过什么" —— 但它**不是 state**，滚动会丢最旧的，不可当验收判据 |
 | UI **一键适配**（probe/write 两段式） | "落不落盘"必须是用户看得见的独立动作：先只读探测（tier/置信度/芯片/证据链），再显式写入。三绿灯 verify **不在 HTTP 里同步做**（build 级长任务会钉死服务线程），由 `next.steps` 引导走现有 run 通道。写入与 CLI `elab adapt` 共用同一份实现（`adapt.write`），未决项不猜、人工接管不覆盖 |
-| **单步执行 = 界面里的独立按钮**（阶段轨一排六颗 + 证据轨各 Tab 内对应按钮） | "只跑编译/烧录/串口"是最高频的操作，藏进下拉菜单等于每次多两跳。阶段轨一排六颗（体检/深度体检/编译/烧录/调试校验/串口闭环），可用性来自服务端算好的 `card.steps[id].ok`，置灰时 tooltip 直接说原因；证据轨按"干这件事的界面放对应的钮"：构建 Tab 有「编译」、烧录 Tab 有「烧录/调试校验」、串口 Tab 有「串口闭环」。**「跑全闭环」显式传步序**（约束 C30），空闲骨架与它同源（同一个 `fullLoopSteps()`），不会出现"骨架画五步、点下去跑两步"的自相矛盾 |
+| **单步执行 = 界面里的独立按钮**（阶段轨一排六颗 + 证据轨各 Tab 内对应按钮） | "只跑编译/烧录/串口"是最高频的操作，藏进下拉菜单等于每次多两跳。阶段轨一排六颗（体检/深度体检/编译/烧录/调试校验/串口闭环），可用性来自服务端算好的 `card.steps[id].ok`，置灰时 tooltip 直接说原因；证据轨按"干这件事的界面放对应的钮"：构建 Tab 有「编译」、烧录 Tab 有「烧录/调试校验」。**「跑全闭环」显式传步序**（约束 C30），空闲骨架与它同源（同一个 `fullLoopSteps()`），不会出现"骨架画五步、点下去跑两步"的自相矛盾 |
+| 串口 Tab 的**常驻监视**（「打开监视 / 关闭监视」，serialmon） | 人要看的是设备实时输出，不是跑闭环判定 —— 闭环按钮留在阶段轨就够了。M3-b 曾裁定"不做常驻会话"（N5：串口独占、持口线程僵死没人释放），这个结论不推翻，所以会话带三道防身：**进程内单例 + 一键显式关闭**；**读线程异常自愈**（拔线/口被抢 → 记 error、自动收摊，绝不带死口挂着）；**写通道路由进会话**（同一口直接写，不重开口，回显走实时流）。★ 输出**不进 run 事件流**（不属于任何 run，C17）也**不落 console 留档**（留档是"我敲过什么"，监视是设备喋喋不休的心跳，落盘只会撑爆它）—— 只活在服务端环形缓冲 + 浏览器本地缓冲，前端 600ms 轮询增量拉取（`gap` 显式报告丢行，不抹平）。监视开着时起闭环 → 409 指名道姓"先关闭监视"（约束 C31） |
 
 **实测验收（真浏览器点「跑全闭环」，doctor + build）**：实时日志滚动到 36 行、
 状态 `ok`、内存 FLASH 7.39% / RAM 9.62%、产物 ELF/HEX/BIN/**MAP** 齐全、
@@ -304,7 +305,7 @@ python tests/test_monitor_judge.py        # ★ 串口判据引擎三态 + 两�
 python tests/test_cockpit_backpressure.py # ★ 背压留痕 / run/* 不可丢 / list_active 以日志为准（14 例）
 python tests/test_serialterm.py           # ★ 串口写通道：载荷/对症报错/往返（30 例）
 python tests/test_serialconsole.py        # ★ TX/RX 落盘：滚动/原子替换/坏行容错（26 例）
-python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（33 例，会真编译，约 1min）
+python tests/it_cockpit_server.py         # 后端集成 + 浏览器侧回归（37 例，会真编译，约 1min）
 ```
 
 > `tests/test_monitor_judge.py` 是补上的：`monitor.py` 的 docstring 与本文档此前都声称
@@ -698,6 +699,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | C28 | 手写通道的 TX/RX 落**独立的** console 留档（`serial-console.jsonl`），**绝不**写进 run 事件流；留档**有上限、会滚动**（尾部 N 条 + `os.replace` 原子替换）；CLI 与界面写**同一份** | 写进 run 流会同时破坏"每条事件带 run"与**单写者**（C17）。滚动是必要之恶：留一份"永不清理"的文件不是好习惯 —— 代价是可能丢最旧的记录。**正因为它会改写，它就不是 state**：不可当验收判据、不可做增量同步；界面渲染的只是"最近的历史"。实测边界：`elab loop` 五步全绿后留档条数**不变**（monitor 走事件流、手写通道走留档，两条道互不污染） |
 | C29 | 一键适配**真写出**新 `projects/<name>.yaml` 后，服务端必须**热重载 Config**（替换 handler 配置与 `RunManager.cfg`） | 服务进程的 `Config` 在启动时固化 —— 不重载则新工程对 `/api/projects` 与 `/api/run` **双双不可见**，症状是"写入成功、卡片永远不出现"，比报错更迷惑。CLI `_adapt_verify` 早有"写入后重载"的对应逻辑，服务端漏了同款（**真浏览器实测抓出**，集成守卫：`test_adapt_write_creates_new_project_file`）。赋值原子，在途请求仍握旧引用跑完 —— 旧配置对旧工程自洽 |
 | C30 | UI 的「跑全闭环」必须**显式传步序**（全部步骤去掉 `doctor_deep`、再按工程可用性过滤）；后端 `DEFAULT_STEPS = doctor+build` 只是 API 默认值，**不是**全闭环 | 不传 steps 时 `POST /api/run` 只跑 doctor+build —— 按钮写着"全闭环"、跑完编译就停，行为与承诺**静默背离**（实测抓出）。修在**前端**（`fullLoopSteps()`）而非改后端默认：CLI/API 的"轻量默认"是对的（点一下看看不必烧板），错的是 UI 把自己的语义寄托在别人的默认值上。可用性过滤复用服务端算好的 `card.steps[id].ok`（没接板不把 flash/monitor 排进去 —— "点一下必然失败"的按钮等于骗点击） |
+| C31 | 常驻串口监视会话（serialmon）必须：**单例 + 一键显式关闭**、**读线程异常自愈**（任何异常 → 记 error、自动收摊，绝不带死口挂着）、**写通道路由进会话**（不重开口）；输出**不进 run 事件流也不落 console 留档** | N5 的物理事实不因 UI 需求改变：串口独占、持口线程僵死没人释放（M3-b 裁定"不做常驻"的依据）。三道防身就是让"常驻"重新变得可接受的最小代价。输出两条道都不走：进事件流破坏 C17 单写者，落留档则被设备心跳撑爆（留档是"我敲过什么"，不是"设备说了什么"）。★ 实现坑：读线程**绝不能**用 `with self.io`（`__enter__` 会二次 open 同一个口，撞上自己持有的独占句柄 → ACCESS_DENIED，真机首测即抓出）。互斥双向闭环：监视开着 → 起含串口步骤的闭环 409；闭环在跑 → 打开监视 409，两边都指名道姓 |
 
 ---
 
@@ -718,6 +720,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | UI 一键适配新工程 | ✅ **已实现（M5.6）** | `POST /api/adapt`（probe/write **两段式**，probe 只读在前）+ 工程轨「＋ 适配」面板（探测结果带 tier/置信度/芯片/证据链 → 写入 → 卡片自动出现并选中）。三绿灯 verify **刻意不**在 HTTP 里同步做（build 级长任务会钉死服务线程），由 `next.steps` 引导走现有 run 通道跑 `doctor_deep + build`。写入与 CLI 共用 `adapt.write`（未决项拒写 / 人工接管保护）。★ 适配真写出文件后**热重载 Config**（真浏览器实测抓出的缺陷：不重载则新工程对驾驶舱不可见）。守卫：集成 6 例 |
 | 单步独立按钮 + 「跑全闭环」显式步序 | ✅ **已实现（C30）** | 阶段轨「单步」下拉改为**一排六颗独立按钮**；证据轨三个 Tab 内各放对应按钮（构建→编译、烧录→烧录/调试校验、串口→串口闭环），可用性同源 `card.steps[id].ok`、置灰带原因 tooltip。★ 「跑全闭环」修复：原实现不传 steps → 后端只跑 `DEFAULT_STEPS=doctor+build`（跑完编译就停，与按钮承诺不符）；现 `onRunAll` 显式传 `fullLoopSteps()`（全部步骤 − `doctor_deep` − 不可用项），空闲骨架与它同源。**真浏览器 + 路由拦截验收**：点击后 `POST /api/run` 请求体带 `steps=["doctor","build","flash","debug_verify"]`（at32_test 无 monitor 判据 → 被可用性过滤正确排除）；单步「烧录」按钮真机实测 `r-c61be04b` 烧录 `ok` |
 | 桌面一键启动驾驶舱 | ✅ **已实现** | 仓库根 `cockpit.cmd` + 桌面快捷方式 `elab驾驶舱.lnk`（图标 `cockpit.ico`，重建用 `tests/manual/make_shortcut.py`，需系统 Python 带 pywin32）。幂等：3333 已有服务只开浏览器；没有就**最小化**起一个（日志 `%TEMP%\elab-cockpit.log`）。裸 TCP 探测不受代理影响、System32 PATH 前置防 MSYS shim。**干跑三 variant 全过（stderr 全空）+ 真实双击路径 e2e 全通**（首击起服务 HTTP 200、二击幂等、系统 Python 零依赖跑通）；守卫 `tests/manual/dryrun_cockpit_cmd.py`（手动，不进 CI） |
+| 串口 Tab 的常驻监视（打开/关闭监视） | ✅ **已实现（serialmon + C31）** | `services/elab/serialmon.py`：单例会话（读线程 200ms 超时循环 + 2000 行环形缓冲 + `seq` 增量游标 + `gap` 丢行报告 + 残留半行 1s 冲刷）；`GET /api/serial/monitor?after=N` 增量读回、`POST …` open/close（open 前查闭环占用 409）；**写通道路由进会话**（`via:"monitor"`，回显走实时流，TX 照落留档）；capabilities 报 `serial.monitor` 快照。前端：串口 Tab「打开监视/关闭监视」按钮 + 600ms 轮询增量入缓冲（不进 React 树）。守卫：`tests/test_serialmon.py`（16 例，假 IO 离线）+ 集成 +4（37/37）。**真机实测**：开监视 → `[alive] tick=1124…` 每秒一行实时流入、`tail(after)` 增量正确、写 `status` 8B 走会话、监视中起 monitor 闭环 409 指名道姓、关闭释放（共收 35 行） |
 | 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
 | 前端产物一致性守卫（CI job） | ✅ **已实现** | `web-dist-guard`：`npm ci` → `npm run build` → `git diff --exit-code cockpit/web/dist/`。**本地已验**：重建后 `dist/` 逐字一致（可复现）。Node 用主版本 `22`（精确版本在 runner 上未必可用，取不到会让守卫永久失效） |
 | `stream/overrun`（背压截断事件） | ✅ **已实现** | `_fanout` 溢出时按契约发出（一个 episode 只报一次，`dropped` 就地刷新）；SSE 侧在**去重之前**显式成帧（带 `id` 会让重连游标越过它自己）；前端 `reduce()` 归约 → 证据轨显示"服务端背压截断"。守卫：`tests/test_cockpit_backpressure.py`（14 例） |
