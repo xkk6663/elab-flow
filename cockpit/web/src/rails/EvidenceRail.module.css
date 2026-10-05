@@ -77,3 +77,22 @@ code {
   color: var(--elab-fg-faint);
   white-space: nowrap;
 }
+
+/* 波特率选择器（M3-b）：与 portTag 同排、同样式，但可交互 */
+.baud {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 4px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  background: var(--elab-bg-surface);
+  border: 1px solid var(--elab-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.baud:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

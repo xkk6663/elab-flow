@@ -169,6 +169,26 @@ class LogBook {
     this.serial.clear();
   }
 
+  /**
+   * 本地合成一行 —— **不是**来自事件流，服务端没有它的留档。
+   *
+   * ★ 目前唯一使用者是串口手写通道（M3-b）：用户敲的命令与设备回显都
+   *   发生在"一次 HTTP 请求"里，**不属于任何 run**（写通道与 monitor 天然
+   *   互斥），因此没有可挂的 run 上下文、也就没有对应事件。
+   *   代价必须在界面上诚实体现：这些行**不能**靠重载页面恢复（而事件行可以）。
+   *   故 step 标为 `"manual"`，与事件行可区分。
+   */
+  local(tab: LogTab, text: string, tone?: LogLine["tone"]): void {
+    const ln: LogLine = {
+      raw: text,
+      plain: stripAnsi(text),
+      tone: tone ?? lineTone(text),
+      step: "manual",
+      kind: "line",
+    };
+    this.for(tab).push([ln]);
+  }
+
   counts(): Record<LogTab, { lines: number; alerts: number; dropped: number }> {
     return { build: this.build.stats, flash: this.flash.stats, serial: this.serial.stats };
   }

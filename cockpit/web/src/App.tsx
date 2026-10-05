@@ -48,6 +48,8 @@ export default function App() {
   // 把它持久化成"下次默认开启"是一个会咬人的默认值。
   const [clean, setClean] = useState(false);
   const [jobs, setJobs] = useState<number | null>(null);
+  // 串口手写通道（M3-b）的波特率覆写。null = "还没改过，跟工程/宿主默认走"。
+  const [baudOverride, setBaudOverride] = useState<number | null>(null);
 
   const streamRef = useRef<StreamHandle | null>(null);
   const selectedRef = useRef("");
@@ -200,6 +202,46 @@ export default function App() {
   );
 
   const card = catalog?.projects.find((p) => p.name === selected) ?? null;
+  // 波特率优先级：用户显式选的 → 工程配置 → 宿主默认 → 115200。
+  // ★ 必须与后端 `serialterm.resolve_target()` 的顺序**一致**，否则会出现
+  //   "界面显示 9600、实际按 115200 发"这种最难查的不一致。
+  const serialBaud = baudOverride ?? card?.serial.baud ?? caps?.serial.host_baud ?? 115200;
+  const serialPort = card?.serial.port || caps?.serial.host_default || "";
+
+  /**
+   * 手写通道（M3-b）：一次「写一条 → 收一小段回显」。
+   *
+   * ★ 这些行**只在本机缓冲里**，重载页面就没了 —— 因为写通道不属于任何 run
+   *   （它与 monitor 天然互斥：monitor 在跑时写不进去、也不该写），服务端**没有**
+   *   对应事件可重放。与事件行的这个区别必须让人看得见，故用 `TX →` / `←` 前缀区分。
+   */
+  const doSerialWrite = useCallback(
+    async (line: string) => {
+      const project = selectedRef.current;
+      logs.local("serial", `TX → ${line}`, "warn");
+      try {
+        const r = await api.serial({ project, data: line, baud: serialBaud });
+        if (!r.ok) {
+          logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
+          return;
+        }
+        logs.local(
+          "serial",
+          `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（${r.backend}/${r.layer}）`,
+        );
+        for (const ln of r.echoed) logs.local("serial", `← ${ln}`);
+        if (!r.echoed.length) {
+          logs.local(
+            "serial",
+            `（${r.read_ms}ms 窗口内无回显 —— 设备不回应也可能是正常的）`,
+          );
+        }
+      } catch (e) {
+        logs.local("serial", `✗ ${errmsg(e)}`, "alert");
+      }
+    },
+    [serialBaud],
+  );
   const ThemeIcon = THEME_ICON[theme];
 
   if (fatal) {
@@ -317,9 +359,10 @@ export default function App() {
             onTab={(t: LogTab) => setTab(t)}
             autoScroll={autoScroll}
             onAutoScrollChange={setAutoScroll}
-            onSerialWrite={null}
-            serialPort={card?.serial.port || caps?.serial.host_default || ""}
-            serialBaud={card?.serial.baud ?? caps?.serial.host_baud ?? 115200}
+            onSerialWrite={doSerialWrite}
+            serialPort={serialPort}
+            serialBaud={serialBaud}
+            onSerialBaudChange={setBaudOverride}
           />
         }
         compactSelector={

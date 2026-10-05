@@ -17,10 +17,21 @@ export interface EvidenceRailProps {
   onTab: (t: LogTab) => void;
   autoScroll: boolean;
   onAutoScrollChange: (v: boolean) => void;
-  /** 串口写入通道（M3 落地前为 null → 输入框置灰并说明原因） */
+  /** 串口写入通道（M3-b 已通）。为 null、或后端不支持写时 → 输入框置灰并说明原因 */
   onSerialWrite: ((line: string) => void) | null;
   serialPort: string;
   serialBaud: number;
+  /** 改波特率**立即生效** —— 下一次发送就用新值（无状态往返，不需要先"重开端口"） */
+  onSerialBaudChange: (baud: number) => void;
+}
+
+/** 常用波特率。工程配置里若是非标值，也插进列表 —— 否则 select 显示不出当前值 */
+const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+function baudOptions(current: number): number[] {
+  return COMMON_BAUDS.includes(current)
+    ? COMMON_BAUDS
+    : [...COMMON_BAUDS, current].sort((a, b) => a - b);
 }
 
 type Counts = Record<LogTab, { lines: number; alerts: number; dropped: number }>;
@@ -38,6 +49,7 @@ export function EvidenceRail({
   onSerialWrite,
   serialPort,
   serialBaud,
+  onSerialBaudChange,
 }: EvidenceRailProps) {
   const [counts, setCounts] = useState<Counts>(() => logs.counts());
   const [draft, setDraft] = useState("");
@@ -65,6 +77,9 @@ export function EvidenceRail({
   const st = counts[tab];
   // 只读 run 快照 —— 低频（run/* 与背压告警才变），不会拖累这里的日志渲染路径
   const run = useRun();
+  // 写通道可用性：既要 App 接上了回调，又要后端**真的支持写**（M3-b）。
+  // 两者分开判断，是为了让"没接线"与"后端不支持"给出不同的置灰理由。
+  const writable = !!onSerialWrite && (caps?.serial.write_available ?? false);
 
   const tabs: Array<SegTab<LogTab>> = [
     { id: "build", label: "构建", badge: counts.build.lines },
@@ -154,13 +169,13 @@ export function EvidenceRail({
         empty={emptyTextFor(tab, caps)}
       />
 
-      {/* ── 串口手动输入（M3 才通；现在明确置灰而不是假装能用） ── */}
+      {/* ── 串口手动输入（M3-b 已通：写一条 → 收一段回显，一次请求内闭环） ── */}
       {tab === "serial" ? (
         <form
           className={s.write}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!draft.trim() || !onSerialWrite) return;
+            if (!draft.trim() || !writable || !onSerialWrite) return;
             onSerialWrite(draft);
             setDraft("");
           }}
@@ -169,18 +184,32 @@ export function EvidenceRail({
           <Input
             mono
             placeholder={
-              onSerialWrite
+              writable
                 ? "输入一行并按回车发送到设备"
-                : "串口写通道将在 M3 落地（当前为只读）"
+                : "串口写通道不可用（后端不支持写，或尚未接线）"
             }
             aria-label="串口手动输入"
             value={draft}
-            disabled={!onSerialWrite}
+            disabled={!writable}
             onChange={(e) => setDraft(e.currentTarget.value)}
           />
           <span className={s.portTag} title={caps?.serial.hint ?? ""}>
-            {serialPort || "auto"}@{serialBaud}
+            {serialPort || "auto"}
           </span>
+          <select
+            className={s.baud}
+            value={serialBaud}
+            onChange={(e) => onSerialBaudChange(Number(e.currentTarget.value))}
+            title="波特率：改后立即生效（下一次发送即用新值）"
+            aria-label="串口波特率"
+            disabled={!writable}
+          >
+            {baudOptions(serialBaud).map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
         </form>
       ) : null}
     </div>

@@ -4,6 +4,7 @@ import type {
   PlanPreview,
   ProjectsResponse,
   RunsResponse,
+  SerialWriteResult,
   StepId,
 } from "./types";
 
@@ -76,6 +77,39 @@ export const api = {
         body: JSON.stringify({ run, reason }),
       },
     ),
+
+  /**
+   * 手写通道（M3-b）：写一条出去、收一小段回显 —— **一次请求内闭环**。
+   *
+   * ★ 走 **POST**：它会**真往设备写字节**，是明确的副作用操作。
+   *   与 `/api/plan`（只读预览、走 GET）正好相对 —— 两个端点的动词选择
+   *   本身就是"有没有副作用"的声明。
+   *
+   * 抛错只发生在 400（请求不合法）与 409（串口被在跑的闭环占着）；
+   * "写失败"是 **200 + ok:false**，见 `SerialWriteResult` 的注释。
+   */
+  serial: (opts: {
+    project: string;
+    data: string;
+    port?: string;
+    baud?: number;
+    readMs?: number;
+    newline?: boolean;
+    hex?: boolean;
+  }) =>
+    req<SerialWriteResult>("/api/serial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project: opts.project,
+        data: opts.data,
+        port: opts.port,
+        baud: opts.baud,
+        read_ms: opts.readMs,
+        newline: opts.newline,
+        hex: opts.hex,
+      }),
+    }),
 };
 
 /**

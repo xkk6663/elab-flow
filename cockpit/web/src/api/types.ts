@@ -200,6 +200,8 @@ export interface Capabilities {
     ports: SerialPort[];
     host_default: string;
     host_baud: number;
+    /** 能否往串口**写**（M3-b）。与 `available` 同源，但单列以免前端去猜。 */
+    write_available: boolean;
   };
   active_runs: ActiveRunInfo[];
   steps: { all: StepId[]; default: StepId[]; onhw: StepId[] };
@@ -271,4 +273,32 @@ export interface PlanPreview {
   jobs: number | null;
   plan: PlanStepPreview[];
   warnings: string[];
+}
+
+// ── /api/serial（手写通道，M3-b）────────────────────────────────
+/**
+ * 一次「写一条 → 收一小段回显」的结果。
+ *
+ * ★ `ok:false` **也是 200**（除非请求本身不合法=400 / 串口被闭环占着=409）。
+ *   理由：失败与成功要渲染的字段**完全一样**（port/baud/error）——
+ *   用 5xx 只会让前端走异常分支、把这些结构化信息丢掉。
+ */
+export interface SerialWriteResult {
+  ok: boolean;
+  /** 实际写到的端口（已解析 `auto`）；失败时为空串 */
+  port: string;
+  baud: number;
+  backend: string;
+  layer: string;
+  /** 实际写出的字节数。≠ `payload_bytes` 即"写了一半"，按失败算 */
+  written: number;
+  payload_bytes: number;
+  /** 回显窗口内收到的**完整行** */
+  echoed: string[];
+  bytes_read: number;
+  read_ms: number;
+  elapsed_s: number;
+  /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
+  eol: string;
+  error: string | null;
 }
