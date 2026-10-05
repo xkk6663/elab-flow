@@ -25,8 +25,9 @@
 都说"成功"，可数据发到了别的设备上。
 
 ★ 本模块**不发射事件**：写通道不属于任何 run（它与 monitor 天然互斥 —— monitor
-  在跑时它根本写不进去），因此**没有**可挂的 run 上下文。把 TX/RX 落盘需要一套
-  独立的 console 日志，属 M3-b2（见 README §11 已知限制）。
+  在跑时它根本写不进去），因此**没有**可挂的 run 上下文。TX/RX 的持久化走
+  **独立的 console 日志**（`serialconsole.py`，M3-b2），由调用方通过 `journal=`
+  回调接进来 —— 本模块只负责"发一条、收一段"，不认识文件与路径。
 """
 
 from __future__ import annotations
@@ -97,9 +98,9 @@ def build_payload(data: str, *, newline: bool = True, hex_: bool = False
     return payload, ""
 
 
-def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
-              read_ms: int = DEFAULT_READ_MS, newline: bool = True,
-              hex_: bool = False, log=print) -> dict:
+def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
+               read_ms: int = DEFAULT_READ_MS, newline: bool = True,
+               hex_: bool = False, log=print) -> dict:
     """写一条出去、读一小段回显、关掉。返回值可直接 JSON 化。
 
     无论成功失败都返回**同一个形状**（``ok`` 区分），因为前端要渲染的字段一样 ——
@@ -188,6 +189,45 @@ def _drain(s: "sp.SerialIO", read_ms: int) -> tuple[list[str], int, bytes]:
             raw, buf = buf.split(b"\n", 1)
             lines.append(raw.decode("utf-8", errors="replace").rstrip("\r"))
     return lines, total, buf
+
+
+def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
+              read_ms: int = DEFAULT_READ_MS, newline: bool = True,
+              hex_: bool = False, journal=None, log=print) -> dict:
+    """`_roundtrip` + **可选落盘**（M3-b2）。
+
+    ``journal(rec)`` 是调用方给的落盘回调 —— 本模块**不认识文件**，落到哪由调用方决定
+    （驾驶舱与 CLI 指向**同一份** console 日志）。日志异常**不吞、但也不许改变主结果**：
+    "日志没写成"不该让"命令已经发出去了"变成失败。
+    """
+    res = _roundtrip(cfg, name, data=data, port=port, baud=baud, read_ms=read_ms,
+                     newline=newline, hex_=hex_, log=log)
+    _journal(journal, res, data=data, hex_=hex_, newline=newline, log=log)
+    return res
+
+
+def _journal(journal, res: dict, *, data: str, hex_: bool, newline: bool,
+             log=print) -> None:
+    """把一次往返的结果落进 console 日志。
+
+    ★ 从**结果**生成记录（而不是在 `_roundtrip` 内部插一堆回调）是有意的：
+      无论成功失败、无论从哪条早退路径返回，都**恰好**落一对 (TX, RX*) ——
+      不会漏，也不会因为将来多一条 `return` 就少记一笔。
+    """
+    if journal is None:
+        return
+    port, baud = res.get("port") or "", res.get("baud") or 0
+    try:
+        journal({"dir": "tx", "text": data, "ok": bool(res.get("ok")),
+                 "written": res.get("written", 0),
+                 "payload_bytes": res.get("payload_bytes", 0),
+                 "hex": hex_, "newline": newline,
+                 "port": port, "baud": baud, "error": res.get("error")})
+        for line in res.get("echoed") or []:
+            journal({"dir": "rx", "text": line, "ok": True,
+                     "port": port, "baud": baud})
+    except Exception as exc:                     # noqa: BLE001
+        log(f"[serialterm] — 写 console 日志失败（不影响本次结果）：{exc}")
 
 
 def render(res: dict) -> str:

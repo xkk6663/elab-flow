@@ -22,6 +22,7 @@ from .config import Config, ElabError, Host
 from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
 from . import monitor as monitor_mod
 from . import run as run_mod
+from . import serialconsole as serialconsole_mod
 from . import serialport as serialport_mod
 from . import serialterm as serialterm_mod
 from . import skillgen
@@ -387,11 +388,14 @@ def cmd_serial(cfg: Config, args) -> int:
 
     ★ 与驾驶舱的 `POST /api/serial` 共用 `serialterm.roundtrip()` —— 只有一份实现，
       所以"CLI 能发、界面发不出"这类不一致在结构上就不可能出现。
+    ★ 也共用同一份 console 日志：CLI 手敲的命令会出现在驾驶舱的串口历史里
+      （反过来也成立）—— "这块板子上发生过什么"应当只有一处记录。
     """
     res = serialterm_mod.roundtrip(
         cfg, args.project, data=args.data, port=args.port or "",
         baud=args.baud or 0, read_ms=args.read_ms,
         newline=not args.no_newline, hex_=args.hex,
+        journal=serialconsole_mod.journal_for(cfg, project=args.project),
         log=(lambda *a, **k: None) if args.json else print)
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
