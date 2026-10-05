@@ -88,6 +88,30 @@ def is_activity(topic: str) -> bool:
     return not is_persisted(topic)
 
 
+#: SSE 层会合并成**一帧** ``proc/stdout-batch`` 的 topic —— **只有进程输出**。
+#:
+#: ★ 为什么不能用 :func:`is_activity` 当这个判据（这是一个真实的本仓库事故）：
+#:   ``is_activity`` 是**落盘通道**的分类，范围大得多 —— ``serial/*``、
+#:   ``stream/*`` 都在里面。而"合并"是**传输层**的动作，对象只该是
+#:   "一秒能刷几万行"的编译输出。
+#:
+#:   实测症状：`serial/open` / `serial/close` / `serial/closed-loop` 都**没有**
+#:   ``line`` 字段，被合并时 `str(e.get("line",""))` 得到空串 → 浏览器收到一个
+#:   **空行**，`serial/closed-loop` 就再也不见了（驾驶舱「串口闭环」那一段
+#:   永远是死的）。更迷惑的是**不对称**：run 结束后刷新页面走的是服务端
+#:   "按 seq 重放"分支，那条路逐条成帧 → **历史看得到、实时看不到**，
+#:   与 N12（漏登记 `proc/stdout-batch`）完全同形。
+#:
+#:   判据原则：**只有"产生过程序输出"的 topic 才配被合并**。其余一律各自成帧，
+#:   宁可多几帧，也不要让一个域事件被"合并"成一行空文本。
+BATCHED_TOPICS = frozenset({PROC_STDOUT, PROC_STDERR})
+
+
+def is_batched(topic: str) -> bool:
+    """SSE 是否应把该 topic 合并进 ``proc/stdout-batch``（**仅进程输出**）。"""
+    return topic in BATCHED_TOPICS
+
+
 # ── 工具 ─────────────────────────────────────────────────────────
 def _now() -> float:
     return round(time.time(), 3)

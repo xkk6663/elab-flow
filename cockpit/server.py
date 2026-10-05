@@ -73,22 +73,49 @@ SSE_TOPICS = frozenset({
 })
 
 
+#: 服务端**合成**（不写事件日志）的 topic。它们不在 ``kernel.events`` 里，
+#: 因为它们是"父进程对这条流的观察"，不是 run 自己的事实。
+SYNTHETIC_TOPICS = frozenset({"stream/closed", "stream/overrun"})
+
+#: 其中**绝不可丢**的那一个。
+#:
+#: ★ ``stream/closed`` 的 ``is_activity()`` 是 **True**（它前缀是 ``stream/``，
+#:   非 ``run/``），于是队列一满它就会被当成"可丢的活动事件"丢掉 ——
+#:   而它恰恰是浏览器**唯一**的"run 结束了、可以收尾了"信号
+#:   （``sse.ts`` 收到它才 ``es.close()`` + 回调 ``onClosed``）。
+#:   丢掉它的后果：``markStreamClosed`` 永不触发，界面**永远显示"运行中"**、
+#:   取消按钮永远亮着，而进程早就没了。
+#:   唯一的兜底是心跳分支（``heartbeats > 8`` ≈ 2 分钟）后断开连接，
+#:   让浏览器重连走"已结束 run 的重放分支" —— 也就是说：
+#:   **恢复要两分钟，且表现为"卡住"而不是"报错"**。
+#:   故把它明确划进"不可丢"（与 ``run/*`` 同级）。
+CONTROL_TOPICS = frozenset({"stream/closed"})
+
+
 # ══════════════════════════════════════════════════════════════════
 #  Run 管理：spawn / 跟读 / 取消（§5.1）
 # ══════════════════════════════════════════════════════════════════
 @dataclass
 class ActiveRun:
+    #: 以下四个是**临时占位**：``run/start`` 一落盘就以日志为准（见 ``list_active``）。
+    #: 留着它们只是为了覆盖"子进程刚 spawn、首行还没刷出来"的那几百毫秒窗口。
     run_id: str
     project: str
     steps: list[str]
     actor: str
+    #: 以下三个只有进程内拿得到 —— 日志里没有也不该有，故**必须**留在内存。
     proc: subprocess.Popen
     started_at: float
     subscribers: set = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
-    #: 背压统计：给 UI 显示"日志已截断"用（§17.3）
+    #: 背压统计：给 UI 显示"日志已截断"用（§17.3）。
+    #: ★ 这是**run 级**计数（跨订阅者累加），`/api/runs.active` 直接读它。
     dropped: int = 0
     last_seq: int = 0
+    #: 每个订阅者队列的溢出状态：``id(q) -> {"armed": bool, "marker": dict|None}``。
+    #: 键用 ``id(q)`` 是安全的 —— q 在整个订阅期都被 ``subscribers`` 持有，
+    #: 期间地址不会变也不会被回收（``unsubscribe`` 会同步清掉这条）。
+    sub_state: dict = field(default_factory=dict)
 
     @property
     def alive(self) -> bool:
@@ -106,6 +133,11 @@ class RunManager:
     ``<id>.jsonl`` + ``<id>.proc.jsonl``（**按 seq 归并**），再推给所有订阅者。
     子进程退出后，follower 补发一条 ``stream/closed`` 让浏览器**主动断开**
     （否则 EventSource 会不停重连一个已结束的 run）。
+
+    ★ 登记簿**不是**真相：真相是事件日志（契约 §5.3）。``_active`` 里除
+      ``proc``/``alive``/``last_seq`` 这几个"只有进程内才有"的句柄之外，
+      其余元数据都在 ``run/start`` 里逐字存在，且以那份为准（见 :meth:`list_active`）。
+      这条纪律是 N9 换来的：两份真相迟早会分叉。
     """
 
     def __init__(self, cfg: Config, *, log=print):
@@ -133,16 +165,57 @@ class RunManager:
           并且 300ms 内就"跑完了"（那其实是旧 run 的重放）。
           过滤之后 ``active`` 才配得上它的名字，前端也因此能正确回退到
           "没有在跑的 → 显示最近一次的留档"。
+
+        ★ **元数据以事件日志为准**（契约 §5.3）。``project``/``steps``/``actor``/
+          ``started_at`` 在 ``run/start`` 里**逐字都有**，而 ``_active`` 里那份是
+          ``spawn()`` 按自己的理解记下的 —— 两份真相必然有一天对不上
+          （实测 N9：取消/重跑之后界面显示的步骤序列与日志里的不一致）。
+          故这里一律**回读 ``run/start``**，内存那份退化为"子进程还没把首行刷出来"
+          那几百毫秒的**临时占位**，并用 ``meta_source`` 把这件事**标出来**，
+          而不是让人以为它同样权威。
+          剩下的 ``pid``/``alive`` 只存在于进程内、日志里没有也不该有 —— 那才是
+          ``_active`` 该独占的东西。
         """
         with self._lock:
             live = [a for a in self._active.values() if a.alive]
-            live.sort(key=lambda a: a.started_at, reverse=True)
-            return [{
-                "run": a.run_id, "project": a.project, "steps": a.steps,
-                "actor": a.actor, "pid": a.proc.pid,
-                "started_at": a.started_at, "alive": True,
+        out = []
+        for a in live:
+            st = self._start_event(a.run_id)
+            if st is not None:
+                meta = {
+                    "project": st.get("project") or a.project,
+                    "steps": list(st.get("steps") or a.steps),
+                    "actor": st.get("actor") or a.actor,
+                    "started_at": st.get("ts") or a.started_at,
+                    "meta_source": "event-log",
+                }
+            else:
+                meta = {"project": a.project, "steps": list(a.steps),
+                        "actor": a.actor, "started_at": a.started_at,
+                        "meta_source": "provisional"}
+            out.append({
+                "run": a.run_id, **meta,
+                # 下面两个是**进程内**的事实，日志里没有也不该有：
+                "pid": a.proc.pid, "alive": True,
                 "dropped": a.dropped, "last_seq": a.last_seq,
-            } for a in live]
+            })
+        out.sort(key=lambda x: x["started_at"], reverse=True)
+        return out
+
+    def _start_event(self, run_id: str) -> dict | None:
+        """回读该 run 的**首条** ``run/start``（``seq`` 恒为 1，也就是文件第一行）。
+
+        只 peek 一次、**不缓存**：事件文件是只追加的，首行永不改变，
+        故"每次重读"与"缓存一份"结果必然相同 —— 那就不必再引入第二个
+        需要保持同步的东西（本文件反复在为"少一个同步点"付代价）。
+        """
+        state = self.runs_dir / f"{run_id}.jsonl"
+        try:
+            for e in ev_mod.replay(state, 0):
+                return e if e.get("topic") == ev_mod.RUN_START else None
+        except OSError:
+            return None
+        return None
 
     # ── spawn ───────────────────────────────────────────────────
     def spawn(self, *, project: str, steps: list[str] | None = None,
@@ -231,24 +304,101 @@ class RunManager:
                 self._active.pop(ar.run_id, None)
 
     def _fanout(self, ar: ActiveRun, ev: dict) -> None:
+        """把一条事件推给所有 SSE 订阅者；**队列满时按契约丢弃并留痕**。
+
+        丢谁（ICD §3.2）：``proc/*`` 等 activity 类可丢，``run/*`` 绝不丢
+        （``run/*`` 是界面状态的唯一真相，丢了界面就再也回不到正确状态）。
+
+        ★ 旧实现只 ``ar.dropped += 1`` 然后 continue —— 于是"丢了多少"只有
+          服务端自己知道，界面上什么都没有。这正是本仓库反复出现的
+          **静默丢事件**形态：服务端全对、HTTP 全 200、日志无一行报错，
+          只有那块 UI 少了内容。修法就是契约 §17.3 早就写好的那句
+          "并发 `stream/overrun` 让 UI 提示'日志已截断'"。
+        """
         with ar.lock:
             subs = list(ar.subscribers)
+        topic = ev.get("topic", "")
+        # `stream/closed` 虽属 activity 通道，却是控制帧 → 与 run/* 同级不可丢
+        droppable = ev_mod.is_activity(topic) and topic not in CONTROL_TOPICS
         for q in subs:
             try:
                 q.put_nowait(ev)
+                # 队列不再满 → 结束了一个溢出 episode，下一轮可以再报一次
+                ar.sub_state.pop(id(q), None)
+                continue
             except queue.Full:
-                if ev_mod.is_activity(ev.get("topic", "")):
-                    ar.dropped += 1          # 可丢：proc/* 超限就丢，run/* 绝不丢
-                    continue
-                # run/* 不可丢 → 挤掉队首（队首多半是最老的 proc 行）
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    q.put_nowait(ev)
-                except queue.Full:
-                    pass
+                pass
+
+            if droppable:
+                ar.dropped += 1
+                self._signal_overrun(ar, q, scope="proc/*")
+                continue
+
+            # ── run/* 不可丢 → 挤掉队首（队首多半是最老的 activity 行）──
+            evicted = None
+            try:
+                evicted = q.get_nowait()
+            except queue.Empty:
+                pass
+            if evicted is not None:
+                ar.dropped += 1          # 无论它是哪一类，订阅者都收不到了
+            try:
+                q.put_nowait(ev)
+            except queue.Full:
+                # 挤了还是满（队列里全是 run/*）→ 这一次的 run/* 只能丢，
+                # 但**必须留痕**：界面据此知道"状态可能不完整，需要重载"。
+                self._signal_overrun(ar, q, scope="run/*")
+                continue
+            if evicted is not None:
+                self._signal_overrun(ar, q, scope="proc/*")
+
+    def _signal_overrun(self, ar: ActiveRun, q: queue.Queue, *, scope: str) -> None:
+        """把一个**合成的** ``stream/overrun`` 塞进该订阅者队列（同一 episode 只塞一个）。
+
+        为什么是合成事件而不是 ``emit()`` —— 这条很关键：
+
+        - ``stream/overrun`` 描述的是**这一条 SSE 流**丢了多少，不是 run 自己的事实。
+          写进 ``<id>.proc.jsonl`` 会同时破两件事：① 单写者模型（父进程去写子进程的
+          日志文件）；②"删掉 ``.proc.jsonl`` 只损失日志、不影响状态重建"的通道判据。
+        - 真相**一条没少**地躺在文件里，浏览器断线重连即可按 ``seq`` 补齐
+          （``_sse`` 的重放分支就是干这个的）。这条事件的作用只是把
+          "你此刻看到的不是全部"**当场说出来**，而不是等用户自己发现日志断了。
+        - 于是它对 DSH 那条硬约束是**不违逆**的：可观测性、重建都仍从日志派生；
+          这里交付的是一个关于"传输"的瞬时事实，丢失它不影响任何状态重建。
+
+        ★ 同一个溢出 episode 只报一次：队列满时若每条丢的事件都塞一个标记，
+          队列里会全是标记、把真实内容彻底挤出去，UI 反而更瞎。
+          标记里的 ``dropped`` 是**同一个 dict 对象**，后续每次丢弃都就地更新，
+          故 SSE 真正读到它时拿到的是最新数字，而不是"标记诞生那一刻"的旧值。
+        """
+        st = ar.sub_state.setdefault(id(q), {"armed": False, "marker": None})
+        if st["armed"] and st["marker"] is not None:
+            st["marker"]["dropped"] = ar.dropped
+            st["marker"]["ts"] = time.time()
+            return
+        marker = {
+            "ts": time.time(), "run": ar.run_id, "topic": "stream/overrun",
+            # 不带新 seq：它不是 run 的事实，不该消耗 run 的计数器。
+            # 用"当前已推进到的 seq"当定位锚点；SSE 侧也不会把它写进 Last-Event-ID。
+            "seq": ar.last_seq, "actor": "agent",
+            # ★ 与 `/api/runs.active[].dropped` **同一个数**（run 级）。
+            #   刻意不做 per-connection 计数：两个都叫 dropped 的数字含义不同，
+            #   迟早会有人在界面上把它们并列显示，然后对不上。
+            "dropped": ar.dropped, "topic_scope": scope,
+            "reason": "sse-queue-full",
+        }
+        st["marker"] = marker
+        try:
+            q.put_nowait(marker)
+            st["armed"] = True
+        except queue.Full:
+            # 满到连标记都放不下 → 让队首一条活动行让位（性质不变：仍是丢活动事件）
+            try:
+                q.get_nowait()
+                q.put_nowait(marker)
+                st["armed"] = True
+            except (queue.Empty, queue.Full):
+                pass
 
     # ── 订阅（SSE 用）───────────────────────────────────────────
     def subscribe(self, run_id: str) -> queue.Queue:
@@ -264,6 +414,10 @@ class RunManager:
         if ar is not None:
             with ar.lock:
                 ar.subscribers.discard(q)
+            # ★ 必须一起清：sub_state 用 id(q) 当键，留着就是"地址将被复用"的隐患
+            #   （新队列可能落到同一地址，于是它一上来就被判成"已报过溢出"，
+            #    真正的溢出反而报不出来 —— 又是一次静默丢事件）。
+            ar.sub_state.pop(id(q), None)
 
     # ── 取消 ────────────────────────────────────────────────────
     def cancel(self, run_id: str, *, reason: str = "用户取消") -> dict:
@@ -430,6 +584,27 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
     }
 
 
+def _plan_preview(cfg: Config, qs: dict) -> dict:
+    """``GET /api/plan`` —— 只读命令预览（M2「先看命令再执行」，§14.4）。
+
+    ★ 为什么是 **GET** 而不是 POST：它**没有副作用**（不 spawn、不写盘、
+      不发射事件），语义上是一个纯查询。做成 GET 的收益是可 `curl` 直接验、
+      可被浏览器/代理按幂等处理；做成 POST 则会让人以为"点了就动手了"。
+
+    ★ 命令**不在这里拼**：整份预览来自 ``run.preview()``，而它复用各模块
+      自己的 dry-run/print 分支。服务端只负责把 query 参数翻译过去 ——
+      任何"在这里顺手拼一条命令"都是给未来埋分叉。
+    """
+    project = (qs.get("project") or [""])[0]
+    if not project:
+        raise ElabError("缺少 project")
+    steps = (qs.get("steps") or [None])[0]
+    clean = (qs.get("clean") or ["0"])[0].lower() in ("1", "true", "yes", "on")
+    jobs_raw = (qs.get("jobs") or [""])[0]
+    jobs = int(jobs_raw) if jobs_raw.strip().isdigit() else None
+    return run_mod.preview(cfg, project, steps=steps, clean=clean, jobs=jobs)
+
+
 # ══════════════════════════════════════════════════════════════════
 #  HTTP
 # ══════════════════════════════════════════════════════════════════
@@ -534,6 +709,8 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if path == "/api/runs":
                 return self._json({"runs": ev_mod.list_runs(self.mgr.runs_dir),
                                    "active": self.mgr.list_active()})
+            if path == "/api/plan":
+                return self._json(_plan_preview(self.cfg, qs))
             if path == "/api/events":
                 return self._sse(qs)
             if path == "/api/run-events":
@@ -704,11 +881,37 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                      "rc": e.get("rc")})
                     break
 
+                # ★ `stream/overrun` 必须在**去重之前**处理，理由有两条：
+                #   ① 它的 topic 前缀是 `stream/`（非 `run/`）→ `is_activity()` 为真，
+                #      会落进下面的 activity 分支被当成"一行普通输出"。而它没有
+                #      `line` 字段 → 界面收到一个**空字符串行**，什么提示都没有。
+                #      契约里"补一条 stream/overrun 让 UI 提示日志已截断"就是被这里吞掉的。
+                #   ② 它带的是 `ar.last_seq`（**定位锚点**，不是新序号），
+                #      必然 `<= last_sent` → 走下面的去重就会被当成"与重放重叠"丢掉。
+                #      即"刚发出的告警被自己的去重逻辑吃掉"，是最隐蔽的那种丢法。
+                if topic == "stream/overrun":
+                    flush_proc()
+                    self._sse_frame(
+                        "stream/overrun",
+                        {"run": run_id, "topic": "stream/overrun",
+                         "seq": e.get("seq", 0), "ts": e.get("ts") or time.time(),
+                         "actor": e.get("actor") or "agent",
+                         "dropped": e.get("dropped", 0),
+                         "topic_scope": e.get("topic_scope", ""),
+                         "reason": e.get("reason", "")},
+                        eid=None)     # ★ 刻意不带 id：它是"传输"的事实，不是 run 的序号；
+                                      #   写进 Last-Event-ID 会让重连游标越过它自己
+                    last_beat = time.time()
+                    continue
+
                 seq = e.get("seq", 0)
                 if seq and seq <= last_sent:
                     continue                            # 与重放重叠 → 去重
-                if ev_mod.is_activity(topic):
-                    # 100ms 合并（§17.3）；不同 step 的行先冲刷，避免串味
+                if ev_mod.is_batched(topic):
+                    # 100ms 合并（§17.3）；**只有进程输出**进这里 ——
+                    # 见 `events.is_batched()`：`serial/*` 曾被 `is_activity()`
+                    # 误判进合并，于是 serial/closed-loop 变成一行空文本、
+                    # 「串口闭环」UI 永远是死的，且只在**实时**路径上复现。
                     step = e.get("step", "")
                     if pending and step != pending_step:
                         flush_proc()

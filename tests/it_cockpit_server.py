@@ -32,6 +32,8 @@ from cockpit import server as srv_mod          # noqa: E402
 from elab.config import Config                 # noqa: E402
 
 PROJECT = "at32_test"
+#: 第二个工程，用来说明"跨芯片也能预览"（它的 monitor 判据是真的、非空）
+PROJECT_SERIAL = "at32f421g8u7"
 
 
 def _free_port() -> int:
@@ -40,6 +42,18 @@ def _free_port() -> int:
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+class _FakeProc:
+    """只提供 `ActiveRun` 用到的那点接口（让"假 run"看起来一直在跑）。"""
+
+    pid = 999001
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
 
 
 class _Client:
@@ -394,6 +408,167 @@ class CockpitIntegration(unittest.TestCase):
             self.assertEqual(r.status, 409)
         finally:
             c.close()
+
+    # ── M2：只读命令预览（§14.4「先看命令再执行」）──────────────
+    def test_plan_preview_carries_commands_and_effects(self):
+        d = self.client.get_json(
+            f"/api/plan?project={PROJECT}&steps=build,flash&clean=1&jobs=4")
+        self.assertEqual(d["project"], PROJECT)
+        self.assertEqual(d["steps"], ["build", "flash"])
+        self.assertTrue(d["clean"])
+        self.assertEqual(d["jobs"], 4)
+
+        steps = {e["step"]: e for e in d["plan"]}
+        # build：configure + build 两条命令，且 `-j` 落在 build 那条上
+        cmds = steps["build"]["commands"]
+        self.assertEqual(len(cmds), 2, cmds)
+        self.assertIn("-j", cmds[1])
+        self.assertIn("4", cmds[1])
+        # configure 必须带工具链接管 + 芯片盖章参数（**与实跑同源**，
+        # 这条断言就是在拦"预览自己另拼一份命令"）
+        self.assertTrue(any(a.startswith("-DCMAKE_TOOLCHAIN_FILE=") for a in cmds[0]))
+        self.assertTrue(any(a.startswith("-DELAB_CPU=") for a in cmds[0]))
+        # `--clean` 的**副作用**必须被显式说出来（它就是删工作目录，不可逆）
+        self.assertTrue(any("删除工作目录" in x for x in steps["build"]["effects"]),
+                        steps["build"]["effects"])
+        # flash：一条 openocd 命令行，且带 program/verify/reset/exit
+        argv = steps["flash"]["commands"][0]
+        self.assertTrue(argv, "flash 必须给出 openocd 命令行")
+        self.assertTrue(any("program" in a for a in argv), argv)
+
+    def test_plan_is_read_only(self):
+        """★ 预览的**定义**就是没有副作用：不得产生任何 run。"""
+        before = {r["run"] for r in self.client.get_json("/api/runs")["runs"]}
+        self.client.get_json(f"/api/plan?project={PROJECT}&steps=doctor,build")
+        after = {r["run"] for r in self.client.get_json("/api/runs")["runs"]}
+        self.assertEqual(after, before, "预览不得产生任何 run")
+
+    def test_plan_unknown_project_is_400(self):
+        c, r = self.client.get("/api/plan?project=no_such_project")
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            c.close()
+
+    def test_plan_missing_project_is_400(self):
+        c, r = self.client.get("/api/plan")
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            c.close()
+
+    def test_plan_rejects_unknown_step(self):
+        """步骤名拼错必须**显式报错**，不能静默变成"少跑一步"。"""
+        c, r = self.client.get(f"/api/plan?project={PROJECT}&steps=build,buidl")
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            c.close()
+
+    def test_plan_monitor_has_no_command_but_has_criteria(self):
+        """`monitor` 没有命令行（同进程内读串口），但有等效的**确定性参数**。"""
+        d = self.client.get_json(f"/api/plan?project={PROJECT_SERIAL}&steps=monitor")
+        e = d["plan"][0]
+        self.assertFalse(e["spawns"])
+        self.assertEqual(e["commands"], [])
+        self.assertIn("serial", e)
+        self.assertEqual(e["serial"]["baud"], 115200)
+        self.assertTrue(e["serial"]["close_on"], "判据必须一并展示，否则'它会做什么'看不全")
+
+    # ── ★ 实时 SSE：域事件必须各自成帧，不得被合并吞掉 ──────────
+    def test_live_sse_keeps_domain_events_as_named_frames(self):
+        """**回归（实测事故）**：`serial/*` 在**实时**路径上必须各自成帧。
+
+        事故形态：SSE 的合并判据原来用的是 ``is_activity()`` —— 那是**落盘通道**
+        的分类（``serial/*``、``stream/*`` 都在里面），而"合并"的对象只该是
+        编译输出那种一秒几万行的东西。于是 ``serial/open`` / ``serial/close`` /
+        ``serial/closed-loop``（都**没有** ``line`` 字段）被合并成一行**空文本**，
+        浏览器什么都收不到 —— 驾驶舱「串口闭环」那段永远是死的。
+        更迷惑的是**不对称**：run 结束后刷新页面走"按 seq 重放"分支，
+        那条路逐条成帧 → **历史看得到、实时看不到**（与 N12 同形）。
+
+        本用例不碰硬件：往真服务的 RunManager 里塞一个"假的在跑的 run"，
+        然后像 follower 一样 fanout **合成事件**，再用真 SSE 客户端读回来。
+        断言的是**帧名**（`event:` 字段）—— 只有帧名对了，浏览器才收得到
+        （``EventSource.onmessage`` 只收没有 ``event:`` 的帧，ICD §6.1）。
+        """
+        mgr = self.server.run_manager
+        rid = "r-ace00001"
+        (mgr.runs_dir / f"{rid}.jsonl").write_text(
+            json.dumps({"ts": time.time(), "run": rid, "topic": "run/start",
+                        "seq": 1, "actor": "human", "project": PROJECT,
+                        "steps": ["monitor"]}) + "\n", encoding="utf-8")
+        ar = srv_mod.ActiveRun(run_id=rid, project=PROJECT, steps=["monitor"],
+                               actor="human", proc=_FakeProc(),
+                               started_at=time.time())
+        with mgr._lock:
+            mgr._active[rid] = ar
+        try:
+            got: list[dict] = []
+
+            def _reader():
+                got.extend(_read_sse(self.client, rid, timeout_s=20.0))
+
+            t = threading.Thread(target=_reader, daemon=True)
+            t.start()
+            time.sleep(0.4)                      # 等 SSE 连上（重放分支会发 run/start）
+            for ev in [
+                {"topic": "proc/stdout", "seq": 2, "step": "monitor",
+                 "line": "[monitor] 已打开 COM10"},
+                {"topic": "serial/open", "seq": 3, "port": "COM10",
+                 "baud": 115200, "backend": "ctypes"},
+                {"topic": "serial/line", "seq": 4, "line": "[alive] tick=1", "t": 0.9},
+                {"topic": "serial/close", "seq": 5, "port": "COM10",
+                 "bytes": 16, "lines": 1, "backend": "ctypes"},
+                {"topic": "serial/closed-loop", "seq": 6, "verdict": "ok",
+                 "rule": "regex:^\\[(boot|alive)\\]", "evidence": "[alive] tick=1"},
+            ]:
+                mgr._fanout(ar, {**ev, "run": rid, "ts": time.time(), "actor": "agent"})
+                time.sleep(0.05)
+
+            # ④ 背压告警：直接投进订阅者队列（`_fanout` 的**生成**逻辑由
+            #    tests/test_cockpit_backpressure.py 覆盖；这里只验 SSE 的**成帧**）。
+            #    ★ seq 刻意取 6 = 与已发出的 serial/closed-loop **相同**：
+            #      若 `_sse` 把 `stream/overrun` 放在"与重放重叠→去重"那一步之后，
+            #      这条告警会被自己的去重逻辑吃掉（最隐蔽的一种丢法）。
+            marker = {"topic": "stream/overrun", "seq": 6, "ts": time.time(),
+                      "actor": "agent", "run": rid, "dropped": 7,
+                      "topic_scope": "proc/*", "reason": "sse-queue-full"}
+            with ar.lock:
+                subs = list(ar.subscribers)
+            for q in subs:
+                q.put_nowait(marker)
+            time.sleep(0.3)
+
+            mgr._fanout(ar, {"topic": "stream/closed", "seq": 6, "run": rid,
+                             "ts": time.time(), "actor": "agent",
+                             "reason": "run-finished", "rc": 0})
+            t.join(timeout=25)
+        finally:
+            with mgr._lock:
+                mgr._active.pop(rid, None)
+
+        frames = [e.get("_sse_event") for e in got]
+        # ① 域事件必须**各自成帧**
+        for topic in ("serial/open", "serial/line", "serial/close",
+                      "serial/closed-loop"):
+            self.assertIn(topic, frames,
+                          f"{topic} 被合并吞掉了 —— 前端拿不到它，"
+                          f"实际收到帧：{frames}")
+        # ② 它们必须带 `id:`（否则断线续传会被重复/丢）
+        cl = next(e for e in got if e.get("_sse_event") == "serial/closed-loop")
+        self.assertEqual(cl["_sse_id"], 6)
+        self.assertEqual(cl["verdict"], "ok")
+        self.assertTrue(cl["rule"], "rule 必须非空 —— 空字符串说明判据没带出来")
+        # ③ 只有进程输出才进合并帧（对照组）
+        batch = next(e for e in got if e.get("_sse_event") == "proc/stdout-batch")
+        self.assertEqual(batch["lines"], ["[monitor] 已打开 COM10"])
+        # ④ 背压告警必须成**独立帧**，且**不带 `id:`**（它不是 run 的序号，
+        #    写进 Last-Event-ID 会让重连游标越过它自己）
+        ov = next(e for e in got if e.get("_sse_event") == "stream/overrun")
+        self.assertIsNone(ov["_sse_id"])
+        self.assertEqual(ov["dropped"], 7)
+        self.assertEqual(ov["topic_scope"], "proc/*")
 
 
 if __name__ == "__main__":
