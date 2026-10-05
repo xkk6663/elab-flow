@@ -389,6 +389,20 @@ def build_project(
 
     result["artifacts"] = artifacts
 
+    # ③c flash.images 存在性校验（C33）—— build 声明的烧录镜像必须真在盘上。
+    #   `cmake --build` 不带 --target 会构建全部 target，bootloader 的 elf 由
+    #   子目录 target 产出；若声明了却缺席，说明 bootloader target 没编出来
+    #   （被哪次改动裁掉了？），烧录阶段才会炸不如在这里就说清。
+    if plan.flash_images:
+        imgs = []
+        for img in plan.flash_images:
+            p = Path(img["path"])
+            imgs.append({**img, "exists": p.exists(),
+                         "bytes": p.stat().st_size if p.exists() else 0})
+            if not p.exists():
+                log(f"[elab] WARN 已声明 flash.images 但未生成：{img['path']}")
+        result["flash_images"] = imgs
+
     # ③b 内存占位兜底（★ 驾驶舱的现实需求）
     #     链接器只在**真链接**时才输出 --print-memory-usage。Ninja 增量构建在
     #     "没有变化"时不会 relink → 那段输出消失 → 内存占位表变空。

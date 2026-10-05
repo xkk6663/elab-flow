@@ -5,6 +5,40 @@
 
 ---
 
+## [Unreleased]
+
+### 新增 —— OTA 双镜像烧录（约束 C33）
+
+- **`projects/*.yaml` 新增 `flash.images` 节**：声明 `{path, format: elf|bin,
+  address?, ld?}` 烧录序列 —— 一次 openocd 会话按序 program 全部镜像，末尾
+  `reset run` 收尾。bin 项**强制**显式地址（M2 教训：`program app.elf` 从擦除
+  粒度边界向下对齐起擦，会覆盖 Bootloader 尾部）。首个落地工程：
+  `at32f421g8u7_workbench`（SguanESC 电调台架，Boot 18K + APP 44K）。
+- **`build.link_channel`**（`exe_flags` 默认 / `c_flags`）：B 类 OTA 工程必须走
+  `c_flags` —— inject 盖章进 `CMAKE_C_LINK_FLAGS` 并清空 EXE 通道，让业务
+  bootloader 的 `string(REPLACE ...)` 防身在 elab 接管下继续生效（M1 双 -T 根除，
+  零改动业务工程）。实测：boot `.isr_vector`@0x08000000、APP@0x08004800，链接行
+  单份 specs。
+- **doctor 镜像级内存对账**：声明 `flash.images` 的项目改按「region ⊆ 芯片物理
+  范围 + flash 分区互斥 + bin address == ld FLASH 起点」校验（单镜像工程维持
+  逐字节相等口径不变）。
+- **debug 镜像模式跳过 gdb `load`**（同样的向下擦除风险；闭环顺序 flash 在前，
+  固件已在位）。
+- **builder 校验声明镜像存在性**（缺席即 WARN，build 阶段暴露而非烧录时）。
+
+### 修复
+
+- **`elab adapt` 输出能力探测漏报**：只认 `__io_putchar` 与 `{` 同行的定义，
+  WorkBench 生成代码的 Allman 风格（`{` 换行）被误判为"无输出能力"→ 错误放弃
+  生成 monitor 判据（实测 `at32f421_int.c:279`）。现两种 C 风格均识别。
+
+### 测试
+
+- 新增 `tests/test_flash_images.py` 20 例（plan 校验 / 双镜像命令构造 / 镜像级
+  对账 / putchar 探测）；全量回归 171/171 绿。
+
+---
+
 ## [V1.0.0] — 2026-10-05（首个正式发布）
 
 **一套工具链 + 一套流程，驱动不同芯片的编译 / 烧录 / 调试 / 串口闭环 —— 业务工程源码零改动。**

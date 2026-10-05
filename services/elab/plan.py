@@ -31,6 +31,8 @@ class Plan:
     artifacts: dict = field(default_factory=dict)
     probe: str = ""
     gdb_script: str = ""
+    flash_images: list[dict] = field(default_factory=list)
+    link_channel: str = "exe_flags"
 
     # ── 派生路径 ────────────────────────────────────────────────
     @property
@@ -84,6 +86,48 @@ def _shell_join(parts: list[str]) -> str:
     return " ".join(out)
 
 
+def _parse_flash_images(proj: dict) -> list[dict]:
+    """解析并校验 ``flash.images``（C33 OTA 双镜像）。
+
+    每项：``{path, format: elf|bin, address?, ld?}``
+      * ``format`` 必填且只能是 elf/bin；
+      * ``bin`` 必须带 ``address``（openocd program 的 offset；
+        M2 教训：APP 用 elf 烧录会从扇区边界向下擦，覆盖 Bootloader 尾部）；
+      * ``elf`` 的 ``address`` 可选（elf 自带地址，显式给则作为 offset 传入）；
+      * ``ld`` 可选：仅 doctor 镜像级内存对账用（缺省回退 build.linker_script）。
+
+    未声明 ``flash`` 节 → 返回 []（单镜像模式，与旧行为完全一致）。
+    """
+    images = ((proj.get("flash") or {}).get("images")) or []
+    if not isinstance(images, list):
+        raise ElabError(f"flash.images 必须是列表：{proj.get('name')}")
+    out: list[dict] = []
+    for i, item in enumerate(images):
+        if not isinstance(item, dict):
+            raise ElabError(f"flash.images[{i}] 必须是映射（path/format/...）：{proj.get('name')}")
+        path = (item.get("path") or "").strip()
+        fmt = (item.get("format") or "").strip().lower()
+        if not path:
+            raise ElabError(f"flash.images[{i}] 缺少 path：{proj.get('name')}")
+        if fmt not in ("elf", "bin"):
+            raise ElabError(f"flash.images[{i}].format 只能是 elf 或 bin：{fmt!r}")
+        addr = str(item.get("address") or "").strip()
+        if fmt == "bin" and not addr:
+            raise ElabError(
+                f"flash.images[{i}]（bin）必须声明 address —— "
+                f"M2 教训：APP 不带显式地址烧录会擦掉 Bootloader（{proj.get('name')}）"
+            )
+        if addr and not addr.lower().startswith("0x"):
+            raise ElabError(f"flash.images[{i}].address 需为 0x 十六进制：{addr!r}")
+        out.append({
+            "path": to_fwd(path),
+            "format": fmt,
+            "address": addr,
+            "ld": to_fwd(item["ld"]) if item.get("ld") else "",
+        })
+    return out
+
+
 def plan_for(cfg: Config, proj_name: str) -> Plan:
     """构造一个项目的构建计划。"""
     cfg.host  # 触发 L0 加载（缺文件时立刻报错）
@@ -107,6 +151,12 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     p.artifacts = proj.get("artifacts") or {}
     p.probe = (proj.get("debug") or {}).get("probe", "")
     p.gdb_script = to_fwd((proj.get("debug") or {}).get("gdb_script", ""))
+    p.flash_images = _parse_flash_images(proj)
+    p.link_channel = (build.get("link_channel") or "exe_flags").strip()
+    if p.link_channel not in ("exe_flags", "c_flags"):
+        raise ElabError(
+            f"build.link_channel 只能是 exe_flags 或 c_flags：{p.link_channel!r}（{proj_name}）"
+        )
 
     core = chip.get("core") or {}
     args: list[str] = []
@@ -131,6 +181,11 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     args.append(f"-DELAB_CHIP={chip.get('id', '')}")
     if p.linker_script:
         args.append(f"-DELAB_LD={p.linker_script}")
+
+    # ★ C33：链接盖章通道。B 类（行内 include 自带工具链）必须走 CMAKE_C_LINK_FLAGS ——
+    #   唯一能让业务工程 bootloader 的 string(REPLACE ...) 防身继续生效的通道
+    #   （详见 toolchains/inject.cmake 与 docs/设计约束.md C33）。
+    args.append(f"-DELAB_LINK_CHANNEL={p.link_channel}")
 
     # ★ N6 修复：-Wl,-Map 的落点由 plan 显式下传。
     #   两种工程各丢一次，原因相反，所以不能靠"工程自带的工具链"来留它：

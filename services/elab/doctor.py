@@ -267,7 +267,16 @@ def check_project(rep: Report, cfg: Config, host: Host, plan: Plan):
 
 
 def check_drift(rep: Report, plan: Plan):
-    """两源漂移：工程自带 ld 的 MEMORY vs chip.yaml 的 verify.expect_memory。"""
+    """两源漂移：工程自带 ld 的 MEMORY vs chip.yaml 的内存声明。
+
+    单镜像项目：ld region 必须**逐字节等于**芯片容量（旧行为，不变）。
+    OTA 双镜像项目（flash.images 已声明，C33）：改为**镜像级口径** ——
+      ① 每个镜像的 ld region 必须落在芯片物理范围内（BOOT 18K / APP 44K 都
+         ≠ 芯片 64K，逐字节相等口径必然误报）；
+      ② 各镜像在 **flash** 上的分区互不重叠（RAM 两个镜像都声明全量是 OTA
+         惯例——boot/app 不同时运行，不参与互斥检查）；
+      ③ bin 镜像的 address 必须等于其 ld 的 flash 区起点（烧错位 = 跑飞）。
+    """
     chip = plan.chip
     verify = chip.get("verify") or {}
     expect = verify.get("expect_memory")
@@ -278,6 +287,108 @@ def check_drift(rep: Report, plan: Plan):
         rep.warn(f"drift.{plan.name}.memory", "链接脚本不可读，跳过内存比对")
         return
 
+    if plan.flash_images:
+        _check_drift_images(rep, plan, expect)
+    else:
+        _check_drift_single(rep, plan, expect)
+
+    # 通用约定守卫：gcc.cmake 必须带 .elf 后缀（约束 C5）
+    tc = Path(plan.toolchain_file) if plan.toolchain_file else None
+    if tc and tc.exists():
+        txt = tc.read_text(encoding="utf-8", errors="ignore")
+        if "CMAKE_EXECUTABLE_SUFFIX_C" in txt and ".elf" in txt:
+            rep.ok(f"convention.{plan.name}.elf", "通用工具链带 .elf 后缀约定 (C5)")
+        else:
+            rep.warn(f"convention.{plan.name}.elf",
+                     "通用工具链缺少 .elf 后缀约定 → A 类工程产物会静默改名 (C5)")
+
+
+def _chip_physical(plan: Plan) -> dict:
+    """芯片物理内存范围：优先 chip.memory（含 origin），回退 expect_memory 标量。"""
+    out: dict[str, tuple[int | None, int]] = {}
+    for k, v in (plan.chip.get("memory") or {}).items():
+        if isinstance(v, dict) and v.get("length") is not None:
+            origin = _parse_num(str(v["origin"])) if v.get("origin") is not None else None
+            out[k] = (origin, _parse_num(str(v["length"])))
+    if not out:
+        for k, v in ((plan.chip.get("verify") or {}).get("expect_memory") or {}).items():
+            if isinstance(v, dict):
+                origin = _parse_num(str(v.get("origin"))) if v.get("origin") is not None else None
+                out[k] = (origin, _parse_num(str(v.get("length"))))
+            else:
+                out[k] = (None, _parse_num(str(v)))
+    return out
+
+
+def _check_drift_images(rep: Report, plan: Plan, expect):
+    """镜像级内存对账（C33）：⊆ 物理 + flash 互斥 + bin 地址对齐 ld 起点。"""
+    physical = _chip_physical(plan)
+    good, details = True, []
+
+    segs: dict[str, list[tuple[str, int, int]]] = {}   # chip_key -> [(镜像名, origin, len)]
+    for idx, img in enumerate(plan.flash_images):
+        ld = img.get("ld") or plan.linker_script
+        tag = f"#{idx}({Path(ld).name})" if img.get("ld") else f"#{idx}({Path(plan.linker_script).name})"
+        if not ld or not Path(ld).exists():
+            good = False
+            details.append(f"{tag}: ld 不可读")
+            continue
+        regions = parse_ld_memory(ld)
+        if not regions:
+            good = False
+            details.append(f"{tag}: 未能解析 MEMORY 段")
+            continue
+        for key in expect:
+            match = next((r for r in regions if key.upper() in r.upper()), None)
+            if match is None:
+                good = False
+                details.append(f"{tag}.{key}: ld 未声明该区")
+                continue
+            origin, length = regions[match]
+            phys = physical.get(key)
+            if phys:
+                p_origin, p_len = phys
+                if p_origin is not None and not (
+                        p_origin <= origin and origin + length <= p_origin + p_len):
+                    good = False
+                    details.append(
+                        f"{tag}.{key}: {_fmt(length)}@{origin:#x} 越界 "
+                        f"(物理 {_fmt(p_len)}@{p_origin:#x})")
+                elif p_origin is None and p_len and length > p_len:
+                    good = False
+                    details.append(f"{tag}.{key}: {_fmt(length)} > 物理 {_fmt(p_len)}")
+                if "flash" in key.lower():
+                    segs.setdefault(key, []).append((tag, origin, length))
+            details.append(f"{tag}.{key}={_fmt(length)}@{origin:#x}")
+
+        # ③ bin 镜像地址必须对齐其 ld 的 flash 起点
+        if img["format"] == "bin" and img.get("address"):
+            m = next((r for r in regions if "FLASH" in r.upper()), None)
+            if m and int(img["address"], 16) != regions[m][0]:
+                good = False
+                details.append(
+                    f"{tag}: bin address {img['address']} ≠ {m} 起点 "
+                    f"{regions[m][0]:#x}（烧错位 = 跑飞）")
+
+    # ② flash 分区互斥（RAM 不查——boot/app 不同时运行，各自声明全量是惯例）
+    for key, lst in segs.items():
+        ordered = sorted(lst, key=lambda t: t[1])
+        for a, b in zip(ordered, ordered[1:]):
+            if a[1] + a[2] > b[1]:
+                good = False
+                details.append(
+                    f"flash 分区重叠：{a[0]}[{a[1]:#x}~{a[1]+a[2]:#x}] ∩ "
+                    f"{b[0]}[{b[1]:#x}~{b[1]+b[2]:#x}]")
+
+    if good:
+        rep.ok(f"drift.{plan.name}.memory",
+               f"双镜像布局合法（{len(plan.flash_images)} 镜像 ⊆ 芯片物理，flash 分区互斥）")
+    else:
+        rep.fail(f"drift.{plan.name}.memory", "镜像内存布局漂移：" + "; ".join(details))
+
+
+def _check_drift_single(rep: Report, plan: Plan, expect):
+    """单镜像口径（旧行为）：ld region 逐字节等于芯片容量。"""
     regions = parse_ld_memory(plan.linker_script)
     if not regions:
         rep.warn(f"drift.{plan.name}.memory", f"未能从 {Path(plan.linker_script).name} 解析 MEMORY 段")
@@ -305,16 +416,6 @@ def check_drift(rep: Report, plan: Plan):
         rep.ok(f"drift.{plan.name}.memory", "ld MEMORY 与 chip.yaml 一致 [" + ", ".join(details) + "]")
     else:
         rep.fail(f"drift.{plan.name}.memory", "内存布局漂移：" + "; ".join(details))
-
-    # 通用约定守卫：gcc.cmake 必须带 .elf 后缀（约束 C5）
-    tc = Path(plan.toolchain_file) if plan.toolchain_file else None
-    if tc and tc.exists():
-        txt = tc.read_text(encoding="utf-8", errors="ignore")
-        if "CMAKE_EXECUTABLE_SUFFIX_C" in txt and ".elf" in txt:
-            rep.ok(f"convention.{plan.name}.elf", "通用工具链带 .elf 后缀约定 (C5)")
-        else:
-            rep.warn(f"convention.{plan.name}.elf",
-                     "通用工具链缺少 .elf 后缀约定 → A 类工程产物会静默改名 (C5)")
 
 
 def deep_check(rep: Report, plan: Plan) -> dict:

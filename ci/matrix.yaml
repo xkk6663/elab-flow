@@ -17,7 +17,7 @@ jobs:
   # ── 档 1：主机门禁（无探针依赖）────────────────────────────────
   - name: host-gate
     desc: 环境体检 + 深度漂移校验 + 全芯片编译（云端可跑）
-    projects: [at32_test, stm32_test, at32f421g8u7]
+    projects: [at32_test, stm32_test, at32f421g8u7, at32f421g8u7_workbench]
     steps:
       - doctor_deep       # 真跑 configure，校验实际编译命令与 chip.yaml 一致
       - build             # 编译 + 统一产出 hex/bin + 零改动快照

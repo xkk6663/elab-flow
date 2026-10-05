@@ -45,9 +45,12 @@ def _openocd_argv(plan: Plan, commands: str) -> list[str]:
             "-f", interface, "-f", target]
     # 探针声明的速率（若有）以命令形式追加，不覆盖 cfg 内的其它设置
     if probe.get("speed"):
-        argv += ["-c", f"adapter speed {probe['speed']}"]
+        argv += ["-c", f"adapter speed {probe.get('speed')}"]
+    # commands 支持 str（单条）与 list（多条，各占一个 -c）——
+    # 多镜像烧录（C33）需要串联 program 序列，不能拼成一个字符串。
     if commands:
-        argv += ["-c", commands]
+        for c in ([commands] if isinstance(commands, str) else commands):
+            argv += ["-c", c]
     return argv
 
 
@@ -75,7 +78,14 @@ def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print
         预览（``elab run --dry-run`` / ``/api/plan``）要能在**还没 build** 时
         就显示待执行的 openocd 命令行，故允许显式放开这一条 —— 用参数而不是
         "预览自己拼一遍命令"，是为了让命令构造**只有一个来源**。
+
+    双镜像模式（C33）：项目声明了 ``flash.images`` 时走 :func:`_flash_images`，
+    一次 openocd 会话按声明顺序 program 全部镜像，最后统一 ``reset run``。
     """
+    if plan.flash_images:
+        return _flash_images(plan, dry_run=dry_run, verbose=verbose, log=log,
+                             allow_missing=allow_missing_elf)
+
     elf = plan.elf
     if not elf or (not allow_missing_elf and not Path(elf).exists()):
         raise ElabError(f"ELF 不存在，请先 `elab build -p {plan.name}`：{elf}")
@@ -103,6 +113,80 @@ def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print
     if proc.returncode == 0:
         res["status"] = "ok"
         log(f"[elab] ✓ 烧录完成：{Path(elf).name} → {plan.chip.get('debug', {}).get('device')}")
+        for line in res["evidence"]:
+            log(f"       {line}")
+    else:
+        res["status"] = "failed"
+        tail = "\n".join(combined.strip().splitlines()[-12:])
+        log("[elab] ✗ 烧录失败：\n" + tail)
+    return res
+
+
+def _flash_images(plan: Plan, *, dry_run: bool, verbose: bool, log,
+                  allow_missing: bool) -> dict:
+    """多镜像烧录（C33）—— **命令构造的唯一来源**（预览与实跑共用本函数）。
+
+    为什么是"一次会话串多个 -c"而不是"每镜像一次 openocd"：
+      * Bootloader 与 APP 必须作为一个原子整体落到 Flash —— 分两次会话时，
+        第一镜像烧完的复位窗口会把芯片带到半成品状态（boot 在、app 旧/缺）；
+      * 少一次 USB/SWD 连接，DAP-Link 复合设备被串口占用的窗口更短（N5）。
+
+    命令形态（M2 教训的落地）：
+      - elf 镜像：``program {file} verify`` —— 地址由 elf 自带；
+      - bin  镜像：``program {file} {address} verify`` —— **必须显式地址**：
+        openocd 对 elf 的 program 会从擦除粒度边界向下对齐起擦，app.elf 的
+        LMA 0x08004800 被向下对齐到 0x08004000，覆盖 Bootloader 尾部 2KB
+        （业务工程 CMakeLists 注释实测实锤）；bin+显式地址不做向下对齐。
+      - 收尾：``reset run`` + ``shutdown`` —— 留运行态（与 debug 同约定）。
+    """
+    imgs: list[dict] = []
+    cmds: list[str] = []
+    for img in plan.flash_images:
+        path = to_fwd(img["path"])
+        addr = img.get("address") or ""
+        exists = Path(path).exists()
+        if not exists and not allow_missing:
+            raise ElabError(
+                f"镜像不存在，请先 `elab build -p {plan.name}`：{path}"
+            )
+        # ★ 命令构造与存在性检查解耦（C26：预览 = 实跑）——预览时镜像可能
+        #   还没 build，但命令行必须原样展示，否则"先看命令再执行"就是误导。
+        if img["format"] == "elf" and not addr:
+            cmds.append(f"program {{{path}}} verify")
+        else:
+            # bin 必带地址（plan 校验保证）；elf 显式给了地址则作为 offset 传入
+            cmds.append(f"program {{{path}}} {addr} verify")
+        imgs.append({"path": path, "format": img["format"], "address": addr,
+                     "exists": exists})
+
+    # 收尾：最后一个 program 不带 exit/reset，统一在会话末尾复位并退出。
+    cmds.append("reset run")
+    cmds.append("shutdown")
+
+    argv = _openocd_argv(plan, cmds)
+    primary = next((e["path"] for e in imgs if e["format"] == "elf"), imgs[0]["path"])
+    res = {"project": plan.name, "chip": plan.chip.get("id"), "elf": primary,
+           "images": imgs, "argv": argv,
+           "status": "dry-run" if dry_run else "pending",
+           "elf_exists": Path(primary).exists() if primary else False}
+    if dry_run:
+        return res
+
+    env = plan.host.build_env()
+    proc = subprocess.run(argv, cwd=str(plan.cfg.root), env=env, text=True,
+                          capture_output=True, errors="replace")
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    res["stdout"] = proc.stdout
+    res["stderr"] = proc.stderr
+    res["evidence"] = _salient(combined)
+
+    if verbose:
+        log(combined)
+
+    if proc.returncode == 0:
+        res["status"] = "ok"
+        names = " + ".join(Path(e["path"]).name for e in imgs)
+        log(f"[elab] ✓ 烧录完成：{names} → {plan.chip.get('debug', {}).get('device')}")
         for line in res["evidence"]:
             log(f"       {line}")
     else:
@@ -146,11 +230,16 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
 
     server = _openocd_argv(plan, "")
     gdb_bin = plan.host.gdb or "arm-none-eabi-gdb"
+    # ★ C33 镜像模式（flash.images 已声明）跳过 gdb `load`：
+    #   load 按 APP elf 的段擦写 Flash，与 program app.ef 有同样的向下擦除风险
+    #   （M2：从 0x08004000 起擦，覆盖 Bootloader 尾部）。闭环顺序里 flash 在
+    #   debug 之前，固件已在位，这里只 reset halt 断点即可，不重写 Flash。
+    load_cmds = [] if plan.flash_images else ["-ex", "load"]
     gdb_cmd = [
         gdb_bin, to_fwd(elf),
         "-ex", "target extended-remote localhost:3333",
         "-ex", "monitor reset halt",
-        "-ex", "load",
+        *load_cmds,
     ]
     if plan.gdb_script:
         gdb_cmd += ["-x", plan.gdb_script]
@@ -174,7 +263,7 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
                 gdb_bin, to_fwd(elf), "-batch", "-q",
                 "-ex", "target extended-remote localhost:3333",
                 "-ex", "monitor reset halt",
-                "-ex", "load",
+                *load_cmds,
                 "-ex", "break main",
                 "-ex", "continue",
                 "-ex", 'printf "ELAB_STOP pc=%p\\n", $pc',

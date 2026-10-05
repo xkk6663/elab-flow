@@ -134,8 +134,8 @@ python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:3333/
 | elab 子命令 | 底层工具链 | 做什么 |
 |---|---|---|
 | `elab build` | **CMake** → **Ninja** → **arm-none-eabi-gcc** | 统一产出 `elf / hex / bin / map` |
-| `elab flash` | **OpenOCD**（CMSIS-DAP / ST-Link / J-Link） | `program … verify reset exit` |
-| `elab debug` | **OpenOCD**（GDB server）+ **arm-none-eabi-gdb** | 断到 `main` 自检 / 交互调试 |
+| `elab flash` | **OpenOCD**（CMSIS-DAP / ST-Link / J-Link） | 单镜像 `program … verify reset exit`；声明 `flash.images` 后自动切**OTA 双镜像序列**（Boot elf + App bin@显式地址，一次会话 `reset run` 收尾，约束 C33） |
+| `elab debug` | **OpenOCD**（GDB server）+ **arm-none-eabi-gdb** | 断到 `main` 自检 / 交互调试（镜像模式自动跳过 `load`） |
 | `elab monitor` | **pyserial / ctypes**（零依赖降级） | 串口闭环判据三态 |
 
 ```text
@@ -148,15 +148,15 @@ STM32:  -f interface/atlink.cfg  -f target/stm32f1x.cfg      ← 只换 target
 
 ## 实测证据
 
-三个真实工程（两类图形配置器形态），同一份工具链：
+四个真实工程（两类图形配置器形态），同一份工具链：
 
-| | AT32_TEST | STM32_TEST | at32f421g8u7 ★ |
-|---|---|---|---|
-| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） |
-| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% |
-| 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 |
-| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` |
-| 串口闭环 | — | — | ✅ 2.6s 命中 `[alive]`，事件链全达浏览器 |
+| | AT32_TEST | STM32_TEST | at32f421g8u7 ★ | at32f421g8u7_workbench |
+|---|---|---|---|---|
+| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） | B 类 + **OTA 双镜像**（Boot 18K + APP 44K） |
+| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% | ✅ APP bin 37.5KB · guard 592 文件零改动 |
+| 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 | ✅ 592 文件 |
+| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` | ✅ 双镜像预览实测（Boot@0x08000000 / App@0x08004800）；上板待验 |
+| 串口闭环 | — | — | ✅ 2.6s 命中 `[alive]`，事件链全达浏览器 | 判据就绪（`heartbeat tick=` / `*** CRASH ***`），待板 |
 
 ```text
 $ ./elab loop -p at32_test --clean

@@ -350,6 +350,35 @@ def _detect_freertos(root: Path, gen_dirs: list[str]) -> tuple[bool, str]:
 
 
 # ── 探测：固件是否有串口输出能力（E4）─────────────────────────────
+_PUTCHAR_DEF_SAME_LINE_RE = re.compile(
+    r"^\s*int\s+__io_putchar\s*\([^)]*\)\s*\{", re.M)
+_PUTCHAR_DEF_NEXT_LINE_RE = re.compile(
+    r"^\s*int\s+__io_putchar\s*\([^)]*\)\s*$", re.M)
+#: 声明行（extern 前缀 / 行尾分号）不会命中上面两个正则：
+#:   `extern int __io_putchar(int ch) __attribute__((weak));` —— 行首是 extern；
+#:   `int __io_putchar(int ch);` —— ) 后还有 `;`，不是行尾。
+
+
+def _has_putchar_definition(text: str) -> bool:
+    """``__io_putchar`` 是否有**带函数体的定义**。
+
+    两种 C 风格都要认 —— WorkBench 生成代码用 Allman（``{`` 换行），
+    旧正则只认同行 ``{`` 导致对 at32f421g8u7_workbench **漏报"无输出能力"**，
+    进而错误地放弃生成 monitor 判据（实测 at32f421_int.c:279）。
+    """
+    if _PUTCHAR_DEF_SAME_LINE_RE.search(text):
+        return True
+    m = _PUTCHAR_DEF_NEXT_LINE_RE.search(text)
+    if not m:
+        return False
+    for line in text[m.end():].splitlines():
+        s = line.strip()
+        if not s or s.startswith("/*") or s.startswith("*") or s.startswith("//"):
+            continue        # 跳过空行与注释，看第一条实质内容
+        return s.startswith("{")
+    return False
+
+
 def _detect_stdout(root: Path) -> tuple[bool, str]:
     """工程源码里是否**既有** ``__io_putchar`` 的定义、**又有** ``printf`` 调用。
 
@@ -357,7 +386,7 @@ def _detect_stdout(root: Path) -> tuple[bool, str]:
       ``extern int __io_putchar(int ch) __attribute__((weak));`` 只是声明 ——
       有它 **并不代表** printf 能跑。实测 AT32F421G8U7 初版正是如此：
       ``_write()`` 会调到弱符号解析出的地址 0（= 跳飞）。所以这里找的是
-      ``int __io_putchar(...) {`` 这种**带函数体的定义**。
+      ``int __io_putchar(...) {`` 这种**带函数体的定义**（``{`` 同行或换行均可）。
 
     判不出来时返回 False —— 于是 render() 只给注释模板，不假装闭环能成。
     """
@@ -373,8 +402,7 @@ def _detect_stdout(root: Path) -> tuple[bool, str]:
     def_ev = use_ev = ""
     for p in cands:
         t = _read(p)
-        if not def_ev and re.search(
-                r"^\s*int\s+__io_putchar\s*\([^)]*\)\s*\{", t, re.M):
+        if not def_ev and _has_putchar_definition(t):
             def_ev = f"{_rel(root, p)}: 定义了 __io_putchar（带函数体）"
         if not use_ev and re.search(r"\bprintf\s*\(", t):
             use_ev = f"{_rel(root, p)}: 调用了 printf"
