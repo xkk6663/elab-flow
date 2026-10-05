@@ -195,6 +195,14 @@ AI 要读的提示，和 doctor 要校验的参数，**来自同一份 YAML** �
 python -m cockpit.server          # → http://127.0.0.1:3333/   （零第三方依赖）
 ```
 
+**桌面一键启动**：双击仓库根的 `cockpit.cmd`（或桌面快捷方式 `elab驾驶舱`，图标
+`cockpit.ico`；重建快捷方式用 `python tests/manual/make_shortcut.py`，需系统 Python 带
+pywin32）。脚本幂等：3333 端口没起服务就**最小化**起一个（日志在
+`%TEMP%\elab-cockpit.log`），然后打开默认浏览器；服务已在跑时只多开一个标签页。
+端口探测用**裸 TCP socket**（PowerShell TcpClient），不受系统代理/TUN 影响；
+`PATH` 前置 System32，防 MSYS 环境的 `python` shim 顶替。干跑守卫：
+`python tests/manual/dryrun_cockpit_cmd.py`（三 variant 覆盖"已起/起不来/真探测"，stderr 必须为空）。
+
 界面是三列：**工程轨**（YAML 驱动的工程卡 + 芯片卡）→ **阶段轨**（四态状态带、
 内存占位、产物、零改动守卫、阶段账本）→ **证据轨**（构建/烧录/串口三合一实时日志）。
 
@@ -709,6 +717,7 @@ event=stream/closed      (无 id) {"reason":"run-finished","rc":0}
 | 串口写通道的 TX/RX **落盘** | ✅ **已实现（M3-b2）** | 独立 console 留档 `.work/.cockpit/serial-console.jsonl`（**不是** run 事件流 —— 约束 C28）：`POST /api/serial` 与 `elab serial` 写**同一份**；有上限（512 KB）、会滚动（保尾部 2000 条，原子替换）；`GET /api/serial/console?limit=N` 读回、`capabilities.serial.console` 报位置与条数；界面进工程/起闭环时自动回填最近 60 条（按工程过滤，带时间戳与前缀 `✎ hh:mm:ss TX →` / `←`）。**失败的写也留痕**。真机验收见 §9 |
 | UI 一键适配新工程 | ✅ **已实现（M5.6）** | `POST /api/adapt`（probe/write **两段式**，probe 只读在前）+ 工程轨「＋ 适配」面板（探测结果带 tier/置信度/芯片/证据链 → 写入 → 卡片自动出现并选中）。三绿灯 verify **刻意不**在 HTTP 里同步做（build 级长任务会钉死服务线程），由 `next.steps` 引导走现有 run 通道跑 `doctor_deep + build`。写入与 CLI 共用 `adapt.write`（未决项拒写 / 人工接管保护）。★ 适配真写出文件后**热重载 Config**（真浏览器实测抓出的缺陷：不重载则新工程对驾驶舱不可见）。守卫：集成 6 例 |
 | 单步独立按钮 + 「跑全闭环」显式步序 | ✅ **已实现（C30）** | 阶段轨「单步」下拉改为**一排六颗独立按钮**；证据轨三个 Tab 内各放对应按钮（构建→编译、烧录→烧录/调试校验、串口→串口闭环），可用性同源 `card.steps[id].ok`、置灰带原因 tooltip。★ 「跑全闭环」修复：原实现不传 steps → 后端只跑 `DEFAULT_STEPS=doctor+build`（跑完编译就停，与按钮承诺不符）；现 `onRunAll` 显式传 `fullLoopSteps()`（全部步骤 − `doctor_deep` − 不可用项），空闲骨架与它同源。**真浏览器 + 路由拦截验收**：点击后 `POST /api/run` 请求体带 `steps=["doctor","build","flash","debug_verify"]`（at32_test 无 monitor 判据 → 被可用性过滤正确排除）；单步「烧录」按钮真机实测 `r-c61be04b` 烧录 `ok` |
+| 桌面一键启动驾驶舱 | ✅ **已实现** | 仓库根 `cockpit.cmd` + 桌面快捷方式 `elab驾驶舱.lnk`（图标 `cockpit.ico`，重建用 `tests/manual/make_shortcut.py`，需系统 Python 带 pywin32）。幂等：3333 已有服务只开浏览器；没有就**最小化**起一个（日志 `%TEMP%\elab-cockpit.log`）。裸 TCP 探测不受代理影响、System32 PATH 前置防 MSYS shim。**干跑三 variant 全过（stderr 全空）+ 真实双击路径 e2e 全通**（首击起服务 HTTP 200、二击幂等、系统 Python 零依赖跑通）；守卫 `tests/manual/dryrun_cockpit_cmd.py`（手动，不进 CI） |
 | 驾驶舱 `profiles/*.yaml` 插件化装配 | ❌ 未实现 | M4 范围；当前三轨是硬装配 |
 | 前端产物一致性守卫（CI job） | ✅ **已实现** | `web-dist-guard`：`npm ci` → `npm run build` → `git diff --exit-code cockpit/web/dist/`。**本地已验**：重建后 `dist/` 逐字一致（可复现）。Node 用主版本 `22`（精确版本在 runner 上未必可用，取不到会让守卫永久失效） |
 | `stream/overrun`（背压截断事件） | ✅ **已实现** | `_fanout` 溢出时按契约发出（一个 episode 只报一次，`dropped` 就地刷新）；SSE 侧在**去重之前**显式成帧（带 `id` 会让重连游标越过它自己）；前端 `reduce()` 归约 → 证据轨显示"服务端背压截断"。守卫：`tests/test_cockpit_backpressure.py`（14 例） |
