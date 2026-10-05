@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -569,6 +570,88 @@ class CockpitIntegration(unittest.TestCase):
         self.assertIsNone(ov["_sse_id"])
         self.assertEqual(ov["dropped"], 7)
         self.assertEqual(ov["topic_scope"], "proc/*")
+
+
+    # ── 手写通道（M3-b）────────────────────────────────────────
+    def test_serial_write_available_in_capabilities(self):
+        """前端据此决定输入框是否可写 —— 不该让它去猜 `available` 是否含写。"""
+        c = self.client.get_json("/api/capabilities")
+        self.assertIn("write_available", c["serial"])
+        self.assertIsInstance(c["serial"]["write_available"], bool)
+
+    def test_serial_missing_data_is_400(self):
+        cc, r = self.client.post("/api/serial", {"project": PROJECT})
+        try:
+            self.assertEqual(r.status, 400)
+            self.assertIn("data", json.loads(r.read().decode())["error"])
+        finally:
+            cc.close()
+
+    def test_serial_blank_data_is_400(self):
+        """空白也算空 —— 空回车能打断固件的行解析器，不是"无害的输入"。"""
+        cc, r = self.client.post("/api/serial", {"project": PROJECT, "data": "  \t "})
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            cc.close()
+
+    def test_serial_blocked_by_running_closure_is_409(self):
+        """★ 会用到串口的闭环在跑 → 手写通道让路，且必须**指名道姓**。
+
+        否则用户只会看到 `ERROR_ACCESS_DENIED`，然后去拔插、去杀进程 ——
+        真正的原因（自己刚点的闭环占着串口/SWD）永远查不到。
+        """
+        fake = {"run": "20261005-120000-dead", "alive": True,
+                "steps": ["build", "monitor"]}
+        with unittest.mock.patch.object(srv_mod, "_serial_blocker", return_value=fake):
+            cc, r = self.client.post("/api/serial", {"project": PROJECT, "data": "help"})
+            try:
+                self.assertEqual(r.status, 409)
+                msg = json.loads(r.read().decode())["error"]
+            finally:
+                cc.close()
+        self.assertIn("闭环正在跑", msg)
+        self.assertIn("20261005-120000-dead", msg)
+
+    def test_serial_result_is_passed_through(self):
+        """路由只做翻译，不做加工：`roundtrip` 的字段必须原样到前端
+        （尤其是 `ok:false` 也是 200 —— 前端要按同一形状渲染成功与失败）。"""
+        payload = {"ok": True, "port": "COM9", "baud": 9600, "backend": "fake",
+                   "layer": "L1", "written": 5, "payload_bytes": 5,
+                   "echoed": ["hi"], "bytes_read": 3, "read_ms": 600,
+                   "elapsed_s": 0.61, "eol": "\r\n", "error": None}
+        with unittest.mock.patch.object(srv_mod.serialterm_mod, "roundtrip",
+                                        return_value=payload) as mk:
+            cc, r = self.client.post("/api/serial",
+                                     {"project": PROJECT, "data": "hi", "baud": 9600})
+            try:
+                self.assertEqual(r.status, 200)
+                got = json.loads(r.read().decode())
+            finally:
+                cc.close()
+        self.assertEqual(got["port"], "COM9")
+        self.assertEqual(got["echoed"], ["hi"])
+        # 参数确实透传给了 roundtrip（baud 走 kwargs）
+        self.assertEqual(mk.call_args.kwargs.get("baud"), 9600)
+        self.assertEqual(mk.call_args.kwargs.get("data"), "hi")
+
+    def test_serial_failure_is_still_200(self):
+        """执行了但没成功 → **200 + ok:false**（不是 5xx）。
+
+        理由：失败与成功要渲染的字段完全一样（port/baud/error），用 5xx 只会让
+        前端走异常分支、把这些结构化信息丢掉。
+        """
+        payload = {"ok": False, "port": "", "baud": 0, "backend": "", "layer": "L2",
+                   "written": 0, "payload_bytes": 0, "echoed": [], "bytes_read": 0,
+                   "read_ms": 600, "elapsed_s": 0.0, "eol": "", "error": "后端不可用"}
+        with unittest.mock.patch.object(srv_mod.serialterm_mod, "roundtrip",
+                                        return_value=payload):
+            cc, r = self.client.post("/api/serial", {"project": PROJECT, "data": "hi"})
+            try:
+                self.assertEqual(r.status, 200)
+                self.assertFalse(json.loads(r.read().decode())["ok"])
+            finally:
+                cc.close()
 
 
 if __name__ == "__main__":
