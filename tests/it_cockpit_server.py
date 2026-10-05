@@ -747,6 +747,92 @@ class CockpitIntegration(unittest.TestCase):
         self.assertEqual(default["requested"], srv_mod.serialconsole_mod.DEFAULT_TAIL)
         self.assertEqual(lo["records"], [], "空留档不该编造记录")
 
+    # ── 一键适配（M5.6）────────────────────────────────────────
+    def test_adapt_probe_is_read_only(self):
+        """probe 只读：真例给全字段，且**不写任何文件**。"""
+        cards_before = sorted(x["name"] for x in
+                              self.client.get_json("/api/projects")["projects"])
+        cc, resp = self.client.post("/api/adapt",
+                                    {"action": "probe", "path": str(ROOT / "examples" / "AT32_TEST")})
+        try:
+            self.assertEqual(resp.status, 200)
+            d = json.loads(resp.read().decode())
+        finally:
+            cc.close()
+        self.assertEqual(d["tier"], "T1")
+        self.assertEqual(d["name"], "at32_test", "目录名推导的默认工程名")
+        self.assertTrue(d["probe"]["chip_ref"], "芯片必须匹配到 chips/*.yaml")
+        self.assertEqual(d["next"]["steps"], ["doctor_deep", "build"],
+                         "三绿灯由现有 run 通道跑，这里只给引导")
+        self.assertNotIn("result", d, "probe 段不允许带写入结果")
+        cards_after = sorted(x["name"] for x in
+                             self.client.get_json("/api/projects")["projects"])
+        self.assertEqual(cards_before, cards_after, "probe 不得新增/改动工程")
+
+    def test_adapt_probe_on_dir_without_cmake_is_T3(self):
+        """T3 是**数据**不是错误：200 + tier=T3，让界面能说清"需要真改造"。"""
+        cc, resp = self.client.post("/api/adapt",
+                                    {"action": "probe", "path": str(ROOT / "examples")})
+        try:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read().decode())["tier"], "T3")
+        finally:
+            cc.close()
+
+    def test_adapt_write_is_rejected_for_hand_edited(self):
+        """★ A7 人工接管保护在真实文件上的回归：projects/at32_test.yaml 是手写的
+        （无 generated-by 标记）→ 拒覆盖。这一例同时证明了 probe/write 与
+        CLI `elab adapt` 共用同一份实现。"""
+        cc, resp = self.client.post("/api/adapt",
+                                    {"action": "write", "path": str(ROOT / "examples" / "AT32_TEST")})
+        try:
+            self.assertEqual(resp.status, 200)
+            d = json.loads(resp.read().decode())
+        finally:
+            cc.close()
+        self.assertEqual(d["result"]["status"], "hand-edited")
+        self.assertFalse(d["result"]["written"])
+
+    def test_adapt_write_creates_new_project_file(self):
+        """写一个**新名字** → 真的落盘，且**驾驶舱立刻可见**（Config 热重载）。
+
+        ★ 回归（真浏览器实测抓出）：服务进程的 Config 在启动时固化，适配写入后
+          /api/projects 看不到新工程、"跑体检+编译"也起不了它 —— 界面上
+          "写入成功"却"工程消失"，比报错更迷惑。CLI `_adapt_verify` 早有
+          "写入后重载 Config"的对应逻辑，服务端必须同样做。
+        测试结束删掉该文件（不污染仓库）。
+        """
+        name = "it_adapt_tmp"
+        out = ROOT / "projects" / f"{name}.yaml"
+        self.addCleanup(lambda: out.unlink(missing_ok=True))
+        cc, resp = self.client.post(
+            "/api/adapt", {"action": "write",
+                           "path": str(ROOT / "examples" / "AT32_TEST"), "name": name})
+        try:
+            self.assertEqual(resp.status, 200)
+            d = json.loads(resp.read().decode())
+        finally:
+            cc.close()
+        self.assertEqual(d["result"]["status"], "written")
+        self.assertTrue(out.exists())
+        self.assertIn("generated-by", out.read_text(encoding="utf-8"))
+        # ★ 热重载的可观测后果：新卡片必须**立即**出现在 /api/projects
+        names = [x["name"] for x in self.client.get_json("/api/projects")["projects"]]
+        self.assertIn(name, names, "写入成功后驾驶舱必须立刻看到新工程")
+
+    def test_adapt_rejects_bad_input(self):
+        """三类入口校验：相对路径 / 不存在的目录 / 未知 action —— 全部 400。"""
+        for body in ({"action": "probe", "path": "examples/AT32_TEST"},
+                     {"action": "probe", "path": "C:/does/not/exist-elab-it"},
+                     {"action": "teleport", "path": str(ROOT / "examples" / "AT32_TEST")},
+                     {"action": "probe"}):
+            with self.subTest(body=body):
+                cc, resp = self.client.post("/api/adapt", body)
+                try:
+                    self.assertEqual(resp.status, 400)
+                finally:
+                    cc.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -35,6 +35,7 @@ _ROOT = _HERE.parent
 if str(_ROOT / "services") not in sys.path:
     sys.path.insert(0, str(_ROOT / "services"))
 
+from elab import adapt as adapt_mod                      # noqa: E402
 from elab import run as run_mod                      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
@@ -839,11 +840,71 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     journal=serialconsole_mod.journal_for(self.cfg, project=project),
                 )
                 return self._json(res, 200)
+            if u.path == "/api/adapt":
+                # 一键适配（M5.6）：probe 只读在前，write 显式第二段。
+                return self._adapt(self._body())
             return self._err(404, f"未知 API：{u.path}")
         except ElabError as exc:
             return self._err(400, str(exc))
         except Exception as exc:                       # noqa: BLE001
             return self._fail(exc)
+
+    # ── 一键适配（M5.6）────────────────────────────────────────
+    def _adapt(self, body: dict):
+        """``POST /api/adapt`` —— 把图形配置器导出的工程接进 elab（M5.6）。
+
+        **两段式，probe 永远在前**（"先看清楚再动手"，与只读预览 C26 同一精神）：
+
+            action=probe   只读：把"会生成什么样的接入文件"摆出来，不落任何盘
+            action=write   写入 ``projects/<name>.yaml``
+
+        write 的三类拒绝**原样**沿用 ``adapt.write`` 的实现（只有一份实现，CLI 与
+        这里行为必然一致）：未决项 → 拒（force 可越）、芯片未匹配 → 拒、
+        人工接管（generated-by 标记缺失）→ 拒。ElabError → 400。
+
+        ★ **刻意不做**三绿灯 verify：那是 build 级长任务（真跑 configure + 编译，
+          十几秒起步），同步做会把服务线程钉死（§5.1 K1 的反面教材）。
+          故返回 ``next`` 引导前端走**现有** run 通道跑 ``doctor_deep + build`` ——
+          三绿灯的判据（doctor_deep 全绿 / 出 elf / guard.untouched）一个不少，
+          且进度走 SSE、结果落事件流，与"跑全闭环"完全同一套观测设施。
+        """
+        action = body.get("action") or "probe"
+        if action not in ("probe", "write"):
+            raise ElabError(f"action 必须是 probe 或 write：{action!r}")
+        raw = (body.get("path") or "").strip()
+        if not raw:
+            raise ElabError("缺少 path（要适配的工程根目录）")
+        p = Path(raw).expanduser()
+        # ★ 绝对路径硬性要求：相对路径会让"适配到哪了"取决于服务进程的 cwd ——
+        #   那种"在我机器上能用"的坑没有观测手段，必须在入口就拒掉。
+        if not p.is_absolute():
+            raise ElabError(f"path 必须是绝对路径：{raw!r}")
+        if not p.is_dir():
+            raise ElabError(f"目录不存在：{p}")
+
+        force = bool(body.get("force"))
+        name = (body.get("name") or "").strip()
+        probe = adapt_mod.probe_project(self.cfg, str(p))
+        out = {"action": action, "probe": probe.to_dict(), "tier": probe.tier,
+               "confidence": probe.confidence,
+               "name": name or adapt_mod.default_name(probe)}
+        if action == "write":
+            out["result"] = adapt_mod.write(self.cfg, probe, name=out["name"],
+                                            force=force, log=lambda *a: None)
+            # ★ 真写出了新的 projects/<name>.yaml → **必须重载 Config**，否则新工程
+            #   对驾驶舱不可见（/api/projects 没有它的卡片、/api/run 也起不了它）。
+            #   与 CLI `_adapt_verify` 的做法同源（"新增接入文件后重载"）。
+            #   赋值是原子的；在途请求仍握着旧引用跑完 —— 旧配置对旧工程依然自洽。
+            if out["result"].get("written"):
+                cfg2 = Config(self.cfg.root)
+                type(self).cfg = cfg2
+                self.mgr.cfg = cfg2
+        out["next"] = {
+            "steps": ["doctor_deep", "build"],
+            "hint": ("写入后跑「体检 + 编译」即三绿灯自证：doctor_deep 全绿"
+                     "+ build 出 elf + 零改动守卫 untouched=true"),
+        }
+        return self._json(out, 200)
 
     # ── 静态 ────────────────────────────────────────────────────
     def _static(self, path: str):
