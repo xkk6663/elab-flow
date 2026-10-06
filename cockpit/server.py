@@ -45,7 +45,10 @@ from elab.config import Config, ElabError, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 
 HOST = "127.0.0.1"            # ★ 只监听本地（§5.6：本地工具，不做远程暴露）
-DEFAULT_PORT = 3333
+#: ★ C34：默认端口**刻意避开 3333** —— openocd 的 gdb server 固定绑 3333，
+#:   驾驶舱若占住它，闭环 debug 步骤的 openocd 会静默退出（绑定失败），
+#:   症状是 debug_verify 误导性失败（实测事故 2026-10-06）。换端口用 --port。
+DEFAULT_PORT = 8333
 SSE_HEARTBEAT_S = 15.0        # §17.3
 PROC_BATCH_S = 0.10           # §17.3：proc 行 100ms 合并，事件数降 1~2 个数量级
 QUEUE_MAX = 2000              # §17.3：每连接有界队列
@@ -1224,8 +1227,8 @@ code{background:#f1efe8;padding:.15rem .4rem;border-radius:4px}pre{background:#f
 npm --prefix cockpit/web run build</pre>
 <p>构建一次之后刷新本页即可。<b>最终用户不需要装 Node</b> —— 只需要这份 <code>dist/</code>。</p>
 <p>此刻可以先用 API 验证后端：</p>
-<pre>curl -s http://127.0.0.1:3333/api/capabilities
-curl -s http://127.0.0.1:3333/api/projects</pre>
+<pre>curl -s http://127.0.0.1:8333/api/capabilities
+curl -s http://127.0.0.1:8333/api/projects</pre>
 """
 
 

@@ -9,5 +9,6 @@ build/
 __pycache__/
 *.pyc
 
-# 用户在开发中的真实工程（自带 .git，不随 elab-flow 仓库分发；接入走 projects/*.yaml 的 root）
+
+# 待删除（用户已授权，外部有备份；删掉后此条可移除）
 examples/AT32F421G8U7_WorkBench/

@@ -4,7 +4,7 @@ rem  elab cockpit - one-click desktop launcher
 rem  1) start the cockpit server (minimized console) if not up
 rem  2) open the default browser on the UI
 rem  Idempotent: clicking again just opens one more browser tab.
-rem  Env overrides: ELAB_PYTHON (python used), COCKPIT_PORT (3333)
+rem  Env overrides: ELAB_PYTHON (python used), COCKPIT_PORT (8333)
 rem ============================================================
 setlocal
 set "HERE=%~dp0"
@@ -13,7 +13,7 @@ rem System32 first: shield MSYS / GitBash shims from PATH
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%"
 if "%ELAB_PYTHON%"=="" (set "PY=python") else (set "PY=%ELAB_PYTHON%")
 set "PORT=%COCKPIT_PORT%"
-if "%PORT%"=="" set "PORT=3333"
+if "%PORT%"=="" set "PORT=8333"
 set "URL=http://127.0.0.1:%PORT%/"
 
 rem -- bare TCP probe (no curl/http client; immune to proxy/TUN) --

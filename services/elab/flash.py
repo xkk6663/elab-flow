@@ -253,9 +253,19 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
     srv = subprocess.Popen(server, cwd=str(plan.cfg.root), env=env,
                            text=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     try:
-        if not _wait_port(3333, 20):
+        # ★ 端口占用事故（实测）：openocd 的 gdb server 绑 3333，而驾驶舱 HTTP
+        #   服务默认端口恰好也是 3333 —— 端口被占时 openocd **静默退出**，
+        #   若只测"TCP 可连"就会连到占端口的那个 HTTP 服务上，gdb 满屏
+        #   "Ignoring packet error / vMustReplyEmpty timeout"，以误导性失败收场。
+        #   故必须：① 先确认 openocd 进程还活着（死了 ≈ 绑定失败）；
+        #           ② 端口可连后**再**确认 openocd 仍活着（防竞态）。
+        if srv.poll() is not None or not _wait_port(3333, 20) or srv.poll() is not None:
             res["status"] = "no-server"
-            log("[elab] ✗ openocd gdb server 未在 20s 内就绪")
+            if srv.poll() is not None:
+                log("[elab] ✗ openocd 启动即退出 —— gdb 端口 3333 极可能被占用"
+                    "（驾驶舱/残留 openocd）。查占用：`netstat -ano | findstr :3333`")
+            else:
+                log("[elab] ✗ openocd gdb server 未在 20s 内就绪")
             return res
 
         if mode == "verify":

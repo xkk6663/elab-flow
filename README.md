@@ -52,7 +52,7 @@ cd elab-flow
 
 ./elab doctor              # ① 环境体检（先全绿再往下）
 ./elab loop -p at32_test   # ② 一键闭环：体检→编译→烧录→断到 main 自检→串口判据
-python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:3333/
+python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:8333/（8333 避开 openocd 的 3333）
 ```
 
 - 要求：**Python ≥ 3.8（无第三方依赖）**；可选 CMake + Ninja + ARM GCC + OpenOCD（上板闭环用）
@@ -148,15 +148,20 @@ STM32:  -f interface/atlink.cfg  -f target/stm32f1x.cfg      ← 只换 target
 
 ## 实测证据
 
-四个真实工程（两类图形配置器形态），同一份工具链：
+三个常驻工程（两类图形配置器形态），同一份工具链：
 
-| | AT32_TEST | STM32_TEST | at32f421g8u7 ★ | at32f421g8u7_workbench |
-|---|---|---|---|---|
-| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） | B 类 + **OTA 双镜像**（Boot 18K + APP 44K） |
-| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% | ✅ APP bin 37.5KB · guard 592 文件零改动 |
-| 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 | ✅ 592 文件 |
-| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` | ✅ 双镜像预览实测（Boot@0x08000000 / App@0x08004800）；上板待验 |
-| 串口闭环 | — | — | ✅ 2.6s 命中 `[alive]`，事件链全达浏览器 | 判据就绪（`heartbeat tick=` / `*** CRASH ***`），待板 |
+| | AT32_TEST | STM32_TEST | at32f421g8u7 ★ |
+|---|---|---|---|
+| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） |
+| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% |
+| 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 |
+| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` |
+| 串口闭环 | — | — | ✅ 2.6s 命中 `[alive]`，事件链全达浏览器 |
+
+> **兼容性专项（2026-10-06）**：外部 BLDC 电调工程（Bootloader 18K + APP 44K 的 OTA 双镜像，
+> SguanESC）以 `flash.images` 接入完成全链路验证——doctor 镜像级对账 ✅、build 9.3s
+> guard 592 文件零改动 ✅、SWD 实测 Boot `.isr_vector`@0x08000000 / APP@0x08004800 ✅、
+> 驾驶舱 API 驱动闭环 flash ✅（C33 的全部框架能力由此固化，工程本体已移出仓库）。
 
 ```text
 $ ./elab loop -p at32_test --clean

@@ -31,6 +31,19 @@
 - **`elab adapt` 输出能力探测漏报**：只认 `__io_putchar` 与 `{` 同行的定义，
   WorkBench 生成代码的 Allman 风格（`{` 换行）被误判为"无输出能力"→ 错误放弃
   生成 monitor 判据（实测 `at32f421_int.c:279`）。现两种 C 风格均识别。
+- **debug 步骤的误导性失败（约束 C34）**：驾驶舱旧默认端口 3333 与 openocd gdb
+  server 冲突——端口被占时 openocd 静默退出，`_wait_port` 只测 TCP 可连导致 gdb
+  连到 HTTP 服务上满屏 packet error。修复：① 驾驶舱默认端口改 **8333**；
+  ② `flash.py` 检查 openocd 进程存活，占用时明确报错并给出排查命令。
+
+### 变更
+
+- **兼容性专项工程移出仓库**：`at32f421g8u7_workbench`（外部 BLDC 电调 OTA
+  双镜像工程，用户另有备份）完成 C33 全链路验证后按用户要求移出——删除
+  `examples/AT32F421G8U7_WorkBench/` 与接入 yaml，CI matrix 恢复三工程。
+  C33 框架能力（flash.images / link_channel / 镜像级对账 / debug 跳 load）全部
+  保留并由 20 例单测守卫。验证实录：boot `.isr_vector`@0x08000000 /
+  APP@0x08004800、芯片 Flash 与 bin 逐字节一致、guard 592 文件零改动。
 
 ### 测试
 
