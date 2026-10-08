@@ -205,7 +205,7 @@ python -m cockpit.server        # → http://127.0.0.1:3333/（Windows 亦可双
 elab doctor_deep --all          # 或 ./elab …（MSYS）/ elab.cmd …（cmd）
 ```
 
-要求：Python ≥ 3.11（仅标准库）；可选：CMake + Ninja + ARM GCC 工具链 +
+要求：Python ≥ 3.10（仅标准库；3.12 / 3.13 实测）；可选：CMake + Ninja + ARM GCC 工具链 +
 openocd（上板闭环用）。前端运行时不需要 Node（`dist/` 已入仓）。
 
 ---

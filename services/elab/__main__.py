@@ -143,7 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="只读预览：打印每步将执行的命令/效果，**不执行任何东西**")
 
-    p = sub.add_parser("skill", help="由 chips/*.yaml 生成 per-chip AI skill")
+    p = sub.add_parser("skill", help="由 chips/*.yaml 生成平台级 AI skill（按平台聚合，芯片为条目）")
     _add_common(p)
     p.add_argument("-p", "--project", help="按项目推导芯片")
     p.add_argument("--chip", help="按 vendor/id 指定芯片")

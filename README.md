@@ -11,7 +11,7 @@
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
 [![tests](https://img.shields.io/badge/tests-209%20%2B%2037%20passing-2EA44F?style=flat)](tests/)
-[![Python](https://img.shields.io/badge/Python-%E2%89%A53.8%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 [![stars](https://img.shields.io/github/stars/xkk6663/elab-flow?style=flat&color=08C)](https://github.com/xkk6663/elab-flow/stargazers)
 
@@ -57,7 +57,7 @@ cd elab-flow
 python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:8333/（8333 避开 openocd 的 3333）
 ```
 
-- 要求：**Python ≥ 3.8（无第三方依赖）**；可选 CMake + Ninja + ARM GCC + OpenOCD（上板闭环用）
+- 要求：**Python ≥ 3.10（无第三方依赖；3.12 / 3.13 实测）**；可选 CMake + Ninja + ARM GCC + OpenOCD（上板闭环用）
 - Windows：`elab.cmd` / Git Bash 用 `./elab`；桌面场景直接**双击 `cockpit.cmd`**
   （幂等：已在跑只开 UI；UI 走 Edge `--app` 独立窗口）
 - 没有探针时 `doctor` / `build` / `ci` 照样可跑（`loop` 会在 flash 步失败）
@@ -165,9 +165,9 @@ chips yaml 一字段 `ota_layout.boot_project: f411_boot`：
 
 **一键升级**（工具页「OTA 升级」按钮 / `elab run -p f411 --steps tool:ota`）：
 `probe`（0x15 在线发现）→ `trigger`（发 `!` 进升级模式，含断点查询）→
-`transfer`（停等逐帧，53 帧/s）→ `verify`（比对设备侧 Final CRC）→
+`transfer`（停等逐帧，≈52 帧/s）→ `verify`（比对设备侧 Final CRC）→
 `reset`（openocd 硬复位跳 APP）→ `listen`（`[alive]` 心跳闭环判定）。
-38KB 固件 26s 端到端，全程驾驶舱阶段轨/工具页可视化。
+实测：38956 B / 305 帧重传 0，传输 5.9s、端到端 34.9s，全程驾驶舱阶段轨/工具页可视化。
 
 **异常注入**（M5，0 阉割的最终证明，全部实弹 PASS）：
 
@@ -192,11 +192,8 @@ chips yaml 一字段 `ota_layout.boot_project: f411_boot`：
 （step-enter/exit marker 区分是哪次工具），与闭环步骤同一套 ICD 事件流。
 
 实弹样例：STM32F411 IAP/OTA 主机工具（停等协议传输 + CRC 校验 + openocd 复位 + 心跳监听），
-`[tx] 100% (36060/36060)` → `[result] PASS`，全程驾驶舱可视化、可复核：
-
-<img src="assets/cockpit-ota.png" alt="OTA 工具一键执行：阶段轨 probe→trigger→transfer→verify→reset→listen，OTA Tab 实时日志与 [result] PASS" width="100%">
-
-*OTA 工具验收实拍：阶段轨 probe→trigger→transfer→verify→reset→listen 全绿，工具页实时日志与 `[result] PASS`；`tool:ota` 事件全部落「工具」页通道；`[cap] 0x15` → 传输 `[tx] 100%` → CRC 逐位一致 `0x4A4A2679` → openocd 复位 → `[post] 9 seconds, heartbeat count=9` → `[result] PASS`*
+`[tx] 100% (38956/38956)` → `[result] PASS`，全程驾驶舱可视化、可复核
+（实拍见文首主图：阶段账本 probe→…→listen 全绿 + 工具页实时日志）。
 
 
 <a id="features"></a>
@@ -248,7 +245,7 @@ chips yaml 一字段 `ota_layout.boot_project: f411_boot`：
 | elab 子命令 | 底层工具链 | 做什么 |
 |---|---|---|
 | `elab build` | **CMake** → **Ninja** → **arm-none-eabi-gcc** | 统一产出 `elf / hex / bin / map` |
-| `elab flash` | **OpenOCD**（CMSIS-DAP / ST-Link / J-Link） | 单镜像 `program … verify reset exit`；声明 `flash.images` 后自动切**OTA 双镜像序列**（Boot elf + App bin@显式地址，一次会话 `reset run` 收尾，约束 C33） |
+| `elab flash` | **OpenOCD**（CMSIS-DAP / ST-Link / J-Link） | 单镜像 `program … verify reset exit`；声明 `flash.images` 后自动切**OTA 多镜像序列**（f411：boot bin@`0x08000000` + app bin@`0x08010000`，bin 强制显式地址，一次会话 `reset run` 收尾，约束 C33） |
 | `elab debug` | **OpenOCD**（GDB server）+ **arm-none-eabi-gdb** | 断到 `main` 自检 / 交互调试（镜像模式自动跳过 `load`） |
 | `elab monitor` | **pyserial / ctypes**（零依赖降级） | 串口闭环判据三态 |
 
@@ -306,7 +303,7 @@ $EDITOR projects/<name>.yaml         # root / chip / archetype / toolchain_file 
 # ③ 跑起来
 ./elab doctor -p <name> --deep       # 两源对账
 ./elab loop   -p <name>              # 闭环
-./elab skill  -p <name>              # 生成该芯片 AI skill
+./elab skill  -p <name>              # 更新该芯片所属平台的 AI skill
 ```
 
 不需要改 `services/` 下任何代码，也不需要新增 CMake 文件。
