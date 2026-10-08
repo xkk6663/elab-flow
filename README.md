@@ -17,9 +17,9 @@
 
 [快速上手](#quickstart) · [主要功能](#features) · [驾驶舱使用](#cockpit) · [OTA 双槽升级](#ota) · [实测证据](#evidence) · [接入新芯片](#addchip) · [文档索引](#docs) · [CHANGELOG](CHANGELOG.md)
 
-<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱：工程轨 → 阶段轨 → 证据轨" width="100%">
+<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱：工程轨（boot 子工程嵌套）→ 阶段轨 → OTA 工具页" width="100%">
 
-*闭环驾驶舱（L7）：工程卡与芯片卡 → 阶段状态带（内存占位 / 产物 / 零改动守卫）→ 实时日志证据轨*
+*闭环驾驶舱（L7，V2.0 实拍）：工程轨 `f411_boot` 嵌套在宿主卡下方（`↳ BOOT 子工程 · f411`，可收起）+ OTA 冻结状态直读台账 → 阶段轨 OTA 工具阶段账本（probe→trigger→transfer→verify→reset ROLLBACK→listen 全绿）→ 工具页六个 OTA 工具一键执行*
 
 </div>
 
@@ -83,7 +83,7 @@ python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:8333/（83
 
 <img src="assets/cockpit-serial.png" alt="串口 Tab：打开监视 / 手写通道 / 历史回填" width="100%">
 
-*串口 Tab：「打开监视」常驻实时流；输入框手写通道（TX/RX 独立留档，进工程自动回填最近 60 条）*
+*串口 Tab（V2.0 实拍）：「打开监视」常驻实时流（`[alive] tick` 滚动 + 丢行显式标注）；顶部服务留档回填（`21:34:42 TX → 111`）；底部输入框手写通道，与闭环双向 409 互斥*
 
 > 提示：监视是"看"，不是"证据"——它只活环形缓冲；要可复核的判定走闭环 `monitor` 步骤。
 
