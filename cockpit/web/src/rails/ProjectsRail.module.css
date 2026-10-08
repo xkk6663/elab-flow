@@ -222,6 +222,76 @@
   color: var(--elab-status-run);
 }
 
+/* ── C1 组合工程：boot 子工程嵌套展示（不与宿主并列）── */
+.combo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* 缩进 + 左缘连接线：视觉上"挂在宿主卡下面"，一眼读出从属而非平级。
+   连接线画在分组层（.bootGroup），收起时线随组头保留，归属关系不失联。 */
+.bootGroup {
+  margin-left: 18px;
+  padding-left: 10px;
+  border-left: 2px solid var(--elab-border-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bootToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 1px 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  cursor: pointer;
+  transition: color 0.14s var(--elab-ease);
+}
+.bootToggle:hover {
+  color: var(--elab-fg-primary);
+}
+.bootChevron {
+  flex: 0 0 auto;
+  width: 10px;
+  text-align: center;
+  line-height: 1;
+}
+.bootChild {
+  display: block;
+}
+.cardBoot {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: var(--elab-bg-surface);
+}
+.bootLink {
+  flex: 0 0 auto;
+  color: var(--elab-fg-muted);
+  font-size: var(--elab-fs-sm);
+  line-height: 1;
+}
+
+/* ── OTA 关键信息行（C3 冻结台账直读）── */
+.rowOta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+.otaText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .warnIcon {
   flex: 0 0 auto;
   width: 12px;

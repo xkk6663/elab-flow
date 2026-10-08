@@ -11,9 +11,16 @@
  */
 
 import { useSyncExternalStore } from "react";
-import type { LogTab } from "./logs";
 
 export type RailId = "projects" | "evidence";
+
+/** 工作区持久化合法值：静态三个 + 统一「工具」页。
+ *  ★ 第一版是每工具一页（`tool:<name>`），实测 7 个 Tab 挤爆右列，
+ *    已收敛为单一 "tools" 页（workspaces.ts 二次收敛）——
+ *    旧持久化值不能把人带到不存在的界面，sanitize 里迁移映射到 "tools"。 */
+function isWs(v: unknown): boolean {
+  return v === "build" || v === "flash" || v === "serial" || v === "tools";
+}
 
 export interface LayoutState {
   /** 结构版本号 —— 将来改字段形状时用它做迁移，避免读到旧结构直接崩 */
@@ -23,7 +30,8 @@ export interface LayoutState {
   /** 右列宽（px） */
   evidence: number;
   collapsed: { projects: boolean; evidence: boolean };
-  tab: LogTab;
+  /** 当前工作区（工作区化后 Tab 升级为一级导航；旧字段名 tab 已废弃） */
+  ws: string;
   /** 全局字号缩放（§15.4 规则 3），一处控制全部 --elab-fs-* */
   fontScale: number;
 }
@@ -35,7 +43,7 @@ const DEFAULT: LayoutState = {
   projects: 268,
   evidence: 470,
   collapsed: { projects: false, evidence: false },
-  tab: "build",
+  ws: "build",
   fontScale: 1,
 };
 
@@ -67,8 +75,15 @@ function sanitize(raw: unknown): LayoutState {
   if (o.v !== 1) return { ...DEFAULT };
   const num = (x: unknown, d: number) => (typeof x === "number" && Number.isFinite(x) ? x : d);
   const bool = (x: unknown, d: boolean) => (typeof x === "boolean" ? x : d);
-  const tab: LogTab =
-    o.tab === "build" || o.tab === "flash" || o.tab === "serial" ? o.tab : DEFAULT.tab;
+  // 旧版存的是 tab（枚举），新版是 ws（工作区 id）。两代脏值都迁移：
+  //   "ota" / "tool:<name>"（第一版每工具一页）→ 统一 "tools" 工具页。
+  const legacyWs = (x: unknown): string | null => {
+    if (typeof x !== "string") return null;
+    if (isWs(x)) return x;
+    if (x === "ota" || x.startsWith("tool:")) return "tools";
+    return null;
+  };
+  const ws = legacyWs(o.ws) ?? legacyWs((o as { tab?: unknown }).tab) ?? DEFAULT.ws;
   return {
     v: 1,
     projects: clamp(num(o.projects, DEFAULT.projects), LIMITS.projects.min, LIMITS.projects.max),
@@ -77,7 +92,7 @@ function sanitize(raw: unknown): LayoutState {
       projects: bool(o.collapsed?.projects, false),
       evidence: bool(o.collapsed?.evidence, false),
     },
-    tab,
+    ws,
     fontScale: clamp(num(o.fontScale, 1), LIMITS.fontScale.min, LIMITS.fontScale.max),
   };
 }
@@ -128,9 +143,9 @@ export function toggleRail(rail: RailId): void {
   commit({ ...state, collapsed: { ...state.collapsed, [rail]: !state.collapsed[rail] } });
 }
 
-export function setTab(tab: LogTab): void {
-  if (state.tab === tab) return;
-  commit({ ...state, tab });
+export function setWorkspace(ws: string): void {
+  if (state.ws === ws) return;
+  commit({ ...state, ws });
 }
 
 export function setFontScale(n: number): void {

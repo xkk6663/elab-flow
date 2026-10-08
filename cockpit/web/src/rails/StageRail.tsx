@@ -24,7 +24,8 @@ const STEP_LABEL: Record<string, string> = {
   monitor: "串口闭环",
 };
 
-export const stepLabel = (id: string): string => STEP_LABEL[id] ?? id;
+export const stepLabel = (id: string): string =>
+  STEP_LABEL[id] ?? (id.startsWith("tool:") ? `工具·${id.slice(5)}` : id);
 
 /**
  * 「跑全闭环」的步序（C30）。
@@ -51,15 +52,14 @@ export interface StageRailProps {
   caps: Capabilities | null;
   /** 已发出 POST /api/run，等待 run 启动 */
   busy: boolean;
-  onRunAll: () => void;
+  /**
+   * 跑全闭环。★ clean/jobs 是本组件「运行选项」折叠条里的本地状态，
+   * 由这里随点击一起上交 —— App 不再持有这两个 UI 态（瘦身）。
+   */
+  onRunAll: (opts: { clean: boolean; jobs: number | null }) => void;
   onRunSteps: (steps: StepId[]) => void;
   onCancel: () => void;
   onRefresh: () => void;
-  /** M2 运行参数：`--clean` 会**真删**工作目录，`-j` 只影响构建并行度 */
-  clean: boolean;
-  onCleanChange: (v: boolean) => void;
-  jobs: number | null;
-  onJobsChange: (v: number | null) => void;
 }
 
 /** 把 argv 还原成一条可读命令行（只做展示，不参与任何执行）。 */
@@ -98,13 +98,14 @@ export function StageRail({
   onRunSteps,
   onCancel,
   onRefresh,
-  clean,
-  onCleanChange,
-  jobs,
-  onJobsChange,
 }: StageRailProps) {
   const running = run.status === "running";
   useSecondTick(running);
+
+  // ── M2 运行参数（本地态：--clean 会真删工作目录、-j 只影响构建并行度）──
+  // 之前提升在 App；工作区化重构后这是"阶段轨自己的选项"，随 onRunAll 上交。
+  const [clean, setClean] = useState(false);
+  const [jobs, setJobs] = useState<number | null>(null);
 
   // ── M2 命令预览（只读）──────────────────────────────────────
   const [pv, setPv] = useState<PlanPreview | null>(null);
@@ -165,6 +166,18 @@ export function StageRail({
 
   const build = run.lastBuild;
   const lastStep = run.steps.filter((v) => v.result).slice(-1)[0];
+
+  // ── 折叠条的单行摘要（信息收纳 ≠ 信息丢失）──
+  const availableStepCount = (caps?.steps.all ?? (Object.keys(STEP_LABEL) as StepId[])).filter(
+    (id) => card.steps[id]?.ok ?? true,
+  ).length;
+  const artifactKeys = Object.keys(build?.artifacts ?? {});
+  const artifactSummary = [
+    artifactKeys.length ? `${artifactKeys.length} 个产物` : "暂无产物",
+    build?.guard ? (build.guard.untouched ? "守卫未触碰" : "守卫有改动") : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className={s.rail}>
@@ -237,14 +250,16 @@ export function StageRail({
         ))}
       </div>
 
-      {/* ── R8 控制条 ── */}
+      {/* ── R8 控制条：只留高频三件（跑全闭环 / 取消 / 状态）──
+          预览、--clean、-j 全部收进「运行选项」折叠条 —— 低频操作不该
+          永久占据一级视口（UI 收纳重构 2026-10-08）。 */}
       <div className={s.bar}>
         <Button
           variant="primary"
           icon={<IconPlay />}
           busy={busy}
           disabled={running}
-          onClick={onRunAll}
+          onClick={() => onRunAll({ clean, jobs })}
           title="完整闭环：体检 → 编译 → 烧录 → 调试校验 → 串口闭环（不可用的步骤自动排除）"
         >
           跑全闭环
@@ -259,19 +274,6 @@ export function StageRail({
           取消
         </Button>
         <span className={s.barSpacer} />
-        {/* ★ M2「先看命令再执行」：预览是**只读**的（GET /api/plan），
-            不 spawn、不写盘、不发射事件 —— 与「跑全闭环」形成对照。
-            它存在的理由：`--clean` 会真删工作目录、flash 会真烧板，
-            按下之前必须能看清"到底会执行什么"。 */}
-        <Button
-          icon={<IconShield />}
-          busy={pvBusy}
-          disabled={!card}
-          onClick={() => void doPreview()}
-          title="只读预览：本轮将执行的命令与副作用，什么都不执行"
-        >
-          预览
-        </Button>
         {run.status !== "idle" ? (
           <Pill
             tone={
@@ -290,199 +292,236 @@ export function StageRail({
         ) : null}
       </div>
 
-      {/* ── 单步执行：一步一颗独立按钮（不再藏在下拉菜单里）──
+      {/* ── 单步执行（折叠收纳）：一步一颗独立按钮 ──
           每颗按钮的可用性来自 `card.steps[id].ok`（服务端已算好"不可用的理由"），
-          置灰时 tooltip 直接说出原因 —— 不让用户点了才知道失败。 */}
-      <div className={[s.bar, s.stepBar].join(" ")} role="group" aria-label="单步执行">
-        <span className={s.stepBarLabel}>单步</span>
-        {(caps?.steps.all ?? (Object.keys(STEP_LABEL) as StepId[])).map((id) => {
-          const st = card.steps[id];
-          const ok = st?.ok ?? true;
-          const onhw = (caps?.steps.onhw ?? []).includes(id);
-          const tip = !ok
-            ? st?.reason || "不可用"
-            : `只跑这一步：${stepLabel(id)}${onhw ? "（需探针在位）" : ""}`;
-          return (
-            <Tooltip key={id} tip={tip}>
-              <Button
-                size="sm"
-                disabled={running || !ok}
-                onClick={() => onRunSteps([id as StepId])}
-              >
-                {stepLabel(id)}
-              </Button>
-            </Tooltip>
-          );
-        })}
-      </div>
-
-      {/* ── M2 运行参数（clean / jobs）── */}
-      <div className={s.bar}>
-        <div className={s.pvFlags}>
-          <Switch
-            id="clean"
-            checked={clean}
-            disabled={running}
-            onChange={onCleanChange}
-            label="--clean"
-          />
-          <span className={s.pvNote}>先清空工作目录</span>
-        </div>
-        <span className={s.barSpacer} />
-        <div className={s.pvFlags}>
-          <span className={s.pvNote}>-j</span>
-          <Input
-            className={s.pvJobs}
-            mono
-            disabled={running}
-            placeholder="自动"
-            value={jobs === null ? "" : String(jobs)}
-            onChange={(e) => {
-              const v = e.target.value.trim();
-              const n = Number(v);
-              onJobsChange(v === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n));
-            }}
-            aria-label="并行任务数"
-          />
-        </div>
-      </div>
-
-      {/* ── M2 命令预览（只读）── */}
-      {pvErr ? (
-        <section className={s.sect}>
-          <div className={s.pvWarn}>预览失败：{pvErr}</div>
-        </section>
-      ) : null}
-      {pv ? (
-        <section className={s.sect}>
-          <h3 className={s.sectTitle}>
-            命令预览 · {pv.project}
-            <button className={s.pvClose} onClick={() => setPv(null)} type="button">
-              关闭
-            </button>
-          </h3>
-          <div className={s.pvNote}>
-            只读预览：下列命令**不会**被执行
-            {pv.clean ? " · 已勾选 --clean" : ""}
-            {pv.jobs ? ` · -j ${pv.jobs}` : ""}
-          </div>
-          {pv.warnings.map((w, i) => (
-            <div className={s.pvWarn} key={`w${i}`}>
-              ⚠ {w}
-            </div>
-          ))}
-          {pv.plan.map((e) => (
-            <div className={s.pvStep} key={e.step}>
-              <div className={s.pvStepHead}>
-                {stepLabel(e.step)}
-                {e.blocked ? <Tag dense tone="amber">需前置产物</Tag> : null}
-                {!e.spawns ? <Tag dense tone="neutral">不派生子进程</Tag> : null}
-              </div>
-              {e.effects.map((x, i) => (
-                <div className={s.pvEffect} key={`e${i}`}>
-                  ⚠ {x}
-                </div>
-              ))}
-              {e.commands
-                .filter((c) => c.length > 0)
-                .map((c, i) => (
-                  <pre className={s.pvCmd} key={`c${i}`}>
-                    $ {shellJoin(c)}
-                  </pre>
-                ))}
-              {e.serial ? (
-                <div className={s.pvNote}>
-                  串口 {e.serial.port}@{e.serial.baud}
-                  {e.serial.idle_timeout_s ? ` · 静默超时 ${e.serial.idle_timeout_s}s` : ""}
-                </div>
-              ) : null}
-              {e.note ? <div className={s.pvNote}>· {e.note}</div> : null}
-            </div>
-          ))}
-        </section>
-      ) : null}
-
-      {/* ── R2 内存占位 ── */}
-      <section className={s.sect}>
-        <h3 className={s.sectTitle}>
-          内存占位
-          {build?.memory_source === "map" ? (
-            <Tag dense tone="amber" title="本次未重新链接，数字由 elab 从 .map 反推">
-              取自 .map
-            </Tag>
-          ) : build?.memory_source === "linker" ? (
-            <Tag dense tone="neutral">
-              链接器自报
-            </Tag>
-          ) : null}
-        </h3>
-        <MemoryGauge memory={build?.memory ?? {}} source={build?.memory_source} />
-      </section>
-
-      {/* ── 产物 ── */}
-      <section className={s.sect}>
-        <h3 className={s.sectTitle}>产物</h3>
-        {(() => {
-          const art = build?.artifacts ?? {};
-          const keys = Object.keys(art);
-          if (keys.length === 0) {
+          置灰时 tooltip 直接说出原因 —— 不让用户点了才知道失败。
+          项目声明工具的按钮**不在这里**：工具是独立工作区（右列导航），
+          启动按钮住在自己的工作区里 —— 阶段轨只管流水线本身。 */}
+      <DisclosureRow
+        header={
+          <>
+            <span className={s.sectTitle}>单步执行</span>
+            <span className={s.ledDetail}>
+              {availableStepCount} / {(caps?.steps.all ?? Object.keys(STEP_LABEL)).length} 可用
+            </span>
+          </>
+        }
+      >
+        <div className={[s.bar, s.stepBar].join(" ")} role="group" aria-label="单步执行">
+          {(caps?.steps.all ?? (Object.keys(STEP_LABEL) as StepId[])).map((id) => {
+            const st = card.steps[id];
+            const ok = st?.ok ?? true;
+            const onhw = (caps?.steps.onhw ?? []).includes(id);
+            const tip = !ok
+              ? st?.reason || "不可用"
+              : `只跑这一步：${stepLabel(id)}${onhw ? "（需探针在位）" : ""}`;
             return (
-              <div className={s.none}>
-                暂无产物。编译成功后这里会列出 <code>elf / hex / bin / map</code>。
-              </div>
+              <Tooltip key={id} tip={tip}>
+                <Button
+                  size="sm"
+                  disabled={running || !ok}
+                  onClick={() => onRunSteps([id as StepId])}
+                >
+                  {stepLabel(id)}
+                </Button>
+              </Tooltip>
             );
-          }
-          return (
-            <ul className={s.artList}>
-              {keys.map((k) => (
-                <li key={k} className={s.artRow}>
-                  <span className={s.artKey}>{k}</span>
-                  <PathLabel path={art[k].path} suffix={`${(art[k].bytes / 1024).toFixed(1)} KB`} />
-                </li>
-              ))}
-            </ul>
-          );
-        })()}
-        {/* 声明了但没产出 —— 这是 N6 曾经的症状，必须显式可见 */}
-        {card.artifacts.map && !(build?.artifacts?.map) ? (
-          <div className={s.warnRow}>
-            声明了 <code>artifacts.map</code> 但未生成。检查链接行是否带
-            <code> -Wl,-Map</code>（elab 通过 <code>-DELAB_MAP_FILE</code> 盖章）。
+          })}
+        </div>
+      </DisclosureRow>
+
+      {/* ── 运行选项（折叠收纳）：预览 / --clean / -j ──
+          M2「先看命令再执行」：预览是**只读**的（GET /api/plan），不 spawn、
+          不写盘、不发射事件。它存在的理由：`--clean` 会真删工作目录、
+          flash 会真烧板，按下之前必须能看清"到底会执行什么"。 */}
+      <DisclosureRow
+        header={
+          <>
+            <span className={s.sectTitle}>运行选项</span>
+            {clean ? <Tag dense tone="amber">--clean</Tag> : null}
+            {jobs != null ? <Tag dense tone="neutral">-j {jobs}</Tag> : null}
+          </>
+        }
+      >
+        <div className={s.bar}>
+          <Button
+            icon={<IconShield />}
+            busy={pvBusy}
+            disabled={!card}
+            onClick={() => void doPreview()}
+            title="只读预览：本轮将执行的命令与副作用，什么都不执行"
+          >
+            预览
+          </Button>
+          <div className={s.pvFlags}>
+            <Switch
+              id="clean"
+              checked={clean}
+              disabled={running}
+              onChange={setClean}
+              label="--clean"
+            />
+            <span className={s.pvNote}>先清空工作目录</span>
+          </div>
+          <span className={s.barSpacer} />
+          <div className={s.pvFlags}>
+            <span className={s.pvNote}>-j</span>
+            <Input
+              className={s.pvJobs}
+              mono
+              disabled={running}
+              placeholder="自动"
+              value={jobs === null ? "" : String(jobs)}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const n = Number(v);
+                setJobs(v === "" || !Number.isFinite(n) || n <= 0 ? null : Math.floor(n));
+              }}
+              aria-label="并行任务数"
+            />
+          </div>
+        </div>
+        {pvErr ? <div className={s.pvWarn}>预览失败：{pvErr}</div> : null}
+        {pv ? (
+          <div>
+            <h3 className={s.sectTitle}>
+              命令预览 · {pv.project}
+              <button className={s.pvClose} onClick={() => setPv(null)} type="button">
+                关闭
+              </button>
+            </h3>
+            <div className={s.pvNote}>
+              只读预览：下列命令**不会**被执行
+              {pv.clean ? " · 已勾选 --clean" : ""}
+              {pv.jobs ? ` · -j ${pv.jobs}` : ""}
+            </div>
+            {pv.warnings.map((w, i) => (
+              <div className={s.pvWarn} key={`w${i}`}>
+                ⚠ {w}
+              </div>
+            ))}
+            {pv.plan.map((e) => (
+              <div className={s.pvStep} key={e.step}>
+                <div className={s.pvStepHead}>
+                  {stepLabel(e.step)}
+                  {e.blocked ? <Tag dense tone="amber">需前置产物</Tag> : null}
+                  {!e.spawns ? <Tag dense tone="neutral">不派生子进程</Tag> : null}
+                </div>
+                {e.effects.map((x, i) => (
+                  <div className={s.pvEffect} key={`e${i}`}>
+                    ⚠ {x}
+                  </div>
+                ))}
+                {e.commands
+                  .filter((c) => c.length > 0)
+                  .map((c, i) => (
+                    <pre className={s.pvCmd} key={`c${i}`}>
+                      $ {shellJoin(c)}
+                    </pre>
+                  ))}
+                {e.serial ? (
+                  <div className={s.pvNote}>
+                    串口 {e.serial.port}@{e.serial.baud}
+                    {e.serial.idle_timeout_s ? ` · 静默超时 ${e.serial.idle_timeout_s}s` : ""}
+                  </div>
+                ) : null}
+                {e.note ? <div className={s.pvNote}>· {e.note}</div> : null}
+              </div>
+            ))}
           </div>
         ) : null}
-      </section>
+      </DisclosureRow>
 
-      {/* ── 零改动守卫 ── */}
-      {build?.guard ? (
+      {/* ── 构建产物（折叠收纳）：内存占位 + 产物 + 零改动守卫 ──
+          折叠时的单行摘要让信息不丢：flash 占用 / 产物数 / 守卫状态。 */}
+      <DisclosureRow
+        header={
+          <>
+            <span className={s.sectTitle}>构建产物</span>
+            <span className={s.ledDetail}>{artifactSummary}</span>
+          </>
+        }
+      >
         <section className={s.sect}>
           <h3 className={s.sectTitle}>
-            <IconShield className={s.sectIcon} />
-            零改动守卫
+            内存占位
+            {build?.memory_source === "map" ? (
+              <Tag dense tone="amber" title="本次未重新链接，数字由 elab 从 .map 反推">
+                取自 .map
+              </Tag>
+            ) : build?.memory_source === "linker" ? (
+              <Tag dense tone="neutral">
+                链接器自报
+              </Tag>
+            ) : null}
           </h3>
-          <div className={s.guardRow}>
-            <Pill tone={build.guard.untouched ? "green" : "red"}>
-              {build.guard.untouched ? "未触碰" : "有改动"}
-            </Pill>
-            <span className={s.guardText}>
-              源码树 {build.guard.files_before} 个文件
-              {build.guard.changed.length > 0 ? ` · 变更 ${build.guard.changed.length}` : ""}
-              {build.guard.added.length > 0 ? ` · 新增 ${build.guard.added.length}` : ""}
-              {build.guard.removed.length > 0 ? ` · 删除 ${build.guard.removed.length}` : ""}
-            </span>
-          </div>
-          {!build.guard.untouched ? (
-            <ul className={s.guardList}>
-              {[...build.guard.changed, ...build.guard.added, ...build.guard.removed]
-                .slice(0, 8)
-                .map((f) => (
-                  <li key={f} className={s.guardFile}>
-                    {f}
+          <MemoryGauge memory={build?.memory ?? {}} source={build?.memory_source} />
+        </section>
+
+        <section className={s.sect}>
+          <h3 className={s.sectTitle}>产物</h3>
+          {(() => {
+            const art = build?.artifacts ?? {};
+            const keys = Object.keys(art);
+            if (keys.length === 0) {
+              return (
+                <div className={s.none}>
+                  暂无产物。编译成功后这里会列出 <code>elf / hex / bin / map</code>。
+                </div>
+              );
+            }
+            return (
+              <ul className={s.artList}>
+                {keys.map((k) => (
+                  <li key={k} className={s.artRow}>
+                    <span className={s.artKey}>{k}</span>
+                    <PathLabel path={art[k].path} suffix={`${(art[k].bytes / 1024).toFixed(1)} KB`} />
                   </li>
                 ))}
-            </ul>
+              </ul>
+            );
+          })()}
+          {/* 声明了但没产出 —— 这是 N6 曾经的症状，必须显式可见 */}
+          {card.artifacts.map && !(build?.artifacts?.map) ? (
+            <div className={s.warnRow}>
+              声明了 <code>artifacts.map</code> 但未生成。检查链接行是否带
+              <code> -Wl,-Map</code>（elab 通过 <code>-DELAB_MAP_FILE</code> 盖章）。
+            </div>
           ) : null}
         </section>
-      ) : null}
+
+        {/* 零改动守卫 */}
+        {build?.guard ? (
+          <section className={s.sect}>
+            <h3 className={s.sectTitle}>
+              <IconShield className={s.sectIcon} />
+              零改动守卫
+            </h3>
+            <div className={s.guardRow}>
+              <Pill tone={build.guard.untouched ? "green" : "red"}>
+                {build.guard.untouched ? "未触碰" : "有改动"}
+              </Pill>
+              <span className={s.guardText}>
+                源码树 {build.guard.files_before} 个文件
+                {build.guard.changed.length > 0 ? ` · 变更 ${build.guard.changed.length}` : ""}
+                {build.guard.added.length > 0 ? ` · 新增 ${build.guard.added.length}` : ""}
+                {build.guard.removed.length > 0 ? ` · 删除 ${build.guard.removed.length}` : ""}
+              </span>
+            </div>
+            {!build.guard.untouched ? (
+              <ul className={s.guardList}>
+                {[...build.guard.changed, ...build.guard.added, ...build.guard.removed]
+                  .slice(0, 8)
+                  .map((f) => (
+                    <li key={f} className={s.guardFile}>
+                      {f}
+                    </li>
+                  ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
+      </DisclosureRow>
 
       {/* ── 串口闭环判定（M3 起有数据） ── */}
       {run.closedLoop ? (

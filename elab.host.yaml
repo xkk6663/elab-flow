@@ -101,4 +101,5 @@ serial:
 svd_roots:
   - C:/Users/xiao1/Desktop/AT32/AT32F421G8U7_WorkBench/svd
   - C:/Users/xiao1/AppData/Local/stm32cube/packs/STMicroelectronics/stm32f1xx_dfp/1.1.0/SVD
+  - C:/Users/xiao1/AppData/Local/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.1.0/SVD
 

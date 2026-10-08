@@ -7,14 +7,14 @@ import type {
 } from "./api/types";
 import { api, assertSchema } from "./api/client";
 import { openRunStream, type StreamHandle } from "./events/sse";
-import { logs, type LogLine, type LogTab } from "./store/logs";
+import { logs, type LogLine } from "./store/logs";
 import {
   markStreamClosed,
   reset as resetRun,
   useRun,
 } from "./store/runStore";
 import { cycleTheme, useTheme, type ThemeMode } from "./store/themeStore";
-import { LIMITS, setFontScale, setTab, useLayout } from "./store/layoutStore";
+import { LIMITS, setFontScale, setWorkspace, useLayout } from "./store/layoutStore";
 import { AppFrame } from "./AppFrame";
 import { ProjectsRail } from "./rails/ProjectsRail";
 import { StageRail, fullLoopSteps } from "./rails/StageRail";
@@ -76,14 +76,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
-  const [autoScroll, setAutoScroll] = useState(true);
   const [conn, setConn] = useState<"idle" | "connecting" | "open" | "reconnecting">("idle");
-  // M2 运行参数。**故意不放 localStorage**：`--clean` 会真删工作目录，
-  // 把它持久化成"下次默认开启"是一个会咬人的默认值。
-  const [clean, setClean] = useState(false);
-  const [jobs, setJobs] = useState<number | null>(null);
-  // 串口手写通道（M3-b）的波特率覆写。null = "还没改过，跟工程/宿主默认走"。
-  const [baudOverride, setBaudOverride] = useState<number | null>(null);
+  // ★ 工作区化瘦身（2026-10-08）：autoScroll → EvidenceRail 本地态；
+  //   clean/jobs → StageRail 本地态（随 onRunAll 上交）；波特率覆写与串口手写
+  //   → 串口工作区本地态。App 只留连接/目录/选中/run 编排 —— SSE 编排
+  //   （attach/backfill）是 C24/C26/C28 的正确性核心，**刻意不下沉**。
 
   const streamRef = useRef<StreamHandle | null>(null);
   const selectedRef = useRef("");
@@ -167,7 +164,6 @@ export default function App() {
       logs.clearAll();
       // ★ 必须 await：要保证留档先落进缓冲，attach() 的实时重放才接在它后面
       await backfillSerial(name);
-      setAutoScroll(true);
       setNotice(null);
       try {
         const { runs, active } = await api.runs();
@@ -228,8 +224,12 @@ export default function App() {
     return () => closeStream();
   }, [loadAll, closeStream]);
 
+  /**
+   * 启动一个 run。steps 不传 = 后端默认两步（仅 loadAll 兜底用）；
+   * 全闭环必须显式传步序（C30）。opts 由阶段轨「运行选项」折叠条随点击上交。
+   */
   const startRun = useCallback(
-    async (steps?: StepId[]) => {
+    async (steps?: string[], opts?: { clean?: boolean; jobs?: number | null }) => {
       const project = selectedRef.current;
       if (!project) return;
       setBusy(true);
@@ -237,9 +237,9 @@ export default function App() {
       try {
         const res = await api.startRun({
           project,
-          steps,
-          clean: clean || undefined,
-          jobs: jobs ?? undefined,
+          steps: steps as StepId[] | undefined,
+          clean: opts?.clean || undefined,
+          jobs: opts?.jobs ?? undefined,
         });
         closeStream();
         resetRun();
@@ -247,7 +247,6 @@ export default function App() {
         // 与 selectProject 同理：留档先落，实时 monitor 行再接上去。
         // 手写通道与闭环互斥（N5），所以这里的留档必定是**这次**跑之前的 —— 不会串味。
         await backfillSerial(project);
-        setAutoScroll(true);
         attach(res.run);
       } catch (e) {
         setNotice(`启动失败：${errmsg(e)}`);
@@ -255,7 +254,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [attach, backfillSerial, closeStream, clean, jobs],
+    [attach, backfillSerial, closeStream],
   );
 
   const cancelRun = useCallback(async () => {
@@ -292,59 +291,7 @@ export default function App() {
   );
 
   const card = catalog?.projects.find((p) => p.name === selected) ?? null;
-  // 波特率优先级：用户显式选的 → 工程配置 → 宿主默认 → 115200。
-  // ★ 必须与后端 `serialterm.resolve_target()` 的顺序**一致**，否则会出现
-  //   "界面显示 9600、实际按 115200 发"这种最难查的不一致。
-  const serialBaud = baudOverride ?? card?.serial.baud ?? caps?.serial.host_baud ?? 115200;
   const serialPort = card?.serial.port || caps?.serial.host_default || "";
-
-  /**
-   * 手写通道（M3-b）：一次「写一条 → 收一小段回显」。
-   *
-   * ★ 这些行**只在本机缓冲里**，重载页面就没了 —— 因为写通道不属于任何 run
-   *   （它与 monitor 天然互斥：monitor 在跑时写不进去、也不该写），服务端**没有**
-   *   对应事件可重放。与事件行的这个区别必须让人看得见，故用 `TX →` / `←` 前缀区分。
-   */
-  const doSerialWrite = useCallback(
-    async (line: string) => {
-      const project = selectedRef.current;
-      logs.local("serial", `TX → ${line}`, "warn");
-      try {
-        const r = await api.serial({ project, data: line, baud: serialBaud });
-        if (r.via === "monitor") {
-          // ★ 监视会话开着：写进了已打开的口，回显会从实时监视流回来 ——
-          //   本请求没有 echo 窗口，渲染话术必须分流（字段语义不同）。
-          if (r.ok) {
-            logs.local(
-              "serial",
-              `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（经监视会话）`,
-            );
-          } else {
-            logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
-          }
-          return;
-        }
-        if (!r.ok) {
-          logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
-          return;
-        }
-        logs.local(
-          "serial",
-          `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（${r.backend}/${r.layer}）`,
-        );
-        for (const ln of r.echoed) logs.local("serial", `← ${ln}`);
-        if (!r.echoed.length) {
-          logs.local(
-            "serial",
-            `（${r.read_ms}ms 窗口内无回显 —— 设备不回应也可能是正常的）`,
-          );
-        }
-      } catch (e) {
-        logs.local("serial", `✗ ${errmsg(e)}`, "alert");
-      }
-    },
-    [serialBaud],
-  );
   const ThemeIcon = THEME_ICON[theme];
 
   if (fatal) {
@@ -446,14 +393,10 @@ export default function App() {
             run={run}
             caps={caps}
             busy={busy}
-            onRunAll={() => void startRun(fullLoopSteps(card, caps))}
+            onRunAll={(opts) => void startRun(fullLoopSteps(card, caps), opts)}
             onRunSteps={(steps) => void startRun(steps)}
             onCancel={() => void cancelRun()}
             onRefresh={() => void loadAll(false)}
-            clean={clean}
-            onCleanChange={setClean}
-            jobs={jobs}
-            onJobsChange={setJobs}
           />
         }
         evidence={
@@ -461,16 +404,11 @@ export default function App() {
             caps={caps}
             card={card}
             running={run.status === "running"}
-            onRunSteps={(steps: StepId[]) => void startRun(steps)}
+            onRunSteps={(steps: string[]) => void startRun(steps)}
             serialProject={selected}
-            tab={layout.tab}
-            onTab={(t: LogTab) => setTab(t)}
-            autoScroll={autoScroll}
-            onAutoScrollChange={setAutoScroll}
-            onSerialWrite={doSerialWrite}
             serialPort={serialPort}
-            serialBaud={serialBaud}
-            onSerialBaudChange={setBaudOverride}
+            ws={layout.ws}
+            onWs={setWorkspace}
           />
         }
         compactSelector={
@@ -487,6 +425,7 @@ export default function App() {
             ))}
           </select>
         }
+        projectsStripLabel={selected}
       />
 
       {notice ? (

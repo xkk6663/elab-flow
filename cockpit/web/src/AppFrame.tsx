@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { maxFor, setWidth, toggleRail, useLayout, type RailId } from "./store/layoutStore";
+import { IconExpandRight } from "./icons";
 import s from "./AppFrame.module.css";
 
 export interface AppFrameProps {
@@ -17,6 +18,8 @@ export interface AppFrameProps {
   compactSelector?: ReactNode;
   /** 右侧抽屉的开关（窄屏用） */
   drawerToggle?: ReactNode;
+  /** 工程轨折叠后，竖条上显示的当前工程名（让收起状态也不丢上下文） */
+  projectsStripLabel?: string;
 }
 
 /**
@@ -37,6 +40,7 @@ export function AppFrame({
   evidence,
   compactSelector,
   drawerToggle,
+  projectsStripLabel,
 }: AppFrameProps) {
   const layout = useLayout();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -88,9 +92,11 @@ export function AppFrame({
             type="button"
             className={[s.col, s.strip, s.stripLeft].join(" ")}
             onClick={() => toggleRail("projects")}
-            title="展开工程轨"
+            title="展开工程列（连同芯片信息板）"
+            aria-label="展开工程列"
           >
-            <span className={s.stripText}>工程</span>
+            <IconExpandRight className={s.stripIcon} />
+            <span className={s.stripText}>{projectsStripLabel || "工程"}</span>
           </button>
         ) : (
           <>
@@ -116,7 +122,7 @@ export function AppFrame({
             onClick={() => toggleRail("evidence")}
             title="展开证据轨"
           >
-            <span className={s.stripText}>构建 / 烧录 / 串口</span>
+            <span className={s.stripText}>证据 · 工具</span>
           </button>
         ) : (
           <>

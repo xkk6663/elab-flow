@@ -5,6 +5,7 @@
 id: stm32f103xb
 vendor: st
 family: stm32f1
+platform: stm32                # ★ 平台归属：同一 platform 的芯片聚合生成一份平台 skill
 part: STM32F103xB              # 实测编译宏 -DSTM32F103xB
 core_name: Cortex-M3
 

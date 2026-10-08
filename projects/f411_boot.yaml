@@ -1,0 +1,92 @@
+# projects/f411_boot.yaml —— F411CEU6_BOOT Bootloader 工程（方案 §4 / M1）
+# 人工接管编写（examples/F411CEU6_BOOT 为手写 bare-metal 工程，无 CubeMX 产物可探测）。
+# archetype=A：无 preset / 无行内 include，elab 以 -D 全接管（toolchain_file + project_include + ELAB_LD）。
+
+name: f411_boot
+root: ${ELAB_ROOT}/examples/F411CEU6_BOOT
+chip: st/stm32f411ceux
+archetype: A
+version: "1.0.0"     # ★ boot 版本独立冻结（§10.3）：仅协议/跳转变更才 bump
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${ELAB_ROOT}/.work/f411_boot
+  generator: Ninja
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake
+  linker_script:   ${root}/BOOT.ld          # 32K：S0+S1（0x08000000~0x08007FFF）
+  build_type: Debug
+  project_name: f411_boot
+
+artifacts:
+  elf: ${work_dir}/f411_boot.elf
+  hex: ${work_dir}/f411_boot.hex
+  bin: ${work_dir}/f411_boot.bin
+  map: ${work_dir}/f411_boot.map
+
+# ★ C33 镜像级声明：boot 单镜像 @0x08000000（bin 带显式地址，M2 教训——防擦错位）。
+#   doctor 走镜像级内存对账（⊆ 芯片物理范围），32K ld 不再触发漂移误报。
+#   M3 时 APP 工程 f411 将声明双镜像（boot + app）。
+flash:
+  images:
+    - path: ${work_dir}/f411_boot.bin
+      format: bin
+      address: "0x08000000"
+      ld: ${root}/BOOT.ld
+
+debug:
+  probe: atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+guard:
+  untouched: true
+  snapshot: true
+  snapshot_root: ${root}
+
+# ── 串口闭环判据（boot.c 原生 printf 关键字，115200）────────────
+serial:
+  port: auto
+
+# 判据：boot 各状态的原生日志；命中任一 → ok。
+#   "=== Bootloader Start ===" 必打（CheckState 入口）
+#   "Bootloader Ready"          RUNNING 2s 窗口
+#   "Jumping to APP"            无升级请求正常跳转
+#   "Upgrade requested"         READY 擦除路径
+#   "Resuming from page"        断点续传路径
+monitor:
+  close_on:
+    - { kind: regex, pattern: "^\\[(boot|alive)\\]", within_s: 10 }
+    - { kind: regex, pattern: "Bootloader Ready|Jumping to APP|Upgrade requested|Resuming from page|Upgrade complete", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "HardFault|Hard Fault|assert|PANIC" }
+  idle_timeout_s: 30
+
+provenance:
+  archetype:
+    value: "A"
+    level: E4
+    evidence: "手写 bare-metal 工程：无 CMakePresets / 无行内 toolchain include，elab -D 全接管"
+  linker_script:
+    value: "BOOT.ld (FLASH 32K)"
+    level: E3
+    evidence: "CMakeLists.txt fallback + 本 yaml build.linker_script"
+  chip_macro:
+    value: "STM32F411xE"
+    level: E1
+    evidence: "CMakeLists.txt: target_compile_definitions"
+  chip:
+    value: "st/stm32f411ceux"
+    level: E1
+    evidence: "编译宏 STM32F411xE == chips/st/stm32f411ceux.yaml:part"
+  components:
+    value: "ota(boot) + serial —— 位图 0x3"
+    level: E4
+    evidence: "CMakeLists.txt: elab_use_component(ota VARIANT boot CAP_BITMAP 0x3)"
+  stdout:
+    value: "有输出能力"
+    level: E4
+    evidence: "组件 ota_printf.c: 定义了 _write/__io_putchar（经 Transport）"
+  confidence: "high"
+  notes:
+    - "BOOT ≤ 32K 是硬约束（BOOTLOADER_SIZE=0x8000）；build 后需核对 size 输出"

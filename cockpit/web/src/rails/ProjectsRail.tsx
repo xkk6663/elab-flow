@@ -4,7 +4,9 @@ import { api } from "../api/client";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { Pill, Tag } from "../primitives/Tag";
-import { IconAlert, IconChip, IconPlug } from "../icons";
+import { Tooltip } from "../primitives/Tooltip";
+import { IconAlert, IconChip, IconCollapseLeft, IconPlug } from "../icons";
+import { toggleRail } from "../store/layoutStore";
 import s from "./ProjectsRail.module.css";
 
 function errmsg(e: unknown): string {
@@ -42,6 +44,78 @@ export function ProjectsRail({
 }: ProjectsRailProps) {
   // 串口能力来自 /api/capabilities（后端能力协商结果），不是前端猜的
   const serialOk = caps?.serial.available ?? false;
+  // boot 子工程分组展开状态（默认展开——首次见到的用户仍能"看见"归属关系）
+  const [bootOpen, setBootOpen] = useState<Record<string, boolean>>({});
+
+  /** 单张工程卡。bootChild=true 时渲染为宿主卡的正下方缩进形态（C1 归属语义）。 */
+  const projectCard = (p: ProjectCard, bootChild = false) => {
+    const isSel = p.name === selected;
+    const blocked = (Object.keys(p.steps) as StepId[]).filter((k) => !p.steps[k].ok);
+    const stamp = p.ota?.boot_stamp ?? null;
+    return (
+      <button
+        type="button"
+        className={[s.card, isSel ? s.sel : "", bootChild ? s.cardBoot : ""]
+          .filter(Boolean)
+          .join(" ")}
+        aria-current={isSel}
+        disabled={locked && !isSel}
+        title={locked && !isSel ? "有任务在跑，先取消或等它结束" : p.root}
+        onClick={() => onSelect(p.name)}
+      >
+        <div className={s.row1}>
+          {bootChild ? (
+            <span className={s.bootLink} aria-hidden="true">
+              ↳
+            </span>
+          ) : null}
+          <span className={s.name}>{p.name}</span>
+          {p.derived.built ? <span className={s.dotBuilt} title="已有构建产物" /> : null}
+        </div>
+        <div className={s.row2}>
+          {bootChild ? (
+            <Tag tone="violet" mono dense>
+              BOOT 子工程 · {p.boot_owner}
+            </Tag>
+          ) : null}
+          <Tag tone={p.archetype === "A" ? "blue" : "green"} mono dense>
+            {p.chip || "未指定芯片"}
+          </Tag>
+          <Tag dense tone="neutral">
+            {p.archetype ? `${p.archetype} 类` : "形态未声明"}
+          </Tag>
+          {p.generator ? (
+            <Tag dense tone="neutral">
+              {p.generator}
+            </Tag>
+          ) : null}
+        </div>
+        {/* OTA 关键信息（C3 冻结台账直读）：槽型 + boot 归属 + 冻结状态一行讲完 */}
+        {p.ota && !bootChild ? (
+          <div className={s.rowOta}>
+            <Tag tone={stamp ? "green" : "amber"} mono dense>
+              OTA{p.ota.slots > 1 ? ` 双槽×${p.ota.slots}` : " 单槽"}
+            </Tag>
+            <span className={s.otaText}>
+              boot {p.ota.boot_project}
+              {stamp
+                ? ` v${stamp.version} · 冻结 ${stamp.flashed_at.slice(5, 16)}`
+                : " · 未冻结（随下次烧录带上）"}
+            </span>
+          </div>
+        ) : null}
+        {blocked.length > 0 ? (
+          <div className={s.row3}>
+            <IconAlert className={s.warnIcon} />
+            <span className={s.warnText}>
+              {blocked.join(" / ")} 不可用
+            </span>
+          </div>
+        ) : null}
+      </button>
+    );
+  };
+
   return (
     <div className={s.rail}>
       <div className={s.head}>
@@ -49,6 +123,13 @@ export function ProjectsRail({
         <span className={s.count}>{cards.length}</span>
         <span className={s.headSpacer} />
         <AdaptPanel onAdapted={onAdapted} locked={locked} />
+        {/* 显式收起按钮（2026-10-08）：此前只有"拖拽条双击折叠"，用户根本发现不了。
+            收起是整列行为 —— 连同底部芯片型号信息板一起藏起，专注驾驶舱状态。 */}
+        <Tooltip side="bottom" tip="收起工程列（连芯片信息一起），专注驾驶舱；点击左缘竖条可展开">
+          <Button variant="toolbar" onClick={() => toggleRail("projects")} aria-label="收起工程列">
+            <IconCollapseLeft />
+          </Button>
+        </Tooltip>
       </div>
 
       <div className={s.list}>
@@ -57,47 +138,48 @@ export function ProjectsRail({
           <div className={s.note}>没有工程。在 projects/ 下加一个 *.yaml 就会出现在这里。</div>
         ) : null}
 
-        {cards.map((p) => {
-          const isSel = p.name === selected;
-          const blocked = (Object.keys(p.steps) as StepId[]).filter((k) => !p.steps[k].ok);
-          return (
-            <button
-              key={p.name}
-              type="button"
-              className={[s.card, isSel ? s.sel : ""].filter(Boolean).join(" ")}
-              aria-current={isSel}
-              disabled={locked && !isSel}
-              title={locked && !isSel ? "有任务在跑，先取消或等它结束" : p.root}
-              onClick={() => onSelect(p.name)}
-            >
-              <div className={s.row1}>
-                <span className={s.name}>{p.name}</span>
-                {p.derived.built ? <span className={s.dotBuilt} title="已有构建产物" /> : null}
-              </div>
-              <div className={s.row2}>
-                <Tag tone={p.archetype === "A" ? "blue" : "green"} mono dense>
-                  {p.chip || "未指定芯片"}
-                </Tag>
-                <Tag dense tone="neutral">
-                  {p.archetype ? `${p.archetype} 类` : "形态未声明"}
-                </Tag>
-                {p.generator ? (
-                  <Tag dense tone="neutral">
-                    {p.generator}
-                  </Tag>
+        {/* boot 子工程（C1）不与宿主并列：嵌在宿主卡正下方，分组可收起。
+            归属来自 /api/projects 的 boot_owner（交叉引用派生），前端零推导。 */}
+        {cards
+          .filter((p) => !p.boot_owner)
+          .map((p) => {
+            const kids = cards.filter((k) => k.boot_owner === p.name);
+            const open = bootOpen[p.name] ?? true;
+            return (
+              <div key={p.name} className={s.combo}>
+                {projectCard(p)}
+                {kids.length > 0 ? (
+                  <div className={s.bootGroup}>
+                    {/* 披露按钮独立于卡片 <button> 之外（button 不可嵌套），
+                        收起后仍显示组头，归属关系不失联 */}
+                    <button
+                      type="button"
+                      className={s.bootToggle}
+                      aria-expanded={open}
+                      title={open ? "收起 boot 子工程" : "展开 boot 子工程"}
+                      onClick={() =>
+                        setBootOpen((m) => ({ ...m, [p.name]: !open }))
+                      }
+                    >
+                      <span className={s.bootChevron} aria-hidden="true">
+                        {open ? "▾" : "▸"}
+                      </span>
+                      <span>
+                        boot 子工程 · {kids.map((k) => k.name).join("、")}
+                      </span>
+                    </button>
+                    {open
+                      ? kids.map((k) => (
+                          <div key={k.name} className={s.bootChild}>
+                            {projectCard(k, true)}
+                          </div>
+                        ))
+                      : null}
+                  </div>
                 ) : null}
               </div>
-              {blocked.length > 0 ? (
-                <div className={s.row3}>
-                  <IconAlert className={s.warnIcon} />
-                  <span className={s.warnText}>
-                    {blocked.join(" / ")} 不可用
-                  </span>
-                </div>
-              ) : null}
-            </button>
-          );
-        })}
+            );
+          })}
       </div>
 
       {/* ── 芯片卡 + 探针/串口状态（选中工程） ── */}
@@ -130,6 +212,19 @@ export function ProjectsRail({
                   .map(([k, v]) => `${k} ${Math.round(v.length / 1024)}K`)
                   .join(" · ") || "—"}
               </dd>
+              {p.ota ? (
+                <>
+                  <dt>OTA</dt>
+                  <dd>
+                    {p.ota.slots > 1 ? "双槽 A/B" : "单槽"}
+                    {" · boot "}
+                    <span className={s.mono}>{p.ota.boot_project || "—"}</span>
+                    {p.ota.boot_stamp
+                      ? ` · v${p.ota.boot_stamp.version}（${p.ota.boot_stamp.flashed_at} 冻结）`
+                      : " · 未冻结"}
+                  </dd>
+                </>
+              ) : null}
             </dl>
 
             <div className={s.io}>

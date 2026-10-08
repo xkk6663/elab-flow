@@ -12,3 +12,6 @@ __pycache__/
 
 # 待删除（用户已授权，外部有备份；删掉后此条可移除）
 examples/AT32F421G8U7_WorkBench/
+
+# WorkBuddy 会话数据（不入库）
+.workbuddy/

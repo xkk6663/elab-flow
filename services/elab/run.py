@@ -18,12 +18,16 @@ HTTP 服务会被拖死、SSE 推不出去；``flash.debug`` 起 openocd 时还�
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import builder, doctor as doctor_mod, flash as flash_mod
 from . import monitor as monitor_mod
+from . import serialport as serialport_mod
+from ._winproc import proc_kwargs
 from .config import Config, ElabError, to_fwd
 from .kernel.events import (ACTOR_AGENT, SERIAL_CLOSE, SERIAL_CLOSED_LOOP,
                             SERIAL_LINE, SERIAL_OPEN, EventLog)
@@ -43,6 +47,11 @@ DEFAULT_STEPS: tuple[str, ...] = ("doctor", "build")
 #: 需要探针（上板）的步骤。驾驶舱据此把按钮置灰，避免"点了必然失败"。
 ONHW_STEPS: frozenset[str] = frozenset({"flash", "debug_verify", "monitor"})
 
+#: 项目声明工具步骤前缀（``tool:<name>``，定义在 ``projects/*.yaml`` 的
+#: ``tools:`` 节）。★ 这是**通用机制**而非业务：框架只知道"跑项目声明的命令、
+#: 逐行进事件流"，命令本身与业务语义全部留在项目 YAML 里 —— 纯度原则不受影响。
+TOOL_PREFIX = "tool:"
+
 
 class RunError(ElabError):
     pass
@@ -61,13 +70,20 @@ def runs_dir_for(cfg: Config) -> Path:
 
 
 def parse_steps(spec: str | None, *, default=DEFAULT_STEPS) -> list[str]:
-    """把 ``"doctor,build"`` 解析成列表，并校验步骤名（防拼写错静默变成 no-op）。"""
+    """把 ``"doctor,build"`` 解析成列表，并校验步骤名（防拼写错静默变成 no-op）。
+
+    ``tool:<name>`` 形态在这里只做格式校验；``<name>`` 是否真的在项目 YAML 里
+    声明，由 ``_resolve_tool`` 在执行/预览时报错（parse_steps 没有 project 上下文）。
+    """
     if not spec:
         return list(default)
     out = [s.strip() for s in spec.split(",") if s.strip()]
-    bad = [s for s in out if s not in ALL_STEPS]
+    bad = [s for s in out
+           if s not in ALL_STEPS
+           and not (s.startswith(TOOL_PREFIX) and len(s) > len(TOOL_PREFIX))]
     if bad:
-        raise RunError(f"未知步骤：{', '.join(bad)}（可选：{', '.join(ALL_STEPS)}）")
+        raise RunError(f"未知步骤：{', '.join(bad)}（可选：{', '.join(ALL_STEPS)}"
+                       f"，或 tool:<项目yaml tools 里声明的名字>）")
     if not out:
         raise RunError("--steps 解析为空")
     return out
@@ -124,6 +140,95 @@ class StepOutcome:
 def _detail_memory(res: dict) -> str:
     mem = res.get("memory") or {}
     return " ".join(f"{k} {v['pct']}%" for k, v in mem.items())
+
+
+# ── 项目声明工具（tool:<name>）─────────────────────────────────────
+def _resolve_tool(cfg: Config, project: str, name: str) -> tuple[list[str], str, str]:
+    """项目 YAML 的 ``tools.<name>`` → (argv, cwd, label)。
+
+    YAML 形态（一切业务语义都留在项目配置里，框架只做替换与派发）::
+
+        tools:
+          ota:
+            label: OTA 升级
+            cwd: <工作目录，缺省 = 项目 root>
+            env: {IAP_PROFILE: F411}          # 追加到子进程环境
+            cmd: [python, "-u", "panels/ota/cli_flash.py",
+                  "--port", "${serial_port}", "--firmware", "${work_dir}/411.bin",
+                  "--emit-events", "${runs_dir}"]
+
+    模板变量：``${serial_port}``（按项目 serial.port 解析，auto 走选口规则并
+    排除蓝牙虚拟口）、``${root}``、``${work_dir}``、``${name}``、``${runs_dir}``。
+    """
+    proj = cfg.resolved_project(project)
+    tools = proj.get("tools") or {}
+    if name not in tools:
+        raise RunError(f"项目 {project} 的 YAML 未声明 tools.{name}")
+    t = tools[name] or {}
+    argv = t.get("cmd") or []
+    if isinstance(argv, str):
+        argv = argv.split()
+    if not argv:
+        raise RunError(f"tools.{name}.cmd 为空")
+
+    build = proj.get("build") or {}
+    root = to_fwd(proj.get("root", ""))
+    work_dir = to_fwd(build.get("work_dir", ""))
+    runs_dir = str(runs_dir_for(cfg))
+
+    subs = {"serial_port": "", "root": root, "work_dir": work_dir,
+            "name": project, "runs_dir": runs_dir}
+    if any("${serial_port}" in str(a) for a in argv):
+        spec = ((proj.get("serial") or {}).get("port")) or "auto"
+        ports, _layer = serialport_mod.list_ports()
+        port, why, _cands = serialport_mod.select_port(spec, ports)
+        if not port:
+            raise RunError(f"tool:{name} 需要串口（{spec}）：{why}")
+        subs["serial_port"] = port
+
+    def _sub(s: str) -> str:
+        for k, v in subs.items():
+            s = s.replace("${" + k + "}", v)
+        return s
+
+    argv = [to_fwd(_sub(str(a))) for a in argv]
+    cwd = to_fwd(_sub(str(t.get("cwd") or root))) or None
+    return argv, cwd or ".", str(t.get("label") or name)
+
+
+def _run_tool(cfg: Config, project: str, name: str, *, sink) -> "StepOutcome":
+    """执行项目声明工具：子进程逐行 → sink（= proc/stdout 事件 + 终端回显）。
+
+    ★ 已知限制：驾驶舱"取消"杀的是 elab run 进程，本子进程会变孤儿继续跑完
+      （工具自身有 deadline，最坏情况是自己收尾；孤儿持有的串口在它退出前
+      不可复用 —— 与 N5 同性质）。后续可改用 Job Object 一并终结（框架增强项）。
+    """
+    argv, cwd, label = _resolve_tool(cfg, project, name)
+    sink(f"[tool:{name}] {label}")
+    sink(f"[tool:{name}] $ {' '.join(argv)}")
+    env = dict(os.environ)
+    env.update({str(k): str(v) for k, v in
+                ((cfg.resolved_project(project).get("tools") or {})
+                 .get(name, {}).get("env") or {}).items()})
+    t0 = time.time()
+    proc = subprocess.Popen(
+        argv, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        **proc_kwargs(),
+    )
+    tail = ""
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip("\r\n")
+        if line:
+            tail = line
+            sink(line)
+    rc = proc.wait()
+    ok = rc == 0
+    dt = time.time() - t0
+    sink(f"[tool:{name}] exit={rc} ({dt:.1f}s)")
+    return StepOutcome(ok, (tail or f"exit={rc}")[:120], {"exit_code": rc})
 
 
 def _execute(cfg: Config, step: str, project: str, *, clean: bool, jobs: int | None,
@@ -215,6 +320,9 @@ def _execute(cfg: Config, step: str, project: str, *, clean: bool, jobs: int | N
             evidence=top.get("line") or v.reason or "",
             detail=v.reason or "")
         return StepOutcome(ok, (v.reason or v.status), extra)
+
+    if step.startswith(TOOL_PREFIX):
+        return _run_tool(cfg, project, step[len(TOOL_PREFIX):], sink=sink)
 
     raise RunError(f"未知步骤：{step}")
 
@@ -321,6 +429,18 @@ def preview(cfg: Config, project: str, *, steps=None, clean: bool = False,
             entry["note"] = ("不开子进程：本进程直接读串口（ctypes/pyserial 三层降级），"
                              "判定用 monitor.judge()。★ 与 openocd 互斥（约束 N5），"
                              "故必须排在 flash/debug 之后。")
+
+        elif step.startswith(TOOL_PREFIX):
+            # 项目声明工具：能给出的就是"替换完模板变量的最终命令行"本身。
+            try:
+                argv, cwd, label = _resolve_tool(cfg, project,
+                                                 step[len(TOOL_PREFIX):])
+                entry["commands"] = [argv]
+                entry["note"] = (f"项目声明工具 {label}（cwd={cwd}）。"
+                                 "输出逐行进事件流；退出码非 0 即失败。")
+            except (RunError, ElabError) as exc:
+                entry["blocked"] = True
+                entry["note"] = str(exc)
 
         else:
             entry["spawns"] = False

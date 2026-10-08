@@ -1,0 +1,8 @@
+{
+  "//": "由 components/components.cmake configure 生成（单一数据源），勿手改",
+  "version": 1,
+  "bits": {
+    "ota": 1,
+    "serial": 2
+  }
+}

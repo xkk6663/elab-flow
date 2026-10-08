@@ -25,6 +25,19 @@
   border-bottom: 1px solid var(--elab-border);
 }
 
+/* 工具工作区的按钮行：★ flex-wrap 可换行 —— 工具数量不限，
+   永不横向溢出（顶栏单行 bar 溢出是"显示不全"断层的根因之一） */
+.toolRow {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 6px var(--elab-space-3);
+  border-bottom: 1px solid var(--elab-border);
+  background: color-mix(in srgb, var(--elab-bg-hover) 35%, transparent);
+}
+
 .spacer {
   flex: 1 1 auto;
 }

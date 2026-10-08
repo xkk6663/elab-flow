@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Capabilities, ProjectCard, SerialMonitorSnapshot, StepId } from "../api/types";
 import { api } from "../api/client";
-import { logs, type LogTab } from "../store/logs";
+import { logs } from "../store/logs";
 import { useRun } from "../store/runStore";
+import { workspacesFor, type WorkspaceDef, type WorkspaceId } from "../workspaces";
 import { LogView, ringToText } from "../render/LogView";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
@@ -15,38 +16,19 @@ import s from "./EvidenceRail.module.css";
 
 export interface EvidenceRailProps {
   caps: Capabilities | null;
-  /** 当前工程卡片 —— 单步按钮的可用性（`steps[id].ok` 与理由）来自它 */
+  /** 当前工程卡片 —— 单步按钮的可用性（`steps[id].ok` 与理由）与工具工作区都来自它 */
   card: ProjectCard | null;
-  /** 有 run 在跑时单步按钮全部置灰（串口/调试与 run 互斥） */
+  /** 有 run 在跑时单步/启动按钮全部置灰（串口/调试与 run 互斥） */
   running: boolean;
-  /** 在本 Tab 内直接触发对应单步；null = 上层未接线（按钮置灰并说明） */
-  onRunSteps: ((steps: StepId[]) => void) | null;
-  /** 当前选中的工程名 —— 打开监视要以它解析端口/波特率 */
+  /** 触发一个步骤（step id 或 `tool:<name>`）；null = 上层未接线（按钮置灰并说明） */
+  onRunSteps: ((steps: string[]) => void) | null;
+  /** 当前选中的工程名 —— 打开监视/手写要以它解析端口/波特率 */
   serialProject: string;
-  tab: LogTab;
-  onTab: (t: LogTab) => void;
-  autoScroll: boolean;
-  onAutoScrollChange: (v: boolean) => void;
-  /** 串口写入通道（M3-b 已通）。为 null、或后端不支持写时 → 输入框置灰并说明原因 */
-  onSerialWrite: ((line: string) => void) | null;
   serialPort: string;
-  serialBaud: number;
-  /** 改波特率**立即生效** —— 下一次发送就用新值（无状态往返，不需要先"重开端口"） */
-  onSerialBaudChange: (baud: number) => void;
+  /** 当前工作区（一级导航选中项，持久化在 layoutStore） */
+  ws: WorkspaceId;
+  onWs: (id: WorkspaceId) => void;
 }
-
-/**
- * 每个 Tab 对应的单步按钮 —— 单步执行就该出现在"干这件事的界面"里：
- * 构建 Tab 里有「编译」、烧录 Tab 里有「烧录 / 调试校验」。
- * ★ 串口 Tab 放的不是「串口闭环」（那是闭环判定，阶段轨已有），而是
- *   「打开监视 / 关闭监视」—— 人要看设备实时输出，不是跑判定。
- * 按钮可用性与阶段轨同一份来源（`card.steps[id].ok`），两处置灰理由永远一致。
- */
-const TAB_STEPS: Record<LogTab, StepId[]> = {
-  build: ["build"],
-  flash: ["flash", "debug_verify"],
-  serial: [],
-};
 
 /** 轮询间隔（ms）。600ms ≈ 人眼"实时"，又远低于服务端环形缓冲的挤出速度。 */
 const MONITOR_POLL_MS = 600;
@@ -60,11 +42,19 @@ function baudOptions(current: number): number[] {
     : [...COMMON_BAUDS, current].sort((a, b) => a - b);
 }
 
-type Counts = Record<LogTab, { lines: number; alerts: number; dropped: number }>;
+type Stats = { lines: number; alerts: number; dropped: number };
 
 /**
- * 证据轨（§5.4 右列 / R2 R3 R4 R5）。
- * 三个 Tab 是"同一套渲染层的三个入口"—— 这样 R4「日志情况」只有一份实现。
+ * 工作区面板（§5.4 右列）—— 一级导航切"作业台"，每个工作区只挂自己的东西：
+ *   构建/烧录 = 闭环日志 + 对应单步按钮；串口 = 监视/手写/波特率；
+ *   工具（单一 "tools" 页） = 可换行按钮行 + 所有工具共用的日志通道。
+ *
+ * ★ 工作区元数据全部来自 `workspaces.ts` 注册表（单一事实源）——
+ *   导航项、快捷动作、置灰理由、空屏文案都从表里派生，
+ *   加一个工作区 = 注册表加一条，本组件零改动。
+ *
+ * ★ 按需渲染：LogView 按 `key={ws.id}` 只挂当前工作区的通道；
+ *   串口写入表单只在串口工作区存在；未激活工作区没有 DOM、没有订阅。
  */
 export function EvidenceRail({
   caps,
@@ -72,19 +62,29 @@ export function EvidenceRail({
   running,
   onRunSteps,
   serialProject,
-  tab,
-  onTab,
-  autoScroll,
-  onAutoScrollChange,
-  onSerialWrite,
   serialPort,
-  serialBaud,
-  onSerialBaudChange,
+  ws,
+  onWs,
 }: EvidenceRailProps) {
-  const [counts, setCounts] = useState<Counts>(() => logs.counts());
+  const [counts, setCounts] = useState<Record<string, Stats>>(() => logs.counts());
   const [draft, setDraft] = useState("");
+  // 跟随滚动：纯本工作区 UI 态，不再提升到 App（瘦身）
+  const [autoScroll, setAutoScroll] = useState(true);
+  // 波特率覆盖：同理本地化。★ 语义不变：改后立即生效（无状态往返，不需要"重开端口"）
+  const [baudOverride, setBaudOverride] = useState<number | null>(null);
 
-  // 徽标计数：低频节流刷新（250ms）。日志行刷在 LogView 里，这里只管数字。
+  // 工作区解析：持久化的 id 在当前工程下不存在（如切了工程、yaml 改了 tools:）
+  // 时回退到第一个 —— 绝不渲染未注册的工作区。
+  const all = workspacesFor(card, caps);
+  const active: WorkspaceDef = all.find((w) => w.id === ws) ?? all[0];
+
+  // 波特率优先级：用户显式选的 → 工程配置 → 宿主默认 → 115200。
+  // ★ 必须与后端 `serialterm.resolve_target()` 的顺序**一致**，否则会出现
+  //   "界面显示 9600、实际按 115200 发"这种最难查的不一致。
+  const serialBaud = baudOverride ?? card?.serial.baud ?? caps?.serial.host_baud ?? 115200;
+
+  // 徽标计数：book 级单订阅（任何通道变化都惊动一次，250ms 节流）。
+  // 通道是动态的，逐通道订阅会随工具数量膨胀；book 级订阅加通道零改动。
   useEffect(() => {
     let timer = 0;
     const tick = () => {
@@ -94,22 +94,15 @@ export function EvidenceRail({
         setCounts(logs.counts());
       }, 250);
     };
-    const unsubs = (["build", "flash", "serial"] as LogTab[]).map((k) =>
-      logs.for(k).subscribe(tick),
-    );
+    const unsub = logs.subscribeAll(tick);
     return () => {
       if (timer) window.clearTimeout(timer);
-      for (const u of unsubs) u();
+      unsub();
     };
   }, []);
 
-  const ring = logs.for(tab);
-  const st = counts[tab];
   // 只读 run 快照 —— 低频（run/* 与背压告警才变），不会拖累这里的日志渲染路径
   const run = useRun();
-  // 写通道可用性：既要 App 接上了回调，又要后端**真的支持写**（M3-b）。
-  // 两者分开判断，是为了让"没接线"与"后端不支持"给出不同的置灰理由。
-  const writable = !!onSerialWrite && (caps?.serial.write_available ?? false);
 
   // ── 常驻串口监视（serialmon）───────────────────────────────
   // 快照来源优先级：本组件拉到的 → capabilities 里那份（别的标签页开的会话）。
@@ -177,41 +170,95 @@ export function EvidenceRail({
     };
   }, [monActive]);
 
-  const tabs: Array<SegTab<LogTab>> = [
-    { id: "build", label: "构建", badge: counts.build.lines },
-    { id: "flash", label: "烧录", badge: counts.flash.lines },
-    {
-      id: "serial",
-      label: "串口",
-      badge: counts.serial.alerts > 0 ? counts.serial.alerts : counts.serial.lines,
-      tone: counts.serial.alerts > 0 ? "alert" : "normal",
-      dim: !(caps?.serial.available ?? false),
-      title: caps?.serial.available ? undefined : (caps?.serial.hint ?? "串口后端不可用"),
+  /**
+   * 手写通道（M3-b）：一次「写一条 → 收一小段回显」。
+   * ★ 这些行**只在本机缓冲里**，重载页面就没了 —— 因为写通道不属于任何 run
+   *   （它与 monitor 天然互斥：monitor 在跑时写不进去、也不该写），服务端**没有**
+   *   对应事件可重放。与事件行的这个区别必须让人看得见，故用 `TX →` / `←` 前缀区分。
+   * （此前提升在 App；工作区化后串口写是串口工作区自己的能力，随之下放。）
+   */
+  const doSerialWrite = useCallback(
+    async (line: string) => {
+      logs.local("serial", `TX → ${line}`, "warn");
+      try {
+        const r = await api.serial({ project: serialProject, data: line, baud: serialBaud });
+        if (r.via === "monitor") {
+          // ★ 监视会话开着：写进了已打开的口，回显会从实时监视流回来 ——
+          //   本请求没有 echo 窗口，渲染话术必须分流（字段语义不同）。
+          if (r.ok) {
+            logs.local(
+              "serial",
+              `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（经监视会话）`,
+            );
+          } else {
+            logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
+          }
+          return;
+        }
+        if (!r.ok) {
+          logs.local("serial", `✗ 发送失败：${r.error ?? "未知原因"}`, "alert");
+          return;
+        }
+        logs.local(
+          "serial",
+          `✓ 已发送 ${r.written}B → ${r.port}@${r.baud}（${r.backend}/${r.layer}）`,
+        );
+        for (const ln of r.echoed) logs.local("serial", `← ${ln}`);
+        if (!r.echoed.length) {
+          logs.local(
+            "serial",
+            `（${r.read_ms}ms 窗口内无回显 —— 设备不回应也可能是正常的）`,
+          );
+        }
+      } catch (e) {
+        logs.local("serial", `✗ ${e instanceof Error ? e.message : String(e)}`, "alert");
+      }
     },
-  ];
+    [serialProject, serialBaud],
+  );
+
+  // 写通道可用性：既要后端**真的支持写**（M3-b），也要有工程上下文。
+  const writable = (caps?.serial.write_available ?? false) && !!serialProject;
+
+  // ── 一级导航（工作区切换）─────────────────────────────────
+  const tabs: Array<SegTab<WorkspaceId>> = all.map((w) => {
+    const st = counts[w.channel];
+    const isSerial = w.id === "serial";
+    return {
+      id: w.id,
+      label: w.label,
+      badge: isSerial && st && st.alerts > 0 ? st.alerts : (st?.lines ?? 0),
+      tone: isSerial && st && st.alerts > 0 ? "alert" : "normal",
+      dim: w.dim(card, caps),
+      title: w.dim(card, caps) ? w.dimReason(card, caps) : undefined,
+    };
+  });
+
+  const ring = logs.ring(active.channel);
+  const st: Stats = counts[active.channel] ?? { lines: 0, alerts: 0, dropped: 0 };
 
   const doExport = useCallback(() => {
     const text = ringToText(ring);
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `elab-${tab}.log`;
+    a.download = `elab-${active.channel}.log`;
     a.click();
     // 立即 revoke 会让部分浏览器下载失败，延后一拍
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  }, [ring, tab]);
+  }, [ring, active.channel]);
 
   return (
     <div className={s.rail}>
       <div className={s.head}>
-        <SegmentedTabs tabs={tabs} value={tab} onChange={onTab} size="sm" />
+        <SegmentedTabs tabs={tabs} value={active.id} onChange={onWs} size="sm" />
         <span className={s.spacer} />
-        <Tooltip side="bottom" tip="导出当前 Tab 的纯文本日志">
+        <Tooltip side="bottom" tip="导出当前工作区的纯文本日志">
           <Button variant="toolbar" onClick={doExport} aria-label="导出日志">
             <IconDownload />
           </Button>
         </Tooltip>
-        <Tooltip side="bottom" tip="清空三个 Tab 的本地缓冲（不影响服务端 .jsonl，也不清服务端串口留档）">
+        <Tooltip side="bottom" tip="清空所有工作区的本地缓冲（不影响服务端 .jsonl，也不清服务端串口留档）">
           <Button
             variant="toolbar"
             onClick={() => logs.clearAll()}
@@ -222,37 +269,76 @@ export function EvidenceRail({
         </Tooltip>
       </div>
 
+      {/* ── 工具按钮行（工具工作区专属）──
+          ★ 独立于顶栏 bar 且 **可换行**（flex-wrap）：4 个 OTA 工具按钮全挤进
+            单行 bar 会横向溢出（用户截图"显示不全"的另一半根因）。
+            "OTA 相关的单步步骤就该在 OTA 页里" —— 按钮住在工具页顶部，
+            日志就在按钮下方，动作与输出同屏。 */}
+      {active.steps.some((id) => id.startsWith("tool:")) ? (
+        <div className={s.toolRow} role="toolbar" aria-label="项目工具">
+          {active.steps
+            .filter((id) => id.startsWith("tool:"))
+            .map((id) => {
+              const av = (card?.steps as Record<string, { ok: boolean; reason: string } | undefined> | undefined)?.[id];
+              const ok = av?.ok ?? true;
+              const tip = running
+                ? "有 run 在跑：等它结束再发起工具"
+                : !ok
+                  ? av?.reason || "不可用"
+                  : `运行项目工具（${id.slice(5)}），输出实时进本工作区`;
+              return (
+                <Tooltip key={id} tip={tip}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={running || !ok || !onRunSteps}
+                    onClick={() => onRunSteps?.([id as StepId])}
+                  >
+                    {ws_actionLabel(active, id, card)}
+                  </Button>
+                </Tooltip>
+              );
+            })}
+        </div>
+      ) : null}
+
       <div className={s.bar}>
         <Switch
           id="follow"
           checked={autoScroll}
-          onChange={onAutoScrollChange}
+          onChange={setAutoScroll}
           label="跟随"
         />
         <span className={s.spacer} />
-        {/* ── 本 Tab 的单步按钮（用户要求：单步执行要出现在具体界面里）── */}
-        {TAB_STEPS[tab].map((id) => {
-          const av = card?.steps[id];
-          const ok = av?.ok ?? true;
-          const tip = !running
-            ? !ok
-              ? av?.reason || "不可用"
-              : `只跑这一步：${stepLabel(id)}`
-            : "有 run 在跑：串口/调试与 run 互斥，等它结束";
-          return (
-            <Tooltip key={id} tip={tip}>
-              <Button
-                size="sm"
-                disabled={running || !ok || !onRunSteps}
-                onClick={() => onRunSteps?.([id])}
-              >
-                {stepLabel(id)}
-              </Button>
-            </Tooltip>
-          );
-        })}
-        {/* ── 串口 Tab：打开/关闭监视（常驻会话，不是闭环判定）── */}
-        {tab === "serial" ? (
+        {/* ── 本工作区的快捷动作（注册表 ws.steps 驱动）──
+            构建 Tab 里有「编译」、烧录 Tab 里有「烧录 / 调试校验」。
+            工具按钮不在这里 —— 它们住上面独立的可换行按钮行（工具页专属）。
+            按钮可用性与阶段轨同一份来源（`card.steps[id].ok`），两处置灰理由永远一致。 */}
+        {active.steps
+          .filter((id) => !id.startsWith("tool:"))
+          .map((id) => {
+            const av = (card?.steps as Record<string, { ok: boolean; reason: string } | undefined> | undefined)?.[id];
+            const ok = av?.ok ?? true;
+            const label = ws_actionLabel(active, id, card);
+            const tip = !running
+              ? !ok
+                ? av?.reason || "不可用"
+                : `只跑这一步：${stepLabel(id)}`
+              : "有 run 在跑：串口/调试与 run 互斥，等它结束";
+            return (
+              <Tooltip key={id} tip={tip}>
+                <Button
+                  size="sm"
+                  disabled={running || !ok || !onRunSteps}
+                  onClick={() => onRunSteps?.([id as StepId])}
+                >
+                  {label}
+                </Button>
+              </Tooltip>
+            );
+          })}
+        {/* ── 串口工作区：打开/关闭监视（常驻会话，不是闭环判定）── */}
+        {active.id === "serial" ? (
           monActive ? (
             <Tooltip tip={`监视中：${monSnap?.port ?? "?"}@${monSnap?.baud ?? "?"} · 已收 ${monSnap?.seq ?? 0} 行 —— 点击关闭并释放串口`}>
               <Button size="sm" variant="outline" onClick={() => void toggleMonitor()}>
@@ -307,21 +393,22 @@ export function EvidenceRail({
       ) : null}
 
       <LogView
-        key={tab}
+        key={active.id}
         ring={ring}
         autoScroll={autoScroll}
-        onAutoScrollChange={onAutoScrollChange}
-        empty={emptyTextFor(tab, caps)}
+        onAutoScrollChange={setAutoScroll}
+        empty={active.emptyText(card, caps)}
       />
 
-      {/* ── 串口手动输入（M3-b 已通：写一条 → 收一段回显，一次请求内闭环） ── */}
-      {tab === "serial" ? (
+      {/* ── 串口手动输入（M3-b 已通：写一条 → 收一段回显，一次请求内闭环）──
+          ★ 只在串口工作区挂载（按需渲染） */}
+      {active.id === "serial" ? (
         <form
           className={s.write}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!draft.trim() || !writable || !onSerialWrite) return;
-            onSerialWrite(draft);
+            if (!draft.trim() || !writable) return;
+            void doSerialWrite(draft);
             setDraft("");
           }}
         >
@@ -331,7 +418,7 @@ export function EvidenceRail({
             placeholder={
               writable
                 ? "输入一行并按回车发送到设备"
-                : "串口写通道不可用（后端不支持写，或尚未接线）"
+                : "串口写通道不可用（后端不支持写，或尚未选择工程）"
             }
             aria-label="串口手动输入"
             value={draft}
@@ -344,7 +431,7 @@ export function EvidenceRail({
           <select
             className={s.baud}
             value={serialBaud}
-            onChange={(e) => onSerialBaudChange(Number(e.currentTarget.value))}
+            onChange={(e) => setBaudOverride(Number(e.currentTarget.value))}
             title="波特率：改后立即生效（下一次发送即用新值）"
             aria-label="串口波特率"
             disabled={!writable}
@@ -361,26 +448,15 @@ export function EvidenceRail({
   );
 }
 
-function emptyTextFor(tab: LogTab, caps: Capabilities | null): string {
-  if (tab === "serial") {
-    if (!caps) return "正在读取串口能力…";
-    if (!caps.serial.available) {
-      return `串口后端不可用（layer=${caps.serial.layer}）。${caps.serial.hint ?? ""}`;
-    }
-    // 有服务端留档却还是空屏 = 回填被跳过了（例如留档属于别的工程）。
-    // 把这件事说出来，否则用户会以为"我明明敲过，怎么什么都没了"。
-    if (caps.serial.console.count > 0) {
-      return (
-        `服务端存有 ${caps.serial.console.count} 条串口留档，但本工程一条也没有` +
-        `（留档按工程区分）。点「打开监视」实时看设备输出，` +
-        `或在下框手敲一行发给设备。`
-      );
-    }
-    return (
-      "尚无串口输出。点「打开监视」实时看设备打印（或跑一次含 monitor 的闭环）；" +
-      "也可以直接在下方框里手敲一行发给设备。"
-    );
+/** 工作区快捷动作的按钮文案：工具用 card.tools 声明的业务名
+ *  （如「OTA 升级」—— yaml 的 tools[].label 是唯一事实源），
+ *  其余用步骤名；单步工作区的 actionLabel 仍作 fallback。 */
+function ws_actionLabel(w: WorkspaceDef, stepId: string, card: ProjectCard | null): string {
+  if (stepId.startsWith("tool:")) {
+    const name = stepId.slice(5);
+    const t = (card?.tools ?? []).find((x) => x.name === name);
+    return t?.label ?? stepLabel(stepId);
   }
-  if (tab === "flash") return "尚无烧录输出。点「跑全闭环」或单步「烧录」。";
-  return "尚无构建输出。";
+  if (w.actionLabel && w.steps.length === 1 && w.steps[0] === stepId) return w.actionLabel;
+  return stepLabel(stepId);
 }

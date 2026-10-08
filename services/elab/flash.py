@@ -7,12 +7,16 @@ cfg 路径全部来自 ``chips/*.yaml`` 的 ``debug.openocd_target/interface``�
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
+from ._winproc import proc_kwargs
 from .config import ElabError, to_fwd
-from .plan import Plan
+from .plan import Plan, plan_for
 
 
 def _openocd_argv(plan: Plan, commands: str) -> list[str]:
@@ -57,6 +61,82 @@ def _openocd_argv(plan: Plan, commands: str) -> list[str]:
 _EVIDENCE = ("**", "device id", "flash size", "wrote", "Verified", "Programming")
 
 
+# ── C2/C3 组合工程：boot 烧录台账（冻结策略）─────────────────────
+def _boot_stamp_path(plan: Plan) -> Path:
+    return Path(plan.cfg.root) / ".work" / plan.boot_project / "flash_stamp.json"
+
+
+def _stamp_load(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def boot_stamp(cfg_root, boot_project: str) -> dict | None:
+    """C3 boot 烧录台账的**公共读取口**（驾驶舱 project_cards 投影复用）。
+    路径约定单源：与 _boot_stamp_path 同一规则 `<root>/.work/<boot>/flash_stamp.json`。"""
+    return _stamp_load(Path(cfg_root) / ".work" / boot_project / "flash_stamp.json")
+
+
+def _stamp_save(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+
+
+def _fmt_version(version) -> str:
+    return ".".join(str(x) for x in version) if version else "?"
+
+
+def boot_flash_decision(boot_plan: Plan, *, stamp: dict | None = None,
+                        force: bool = False) -> dict:
+    """★ C2/C3 纯判定（可单测）：boot bin 指纹 vs 烧录台账。
+
+    冻结策略（C3）：boot 产物指纹与上次烧录一致 → 跳过（boot 是回滚资本的
+    资本，不被日常 app 烧录触碰）；仅当首次烧录 / boot 版本更新 / --reflash-boot
+    时才进烧录会话。
+
+    :return: ``{"action": "skip"|"flash", "md5", "version", "reason", "bin"}``
+    :raises ElabError: boot 产物缺失（先 build boot）
+    """
+    bin_path = boot_plan.bin
+    if not bin_path:
+        raise ElabError(f"boot 工程 {boot_plan.name} 未声明 artifacts.bin")
+    if not Path(bin_path).exists():
+        raise ElabError(
+            f"boot 产物缺失，请先 `elab build -p {boot_plan.name}`：{bin_path}")
+    md5 = hashlib.md5(Path(bin_path).read_bytes()).hexdigest()
+    ver = _fmt_version(boot_plan.version)
+    if not force and stamp and stamp.get("md5") == md5:
+        return {"action": "skip", "md5": md5, "version": ver, "bin": bin_path,
+                "reason": f"boot 冻结（v{ver} 指纹一致，上次烧录 "
+                          f"{stamp.get('flashed_at', '?')}）"}
+    reason = ("--reflash-boot 强制重烧" if force else
+              ("无烧录台账（首次/换板/手动擦除过 boot）" if not stamp else
+               "boot 产物已更新（指纹不一致）→ 随本次烧录带上"))
+    return {"action": "flash", "md5": md5, "version": ver, "bin": bin_path,
+            "reason": reason}
+
+
+def _boot_context(plan: Plan, *, force: bool = False, log=print) -> dict | None:
+    """C2 挂点：plan.boot_project 声明时解析 boot 工程并做冻结判定。
+
+    返回 ``{"plan": boot_plan, **decision}`` 或 None（未声明/跳过级联）。
+    """
+    if not plan.boot_project or not plan.flash_images:
+        if plan.boot_project and not plan.flash_images:
+            log("[elab] WARN 声明了 ota_layout.boot_project 但未声明 "
+                "flash.images → C2 boot 级联跳过（单镜像模式）")
+        return None
+    boot_plan = plan_for(plan.cfg, plan.boot_project)
+    d = boot_flash_decision(boot_plan, stamp=_stamp_load(_boot_stamp_path(plan)),
+                            force=force)
+    log(f"[elab] C2 boot 决策：{d['action']} —— {d['reason']}")
+    return {"plan": boot_plan, **d}
+
+
 def _salient(text: str) -> list[str]:
     """从 openocd 输出里挑出"证据行"（编程/校验/芯片 ID），滤掉刷屏噪音。"""
     out = []
@@ -70,7 +150,7 @@ def _salient(text: str) -> list[str]:
 
 
 def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print,
-          allow_missing_elf: bool = False) -> dict:
+          allow_missing_elf: bool = False, reflash_boot: bool = False) -> dict:
     """烧录。
 
     :param allow_missing_elf: **仅预览用**。默认 ``False``（真烧录时 ELF 不在就必须报错，
@@ -79,12 +159,24 @@ def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print
         就显示待执行的 openocd 命令行，故允许显式放开这一条 —— 用参数而不是
         "预览自己拼一遍命令"，是为了让命令构造**只有一个来源**。
 
+    :param reflash_boot: ★ C2/C3 组合工程：忽略 boot 烧录台账强制重烧 boot。
+
     双镜像模式（C33）：项目声明了 ``flash.images`` 时走 :func:`_flash_images`，
     一次 openocd 会话按声明顺序 program 全部镜像，最后统一 ``reset run``。
+    ★ C2 组合工程：plan.boot_project 声明时，boot 镜像是否进会话由
+    :func:`boot_flash_decision` 的台账判定决定（冻结 = boot 镜像被剔除）。
     """
+    boot_ctx = None
+    try:
+        boot_ctx = _boot_context(plan, force=reflash_boot, log=log)
+    except ElabError as e:
+        # dry-run 预览时 boot 可能还没 build —— 预览降级为展示声明镜像，
+        # 真跑时再 fail-fast（boot bin 缺失在 decision 里必报错）。
+        log(f"[elab] WARN C2 boot 决策失败：{e}")
+
     if plan.flash_images:
         return _flash_images(plan, dry_run=dry_run, verbose=verbose, log=log,
-                             allow_missing=allow_missing_elf)
+                             allow_missing=allow_missing_elf, boot_ctx=boot_ctx)
 
     elf = plan.elf
     if not elf or (not allow_missing_elf and not Path(elf).exists()):
@@ -101,7 +193,7 @@ def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print
 
     env = plan.host.build_env()
     proc = subprocess.run(argv, cwd=str(plan.cfg.root), env=env, text=True,
-                          capture_output=True, errors="replace")
+                          capture_output=True, errors="replace", **proc_kwargs())
     combined = (proc.stdout or "") + (proc.stderr or "")
     res["stdout"] = proc.stdout
     res["stderr"] = proc.stderr
@@ -122,8 +214,17 @@ def flash(plan: Plan, *, dry_run: bool = False, verbose: bool = False, log=print
     return res
 
 
+def _samefile(a: str, b: str) -> bool:
+    """路径等价判断（容忍 ${ELAB_ROOT} 与 ${work_dir} 两种写法指向同一文件；
+    文件不存在时 resolve() 走非严格模式，照样可比）。"""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
+
+
 def _flash_images(plan: Plan, *, dry_run: bool, verbose: bool, log,
-                  allow_missing: bool) -> dict:
+                  allow_missing: bool, boot_ctx: dict | None = None) -> dict:
     """多镜像烧录（C33）—— **命令构造的唯一来源**（预览与实跑共用本函数）。
 
     为什么是"一次会话串多个 -c"而不是"每镜像一次 openocd"：
@@ -138,10 +239,26 @@ def _flash_images(plan: Plan, *, dry_run: bool, verbose: bool, log,
         LMA 0x08004800 被向下对齐到 0x08004000，覆盖 Bootloader 尾部 2KB
         （业务工程 CMakeLists 注释实测实锤）；bin+显式地址不做向下对齐。
       - 收尾：``reset run`` + ``shutdown`` —— 留运行态（与 debug 同约定）。
+
+    ★ C2/C3 组合工程：``boot_ctx`` 由 :func:`_boot_context` 产出——
+      action=flash → boot 镜像（boot 工程 flash.images）进会话头部，
+      声明镜像里指向同一 boot bin 的条目去重；action=skip（冻结）→
+      从声明镜像中剔除 boot bin 条目，boot 字节在本次会话中零触碰。
     """
+    images_src: list[dict] = list(plan.flash_images)
+    if boot_ctx:
+        boot_bin = boot_ctx["bin"]
+        others = [i for i in images_src if not _samefile(i["path"], boot_bin)]
+        if boot_ctx["action"] == "flash":
+            images_src = list(boot_ctx["plan"].flash_images) + others
+        else:
+            images_src = others
+            log(f"[elab] C3 boot 冻结：本次会话不含 boot 镜像"
+                f"（v{boot_ctx.get('version', '?')}，字节级零触碰）")
+
     imgs: list[dict] = []
     cmds: list[str] = []
-    for img in plan.flash_images:
+    for img in images_src:
         path = to_fwd(img["path"])
         addr = img.get("address") or ""
         exists = Path(path).exists()
@@ -169,12 +286,16 @@ def _flash_images(plan: Plan, *, dry_run: bool, verbose: bool, log,
            "images": imgs, "argv": argv,
            "status": "dry-run" if dry_run else "pending",
            "elf_exists": Path(primary).exists() if primary else False}
+    if boot_ctx:
+        res["boot"] = {"project": boot_ctx["plan"].name,
+                       "action": boot_ctx["action"],
+                       "version": boot_ctx.get("version", "?")}
     if dry_run:
         return res
 
     env = plan.host.build_env()
     proc = subprocess.run(argv, cwd=str(plan.cfg.root), env=env, text=True,
-                          capture_output=True, errors="replace")
+                          capture_output=True, errors="replace", **proc_kwargs())
     combined = (proc.stdout or "") + (proc.stderr or "")
     res["stdout"] = proc.stdout
     res["stderr"] = proc.stderr
@@ -189,6 +310,15 @@ def _flash_images(plan: Plan, *, dry_run: bool, verbose: bool, log,
         log(f"[elab] ✓ 烧录完成：{names} → {plan.chip.get('debug', {}).get('device')}")
         for line in res["evidence"]:
             log(f"       {line}")
+        # ★ C2：boot 随本次会话烧成 → 更新台账（下次冻结）
+        if boot_ctx and boot_ctx["action"] == "flash":
+            _stamp_save(_boot_stamp_path(plan), {
+                "md5": boot_ctx["md5"],
+                "version": boot_ctx.get("version", "?"),
+                "bin": to_fwd(boot_ctx["bin"]),
+                "flashed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            log(f"[elab] ✓ boot 烧录台账已更新（v{boot_ctx.get('version', '?')}）")
     else:
         res["status"] = "failed"
         tail = "\n".join(combined.strip().splitlines()[-12:])
@@ -251,7 +381,8 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
 
     env = plan.host.build_env()
     srv = subprocess.Popen(server, cwd=str(plan.cfg.root), env=env,
-                           text=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+                           text=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                           **proc_kwargs())
     try:
         # ★ 端口占用事故（实测）：openocd 的 gdb server 绑 3333，而驾驶舱 HTTP
         #   服务默认端口恰好也是 3333 —— 端口被占时 openocd **静默退出**，
@@ -287,7 +418,7 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
             try:
                 r = subprocess.run(batch, cwd=str(plan.cfg.root), env=env,
                                    capture_output=True, text=True, errors="replace",
-                                   timeout=90)
+                                   timeout=90, **proc_kwargs())
             except subprocess.TimeoutExpired:
                 res["status"] = "timeout"
                 log("[elab] ✗ gdb 在 90s 内未跑到断点（可能未连上或程序未跑到 main）")
@@ -314,7 +445,7 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
 
         # mode == run：交互式
         log("[elab] 已连上；gdb 退出后 openocd 会被关闭。")
-        subprocess.run(gdb_cmd, cwd=str(plan.cfg.root), env=env)
+        subprocess.run(gdb_cmd, cwd=str(plan.cfg.root), env=env, **proc_kwargs())
         res["status"] = "ok"
         return res
     finally:

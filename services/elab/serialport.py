@@ -309,9 +309,10 @@ def restart_device(com: str, *, log=print) -> tuple[bool, str]:
     log(f"[serial] 尝试软复位 {com}（实例 {inst}）…")
     try:
         import subprocess
+        from ._winproc import proc_kwargs
         r = subprocess.run(["pnputil", "/restart-device", inst],
                            capture_output=True, text=True, timeout=30,
-                           errors="replace")
+                           errors="replace", **proc_kwargs())
     except FileNotFoundError:
         return False, "本机没有 pnputil，无法软复位（请拔插一次 DAP-Link）"
     except Exception as exc:                      # pragma: no cover

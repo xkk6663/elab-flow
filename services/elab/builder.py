@@ -18,10 +18,45 @@ import sys
 import time
 from pathlib import Path
 
+from ._winproc import proc_kwargs
 from .config import ElabError, to_fwd
-from .plan import Plan
+from .ota_layout import write_gen_file
+from .plan import Plan, plan_for
+from .version import alloc_build
 
 _IGNORE_DIRS = {".git"}
+
+
+# ── C1 组合工程：app 构建成功后自动级联构建 boot ─────────────────
+def build_with_boot(
+    plan: Plan,
+    *,
+    seen: set | None = None,
+    log=print,
+    **kwargs,
+) -> tuple[dict, dict | None]:
+    """★ C1（乐鑫式体验：build app 时 boot 自动出现）。
+
+    chips yaml ``ota_layout.boot_project`` 声明了 boot 工程时，app 构建成功
+    后自动级联构建它。boot 工程自身的 chip 若未声明 boot_project（约定如此）
+    → 天然防递归。
+
+    :param seen: 同一次 CLI 调用（如 ``elab build --all``）内已构建过的工程名
+                 集合——boot 与 app 同批构建时去重，避免 boot 被构建两次。
+    :return: (app_result, boot_result 或 None)
+    """
+    res = build_project(plan, log=log, **kwargs)
+    if res.get("status") != "ok" or not plan.boot_project:
+        return res, None
+    if seen is not None and plan.boot_project in seen:
+        return res, None          # 同批已构建过（--all 场景去重）
+    if seen is not None:
+        seen.add(plan.boot_project)
+    log(f"[elab] C1 级联：ota_layout.boot_project={plan.boot_project}"
+        " → 自动构建 boot 工程")
+    boot_plan = plan_for(plan.cfg, plan.boot_project)
+    boot_res = build_project(boot_plan, log=log, **kwargs)
+    return res, boot_res
 
 
 # ── 零改动保证：文件树快照 ────────────────────────────────────────
@@ -313,6 +348,18 @@ def build_project(
         shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # ★ OTA 布局单源化（方案 A/M1）：yaml 分区表 → gen 头，configure 前落盘
+    #   （-DELAB_OTA_LAYOUT_GEN 指向的就是这个路径，必须先于 configure 存在；
+    #    dry_run 分支在上面已 return —— 只读预演天然不写盘）。
+    #   ★ 版本注入（双槽方案 §9.1/.9.2）：projects yaml 的 semver + build 号
+    #     （真跑才分配、写入 .work/versions.json）同渲染进 gen 头 —— 版本与
+    #     分区表共用同一条 -include 管道。
+    if plan.ota_layout:
+        build_no = alloc_build(plan.cfg.root, plan.name) if plan.version else None
+        gen = write_gen_file(work_dir, plan.ota_layout, plan.chip.get("id", ""),
+                             version=plan.version, build_no=build_no)
+        log(f"[elab] ota_layout_gen.h 已生成（源 chips/*.yaml ota_layout）→ {gen}")
+
     # 零改动保证：构建前对业务工程做快照
     guard = plan.proj.get("guard") or {}
     snap_root = plan.proj.get("root")
@@ -439,12 +486,13 @@ def build_project(
 
 def _run(cmd, env, cwd, verbose):
     """执行子进程；verbose 时实时透传，否则捕获。"""
+    win = proc_kwargs()
     if verbose:
-        proc = subprocess.run(cmd, cwd=str(cwd), env=env, text=True)
+        proc = subprocess.run(cmd, cwd=str(cwd), env=env, text=True, **win)
         return proc.returncode, "", ""
     proc = subprocess.run(
         cmd, cwd=str(cwd), env=env, capture_output=True, text=True,
-        errors="replace",
+        errors="replace", **win,
     )
     return proc.returncode, proc.stdout, proc.stderr
 

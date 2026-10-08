@@ -55,7 +55,17 @@ else()
     set(_elab_fpu_flags "-mfloat-abi=${ELAB_FPU}")
 endif()
 
-set(_elab_target_flags "-mcpu=${ELAB_CPU} ${_elab_fpu_flags}")
+# ★ N7：FPU 类型（fpv4-sp-d16 等）—— 由 chips/*.yaml core.mfpu 经 plan.py 下传
+#   （-DELAB_MFPU）。未下传时不产出 -mfpu：M3 等无 FPU 内核、以及依赖 GCC 按
+#   -mcpu 选默认 FPU 的旧接入行为完全不变。显式下传才能被 doctor 的
+#   expect_flags 拿 compile_commands.json 校验到真实参数。
+if(DEFINED ELAB_MFPU AND NOT ELAB_MFPU STREQUAL "")
+    set(_elab_mfpu_flag "-mfpu=${ELAB_MFPU}")
+else()
+    set(_elab_mfpu_flag "")
+endif()
+
+set(_elab_target_flags "-mcpu=${ELAB_CPU} ${_elab_fpu_flags} ${_elab_mfpu_flag}")
 set(CMAKE_C_FLAGS          "${_elab_target_flags} -ffunction-sections -fdata-sections -Wall -Wextra -std=gnu11")
 set(CMAKE_ASM_FLAGS        "${_elab_target_flags} -x assembler-with-cpp")
 set(CMAKE_C_FLAGS_DEBUG    "-O0 -g3")

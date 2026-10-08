@@ -26,7 +26,16 @@ else()
     set(_elab_fpu_flags "-mfloat-abi=${ELAB_FPU}")
     set(_elab_fpu_arg "-mfloat-abi=${ELAB_FPU}")
 endif()
-set(_elab_flags "-mcpu=${ELAB_CPU} ${_elab_fpu_flags}")
+# ★ N7：FPU 类型（与 toolchains/gcc.cmake 同逻辑）—— chips/*.yaml core.mfpu
+#   经 plan.py 下传；未下传不产出，向后兼容。
+if(DEFINED ELAB_MFPU AND NOT ELAB_MFPU STREQUAL "")
+    set(_elab_mfpu_flag "-mfpu=${ELAB_MFPU}")
+    set(_elab_mfpu_arg "-mfpu=${ELAB_MFPU}")
+else()
+    set(_elab_mfpu_flag "")
+    set(_elab_mfpu_arg "")
+endif()
+set(_elab_flags "-mcpu=${ELAB_CPU} ${_elab_fpu_flags} ${_elab_mfpu_flag}")
 
 # 覆盖 flags（目录作用域；目标在此之后创建即继承）
 set(CMAKE_C_FLAGS         "${_elab_flags} -ffunction-sections -fdata-sections -Wall -Wextra -std=gnu11")
@@ -112,4 +121,20 @@ endif()
 # 目录级选项，确保后续 add_subdirectory 也继承
 # ★ 实测坑：不能写 add_compile_options(${_elab_flags})——整串会被当成【单个带引号的参数】，
 #   gcc 报 "unrecognized -mcpu target: cortex-m4 -mfloat-abi=soft"。必须拆成独立参数。
-add_compile_options(-mcpu=${ELAB_CPU} ${_elab_fpu_arg})
+add_compile_options(-mcpu=${ELAB_CPU} ${_elab_fpu_arg} ${_elab_mfpu_arg})
+
+# ── ★ OTA 布局单源化（方案 A/M1，2026-10-08）─────────────────────
+# chips/*.yaml 的 ota_layout 节 → builder 在 configure 前生成的 ota_layout_gen.h，
+# 经 -include 强制【每个 C 翻译单元最先】包含。port 头 ota_layout_*.h 的同名宏
+# 带 #ifndef 守卫 → 生成的值赢；芯片 yaml 未声明 ota_layout 时无此变量 →
+# 本段整体静默，port 兜底值生效（零回归）。
+# ★ 只挂 C/C++：force-include 进启动汇编（assembler-with-cpp）会把 C 声明喂给
+#   汇编器 —— 布局头只被 C 代码消费，ASM 不需要。
+# ★ 写进 C_FLAGS 字符串而不是 add_compile_options：本文件后文对 B 类有
+#   C_FLAGS 抢回重置，此处追加在最末，顺序天然正确；路径来自 elab 自管
+#   work_dir（.work/<proj>/elab_gen/），无空格，无需引号。
+if(DEFINED ELAB_OTA_LAYOUT_GEN AND NOT ELAB_OTA_LAYOUT_GEN STREQUAL "")
+    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -include ${ELAB_OTA_LAYOUT_GEN}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${ELAB_OTA_LAYOUT_GEN}")
+    message(STATUS "[elab] OTA 布局 gen 头强制包含：${ELAB_OTA_LAYOUT_GEN}")
+endif()

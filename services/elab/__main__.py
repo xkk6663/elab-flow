@@ -65,6 +65,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-p", "--project", required=True, help="项目名")
     p.add_argument("--dry-run", action="store_true", help="只打印命令")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--reflash-boot", action="store_true",
+                   help="★ C2/C3：忽略 boot 烧录台账，强制随本次烧录重烧 boot")
 
     p = sub.add_parser("debug", help="openocd + gdb 调试")
     _add_common(p)
@@ -296,10 +298,12 @@ def cmd_build(cfg: Config, args) -> int:
 
     results = []
     silent = (lambda *a, **k: None) if args.json else print
+    seen: set = set()          # ★ C1：同批去重（--all 时 boot 只构建一次）
     for name in names:
         plan = plan_for(cfg, name)
-        res = builder.build_project(
+        res, boot_res = builder.build_with_boot(
             plan,
+            seen=seen,
             clean=args.clean,
             jobs=args.jobs,
             verbose=args.verbose,
@@ -308,12 +312,17 @@ def cmd_build(cfg: Config, args) -> int:
             log=silent,
         )
         results.append(res)
+        if boot_res is not None:
+            results.append(boot_res)     # boot 结果独立进报告（CI 收集产物）
         if not args.json:
             if args.dry_run:
                 print(f"[elab] 计划 {name}:")
                 print("  " + plan.shell_preview())
             else:
                 print(builder.render_summary(res))
+                if boot_res is not None:
+                    print("[elab] ── C1 级联 boot ──")
+                    print(builder.render_summary(boot_res))
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -324,7 +333,9 @@ def cmd_build(cfg: Config, args) -> int:
 def cmd_flash(cfg: Config, args) -> int:
     plan = plan_for(cfg, args.project)
     silent = (lambda *a, **k: None) if args.json else print
-    res = flash_mod.flash(plan, dry_run=args.dry_run, verbose=args.verbose, log=silent)
+    res = flash_mod.flash(plan, dry_run=args.dry_run, verbose=args.verbose,
+                          log=silent,
+                          reflash_boot=getattr(args, "reflash_boot", False))
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     elif args.dry_run:
@@ -459,10 +470,16 @@ def cmd_loop(cfg: Config, args) -> int:
     # ② build
     step(2, "build —— YAML 驱动构建 + 统一产物")
     plan = plan_for(cfg, name)
-    res = builder.build_project(plan, clean=args.clean, verbose=args.verbose)
+    res, boot_res = builder.build_with_boot(plan, clean=args.clean,
+                                            verbose=args.verbose)
     print(builder.render_summary(res))
-    steps.append(("build", res["status"] == "ok"))
-    if res["status"] != "ok":
+    if boot_res is not None:
+        print("[elab] ── C1 级联 boot ──")
+        print(builder.render_summary(boot_res))
+    steps.append(("build", res["status"] == "ok"
+                  and (boot_res is None or boot_res["status"] == "ok")))
+    if res["status"] != "ok" or (boot_res is not None
+                                 and boot_res["status"] != "ok"):
         print("\n[elab] ✗ 构建失败，闭环中止")
         return 1
 

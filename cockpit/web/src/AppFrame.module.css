@@ -52,6 +52,16 @@
   display: flex;
 }
 
+/* ★ 中列唯一的子项（StageRail 根）必须吃满主轴：
+   .center 是横向 flex，子项默认 shrink-to-fit —— 内容多宽中列就多宽，
+   剩余空间全变空白（用户截图"中间间隔很大/断层"的真正根因）。
+   证据轨没这个问题：它在 aside.right（纵向 flex）里，交叉轴自动 stretch。 */
+.center > * {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+}
+
 /* ── 拖拽条 ── */
 .handle {
   flex: 0 0 6px;
@@ -78,17 +88,21 @@
 .strip {
   width: 26px;
   border: 0;
-  padding: 0;
+  padding: var(--elab-space-2) 0;
   background: var(--elab-bg-sunken);
   color: var(--elab-fg-muted);
   cursor: pointer;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: var(--elab-space-2);
 }
 .strip:hover {
   background: var(--elab-bg-hover);
   color: var(--elab-fg-primary);
+}
+.stripIcon {
+  flex: 0 0 auto;
 }
 .stripLeft {
   border-right: 1px solid var(--elab-border);
@@ -101,6 +115,9 @@
   font-size: var(--elab-fs-xs);
   letter-spacing: 0.1em;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-height: 60%;
 }
 
 .drawerBar {

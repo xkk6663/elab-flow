@@ -20,7 +20,9 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from ._winproc import proc_kwargs
 from .config import Config, ElabError, Host, to_fwd
+from . import ota_layout as ota_layout
 from .plan import Plan, plan_for
 
 OK, WARN, ERROR, INFO = "ok", "warn", "error", "info"
@@ -125,7 +127,8 @@ def check_host(cfg: Config, rep: Report, host: Host):
     if declared and Path(host.cc).exists():
         try:
             out = subprocess.run(
-                [host.cc, "--version"], capture_output=True, text=True, timeout=20
+                [host.cc, "--version"], capture_output=True, text=True, timeout=20,
+                **proc_kwargs(),
             ).stdout
             m = re.search(r"(\d+\.\d+\.\d+)", out)
             actual = m.group(1) if m else "?"
@@ -277,6 +280,24 @@ def check_drift(rep: Report, plan: Plan):
          惯例——boot/app 不同时运行，不参与互斥检查）；
       ③ bin 镜像的 address 必须等于其 ld 的 flash 区起点（烧错位 = 跑飞）。
     """
+    # ★ OTA 分区表三方对账（方案 A/M1）：chips yaml ota_layout ↔
+    #   flash.images 烧录地址 ↔ 各镜像 ld 的 FLASH ORIGIN。
+    #   刻意放在 expect_memory 早退之前 —— 它只依赖 ota_layout 自身，
+    #   不该因为芯片没写 verify.expect_memory 而被跳过。
+    if plan.ota_layout:
+        phys = (plan.chip.get("memory") or {}).get("flash") or None
+        physical = None
+        if isinstance(phys, dict) and phys.get("origin") is not None and phys.get("length") is not None:
+            physical = (_parse_num(str(phys["origin"])), _parse_num(str(phys["length"])))
+        problems = ota_layout_drift(plan.ota_layout, plan.flash_images, physical)
+        if problems:
+            rep.fail(f"drift.{plan.name}.ota-layout", "OTA 分区表漂移：" + "; ".join(problems))
+        else:
+            rep.ok(
+                f"drift.{plan.name}.ota-layout",
+                f"ota_layout ↔ 烧录地址 ↔ ld 三方一致（{len(plan.flash_images)} 镜像）",
+            )
+
     chip = plan.chip
     verify = chip.get("verify") or {}
     expect = verify.get("expect_memory")
@@ -318,6 +339,77 @@ def _chip_physical(plan: Plan) -> dict:
             else:
                 out[k] = (None, _parse_num(str(v)))
     return out
+
+
+def ota_layout_drift(layout: dict, flash_images: list[dict],
+                     physical: tuple[int, int] | None) -> list[str]:
+    """OTA 分区表三方对账（★ 方案 A/M1，纯函数；返回问题列表，空 = 一致）。
+
+    ① 每个分区 ⊆ 芯片物理 flash；
+    ② flash.images 每个带地址的镜像，地址必须命中【恰好一个】分区起点；
+    ③ 命中分区的起点必须与该镜像 ld 的 FLASH ORIGIN 一致（跨文件漂移）。
+    分区互斥在 plan 归一化（normalize_ota_layout）已 fail-fast，此处不重复。
+    """
+    problems: list[str] = []
+    regions = {k: (layout[k]["addr"], layout[k]["size"]) for k in ota_layout.REGION_KEYS}
+
+    # ★ 双槽校验（方案 §3.1）：槽互斥/覆盖性已在 plan 归一化 fail-fast，
+    #   这里补"槽 ⊆ 物理 flash"与"出厂 app 镜像必须落槽 A 起点"。
+    slots = layout.get("slots") or []
+    if slots:
+        for i, s in enumerate(slots):
+            if physical is not None:
+                p_origin, p_len = physical
+                if not (p_origin <= s["addr"] and s["addr"] + s["size"] <= p_origin + p_len):
+                    problems.append(
+                        f"slots[{i}] {s['addr']:#x}+{s['size']:#x} 越界物理 flash "
+                        f"{p_origin:#x}+{p_len:#x}"
+                    )
+
+    if physical is not None:
+        p_origin, p_len = physical
+        for key, (addr, size) in regions.items():
+            if not (p_origin <= addr and addr + size <= p_origin + p_len):
+                problems.append(
+                    f"{key} {addr:#x}+{size:#x} 越界物理 flash {p_origin:#x}+{p_len:#x}"
+                )
+
+    for idx, img in enumerate(flash_images):
+        raw = img.get("address")
+        if not raw:
+            continue  # elf 无显式地址 → 自带地址，无从对账（合法）
+        addr = int(raw, 16) if isinstance(raw, str) else int(raw)
+        hit = [k for k, (ra, _rs) in regions.items() if ra == addr]
+        if len(hit) != 1:
+            problems.append(
+                f"flash.images[{idx}] 地址 {addr:#x} 未命中任何分区起点"
+                f"（命中 {'/'.join(hit) if hit else '无'}）"
+            )
+            continue
+        key = hit[0]
+        # ★ 双槽（§3.1）：app 镜像（命中 app 区起点 == 槽A）必须是烧槽 A——出厂固件
+        #   永远落 ACTIVE 槽；槽 B 只由 boot 的升级流程写入，flash.images 不许碰。
+        if key == "app" and slots and addr != slots[0]["addr"]:
+            problems.append(
+                f"flash.images[{idx}] 地址 {addr:#x} ≠ 槽A起点 {slots[0]['addr']:#x}"
+                "（出厂镜像必须烧槽 A）"
+            )
+        ld = img.get("ld")
+        if not ld:
+            continue
+        if not Path(ld).exists():
+            problems.append(f"flash.images[{idx}] ld 不可读：{ld}")
+            continue
+        regs = parse_ld_memory(ld)
+        flash_key = next((r for r in regs if "FLASH" in r.upper()), None) if regs else None
+        if flash_key is None:
+            problems.append(f"flash.images[{idx}] 未能从 {Path(ld).name} 解析 FLASH 段")
+        elif regs[flash_key][0] != addr:
+            problems.append(
+                f"flash.images[{idx}]（{Path(ld).name}）ld FLASH ORIGIN "
+                f"{regs[flash_key][0]:#x} ≠ 命中分区 {key} 起点 {addr:#x}"
+            )
+    return problems
 
 
 def _check_drift_images(rep: Report, plan: Plan, expect):
@@ -432,7 +524,7 @@ def deep_check(rep: Report, plan: Plan) -> dict:
     try:
         proc = subprocess.run(
             cmd, cwd=str(plan.cfg.root), env=env,
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=300, **proc_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         rep.fail(f"deep.{plan.name}", f"configure 无法启动：{exc}")

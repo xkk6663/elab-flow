@@ -7,6 +7,8 @@
 id: at32f421g8
 vendor: artery
 family: at32f421
+platform: at32                 # ★ 平台归属：同一 platform 的芯片聚合生成一份平台 skill
+                               #   （skills/artery/at32/SKILL.md，约束：平台化 skill 命名）
 part: AT32F421G8U7            # 实测编译宏 -DAT32F421G8U7
 package: QFN28
 frequency: 120MHz

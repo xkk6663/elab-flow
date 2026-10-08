@@ -1,0 +1,76 @@
+# chips/st/stm32f411ceux.yaml —— 芯片参数层（L1）
+# 值来源：STM32F411CEU6 工程实测（examples/STM32F411CEU6：
+#         cmake/stm32cubemx/CMakeLists.txt、cmake/gcc-arm-none-eabi.cmake、
+#         STM32F411XX_FLASH.ld、411.ioc、build/Debug/compile_commands.json）
+
+id: stm32f411ceux
+vendor: st
+family: stm32f4
+platform: stm32                # ★ 平台归属：同一 platform 的芯片聚合生成一份平台 skill
+                               #   （skills/st/stm32/SKILL.md，约束：平台化 skill 命名）
+part: STM32F411xE              # 实测编译宏（MX_Defines_Syms，族级宏，覆盖 C/D/E 容量）
+                               # 具体封装 411.ioc: Mcu.CPN=STM32F411CEU6（UFQFPN48）
+core_name: Cortex-M4F
+
+core:
+  arch: arm
+  cpu: cortex-m4               # → -mcpu=cortex-m4
+  fpu: hard                    # → -mfloat-abi=hard（★ M4F 带 FPU，FreeRTOS 用 ARM_CM4F port）
+  mfpu: fpv4-sp-d16            # → -mfpu=fpv4-sp-d16（工程 TARGET_FLAGS 的 E1 实测值；
+                               #    不写时 GCC 会按 -mcpu 自动选同一值，但显式下传才可校验）
+  std: gnu11
+
+compiler_defines:
+  - STM32F411xE
+  - USE_HAL_DRIVER
+
+memory:
+  # 以工程自带 ld 的 MEMORY 段为准（STM32F411XX_FLASH.ld line 56-60）
+  flash: { origin: 0x08000000, length: 0x80000 }   # 512K
+  ram:   { origin: 0x20000000, length: 0x20000 }   # 128K
+
+# ── OTA 分区表（★ 方案 A/M1：唯一事实源，2026-10-08）─────────────
+# 构建期由 services/elab/ota_layout.py 生成 ota_layout_gen.h（.work/<proj>/elab_gen/），
+# inject.cmake 经 -include 强制最先包含 → port 头 ota_layout_f411.h 的同名宏
+# （带 #ifndef 兜底）被生成的值覆盖。doctor.deep 对账三方：
+# 本表 ↔ projects/*.yaml flash.images 烧录地址 ↔ 各镜像 ld 的 FLASH ORIGIN。
+# flash_base 缺省=boot.addr；store_slots 缺省=state.size/4（此处 16K/4=4096，与
+# port 头逐值一致——改分区大小即自动改 slot 数，不再需要手算两处）。
+ota_layout:
+  boot:   { addr: 0x08000000, size: 0x8000 }    # S0+S1（16K×2）
+  state:  { addr: 0x08008000, size: 0x4000 }    # S2 独立扇区，防互擦
+  offset: { addr: 0x0800C000, size: 0x4000 }    # S3 独立扇区
+  app:    { addr: 0x08010000, size: 0x70000 }   # S4=64K + S5~S7=128K×3
+  # ★ C1 组合工程：声明 boot 工程 → elab build -p f411 自动级联构建、
+  #   elab flash 按台账决定 boot 镜像是否进会话（C3 冻结策略）。
+  boot_project: f411_boot
+  slots:                                        # ★ 双槽模式（A/B Bank，方案 §3）
+    - { addr: 0x08010000, size: 0x30000 }       # 槽 A（S4+S5，192K，出厂 ACTIVE）
+    - { addr: 0x08040000, size: 0x40000 }       # 槽 B（S6+S7，256K，INACTIVE）
+
+linker:
+  owner: project               # 与 F103/AT32 同策略（用户已确认：链接脚本归工程）
+  filename: STM32F411XX_FLASH.ld
+
+# ── 调试 ──────────────────────────────────────────────────────────
+# 探针沿用本机 DAP-Link（probe: atlink），仅换 target cfg。
+debug:
+  openocd_target: target/stm32f4x.cfg     # 实测存在于 openocd scripts（V2.0.9）
+  svd: STM32F411.svd                      # 本机：stm32f4xx_dfp/1.1.0/SVD/（已加进 elab.host.yaml: svd_roots）
+  device: STM32F411CEUx
+
+verify:
+  expect_defines: [STM32F411xE, USE_HAL_DRIVER]
+  expect_flags:   ["-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16", "-mfloat-abi=hard"]
+  expect_memory:  { flash: 0x80000, ram: 0x20000 }
+
+# ── 芯片/工程专属坑位（生成平台 skill 的内容源）──────────────────
+pitfalls:
+  - "本工程是 **A 类**：工具链由 preset 的 `toolchainFile` 指定（命令行级）。elab 用 -DCMAKE_TOOLCHAIN_FILE 接管后，工程自带工具链文件**根本不会被加载**。"
+  - "**自述变量丢失**：工程自带工具链里 `set(TOOLCHAIN_LINK_LIBRARIES \"m\")` 被 `cmake/stm32cubemx/CMakeLists.txt` 的 `MX_LINK_LIBS` 引用；接管后该变量 undefined，libm 不会参与链接。inject.cmake 必须补回（与 F103 同款坑）。"
+  - "**`.elf` 后缀约定**：工程自带工具链设了 CMAKE_EXECUTABLE_SUFFIX_*=\\\".elf\\\"，接管后丢失 → 产物变无后缀 `411`。通用 `toolchains/gcc.cmake` 已统一带该约定（约束 C5）。"
+  - "**M4F hard float**：`fpu: hard` + `mfpu: fpv4-sp-d16` 两个值都要下传；只写 `-mfloat-abi=hard` 虽能靠 GCC 默认 FPU 通过，但无法被 doctor 的 expect_flags 校验到真实参数。"
+  - "**嵌套副本**：examples/STM32F411CEU6/411/ 是同一工程的完整嵌套副本（含自己的 build/）。elab 只认**外层** CMakeLists.txt；guard 快照会连副本一起扫，切勿在副本里改文件造成误报。"
+  - "**ioc 的 CPN vs 编译宏**：411.ioc 的 Mcu.CPN=STM32F411CEU6 是封装具体型号，编译宏 STM32F411xE 是族级宏 —— 两者本就不同，以编译宏（E1）为准。"
+  - "**工程根 build/ 有 IDE 旧构建**（STM32Cube bundles 14.3.1 产物 411.elf）：elab 一律在 .work/<project>/ 独立构建，**不复用也不清理**业务工程的 build/。"
+  - "**printf 需要 __io_putchar 强定义**：CubeMX 生成的 syscalls.c 只有 weak 声明，无定义时 printf 的 _write() 会调到地址 0（跳飞）。本工程已在 usart.c USER CODE 区补了带函数体的定义 + freertos.c 心跳打印。"

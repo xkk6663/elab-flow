@@ -5,9 +5,45 @@
 
 ---
 
-## [Unreleased]
+## [V2.0.0] — 2026-10-08（OTA 平台化 · 双槽 A/B Bank · 组合工程）
 
-### 新增 —— OTA 双镜像烧录（约束 C33）
+V1.0.0 交付的是"闭环工作链"（build / flash / debug / monitor / CI / 事件流 / 驾驶舱）；
+**V2.0.0 在其上把 OTA 从"单点能力"升级为"平台能力"**，并以 STM32F411CEU6 完成
+全链路实板验收：
+
+- **OTA 组件化**（`components/ota`）：`core/` 场景层芯片无关、`port/<platform>/`
+  平台层（flash HAL / Jump / 按键 / 复位）—— boot 侧 `OtaBootFlow`、APP 侧
+  `OtaAppHook`（串口扫 `!` 复位进 boot）。参考实现 `examples/STM32F411CEU6`（APP）
+  与 `examples/F411CEU6_BOOT`（boot），含上位机 CLI 与驾驶舱工具页可视化。
+- **双槽 A/B Bank + 坏固件自动回滚**：bank 记录 append-only（20B/条 + CRC32，
+  存状态扇区上半段）；升级完成后 trial 试运行（**先减并落盘再跳**，3 次上电耗尽
+  → `=== ROLLBACK ===` 回老槽）；APP 心跳第 3 次 `OTA_Confirm()` 晋级（幂等）；
+  metadata `0x02` 防回滚（设备版本 ≥ 固件版本拒收）；`0x17/0x25` 版本查询
+  （自迭代判据）。**实弹四件套真机全绿**：正常升级 / 坏固件回滚（CRC 合法但
+  Reset 向量劫持 → 3 周期挂死 → 自动回滚 → 老固件心跳恢复）/ 版本决策同版 skip /
+  槽位交替（openocd 直读 bank 记录：active 0→1→0）。实弹还抓出并修复
+  **EraseRange 双语义潜伏 bug**（向上对齐误用于整片擦除 → S4 含 Reset 向量永不擦
+  → 0xFFFFFFFF 劫持=按位与空操作 → 坏固件"复活"；新增 `EraseRangeFull` 向下对齐）。
+- **组合工程（约束 C35）**：chips yaml 一字段 `ota_layout.boot_project` ——
+  `elab build -p f411` 自动**级联构建** boot（C1）；boot 烧录走 **md5 指纹台账**
+  （`--reflash-boot` 强制），日常 app 迭代 boot **字节级零触碰**（C2/C3 冻结策略）；
+  驾驶舱工程轨把 boot 子工程**嵌在宿主卡正下方**（缩进 + 连接线 + 可收起披露组）
+  并显示 OTA 双槽与冻结状态（C4）。
+- **分区表单一事实源**：`chips/*.yaml` 的 `ota_layout:` 节 → 构建期生成
+  `ota_layout_gen.h` 经 `-include` 强制注入（M1/方案 A）→ `doctor --deep` 三方
+  对账（yaml 分区 ↔ 烧录地址 ↔ ld ORIGIN）；`ELAB_MFPU` 下传 `-mfpu`
+  （Cortex-M4F 硬浮点，f411 实测）。
+- **skill 平台化**：per-chip SKILL.md **淘汰**，改为平台聚合
+  （`skills/st/stm32`、`skills/artery/at32`），具体型号作为平台条目——
+  新增同族芯片不再新写 skill。
+- **驾驶舱 UI 重构**：工作区注册表 `workspaces.ts` 成为右列**单一事实源**
+  （加 Tab/加工具零散改动归零）；工具页**可换行启动按钮行**；默认端口
+  3333→**8333**（C34，避开 openocd gdb server 3333）。
+- 质量门：单测 151→**209**（+boot 组合 16 例、ota_layout、flash.images 20 例），
+  集成 37/37；五工程（AT32×2 / STM32F103 / F411 app+boot）全绿，
+  **STM32 上板烧录/调试/OTA 全链路实板验证**（V1.0 已知限制清零）。
+
+### OTA 双镜像烧录（约束 C33）
 
 - **`projects/*.yaml` 新增 `flash.images` 节**：声明 `{path, format: elf|bin,
   address?, ld?}` 烧录序列 —— 一次 openocd 会话按序 program 全部镜像，末尾
@@ -48,7 +84,9 @@
 ### 测试
 
 - 新增 `tests/test_flash_images.py` 20 例（plan 校验 / 双镜像命令构造 / 镜像级
-  对账 / putchar 探测）；全量回归 171/171 绿。
+  对账 / putchar 探测）；新增 `tests/test_boot_combo.py` 16 例（boot 组合工程
+  resolve / 冻结决策 / 台账与 _samefile）与 `tests/test_ota_layout.py`（分区表
+  下传与对账）；全量回归 **209 单测 + 37 集成** 全绿。
 
 ---
 

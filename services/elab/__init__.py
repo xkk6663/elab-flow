@@ -6,7 +6,7 @@
 import sys as _sys
 
 __all__ = ["__version__"]
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # ── stdout/stderr 编码守卫（真机抓出的坑，见 cockpit 启动器事故）──────────
 #

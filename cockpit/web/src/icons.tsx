@@ -147,3 +147,19 @@ export const IconSearch = (p: P) => (
     <path d="M10.2 10.2l3.2 3.2" />
   </svg>
 );
+
+/** 左列收起（双 chevron 朝左，feather chevrons-left 同形） */
+export const IconCollapseLeft = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M7.5 4 3.5 8l4 4" />
+    <path d="M12.5 4 8.5 8l4 4" />
+  </svg>
+);
+
+/** 左列展开（双 chevron 朝右，feather chevrons-right 同形） */
+export const IconExpandRight = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M3.5 4l4 4-4 4" />
+    <path d="M8.5 4l4 4-4 4" />
+  </svg>
+);

@@ -1,0 +1,244 @@
+# projects/f411.yaml —— 由 `elab adapt` 确定性生成；已人工接管（手改后 adapt 不再覆盖）
+# 本文件不含时间戳：同一工程重复生成必得同样内容，便于 --check 与 CI 守卫比对。
+# 要改芯片参数请改 chips/*.yaml；要改工程请改工程本身，本文件只管「怎么接进来」。
+
+name: f411
+root: ${ELAB_ROOT}/examples/STM32F411CEU6
+chip: st/stm32f411ceux
+archetype: A
+version: "0.2.0"     # ★ 双槽方案 §9.1：major/minor 人控，patch 由 elab release 自动 bump
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${ELAB_ROOT}/.work/f411
+  generator: Ninja
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake
+  linker_script:   ${root}/STM32F411_APP.ld    # OTA APP 布局：0x08010000 / 448K
+  build_type: Debug
+  project_name: 411
+  uses_freertos: true            # 信息性：工程把 FreeRTOS 编成 OBJECT 库
+
+artifacts:
+  elf: ${work_dir}/411.elf
+  hex: ${work_dir}/411.hex
+  bin: ${work_dir}/411.bin
+  map: ${work_dir}/411.map
+
+# ★ C33 OTA 双镜像（M3）：boot@0x08000000(32K) + app@0x08010000(448K)。
+#   bin 必须带显式地址（M2 教训：不带地址烧录会向下擦覆盖 Bootloader 尾部）。
+flash:
+  images:
+    - path: ${ELAB_ROOT}/.work/f411_boot/f411_boot.bin
+      format: bin
+      address: "0x08000000"
+      ld: ${ELAB_ROOT}/examples/F411CEU6_BOOT/BOOT.ld
+    - path: ${work_dir}/411.bin
+      format: bin
+      address: "0x08010000"
+      ld: ${root}/STM32F411_APP.ld
+
+debug:
+  probe: atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+guard:
+  untouched: true
+  snapshot: true
+  snapshot_root: ${root}
+
+# ── 项目声明工具（通用机制：驾驶舱"工具"按钮 → elab run --steps tool:<name>）──
+# 命令与业务语义全部留在本项目 YAML；框架只做模板替换 + 逐行事件化。
+# ★ M5 异常注入三件套：每个工具 = 独立工作区（前端由 workspaces 注册表动态生成）。
+tools:
+  ota:
+    label: OTA 升级
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      # ★ 双槽 §9：gen 头版本随 0x02 元数据下发（boot 记入 bank 记录 + 防回滚）
+      - "--fw-version-gen"
+      - "${work_dir}/elab_gen/ota_layout_gen.h"
+      - "--emit-events"
+      - "${runs_dir}"
+
+  # ★ 双槽 §9.3 版本自迭代：0x17 查询设备版本 → 设备 >= 固件 → 跳过（无人值守判据）
+  ota-check:
+    label: OTA·版本检查
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      - "--fw-version-gen"
+      - "${work_dir}/elab_gen/ota_layout_gen.h"
+      - "--check"
+      - "--emit-events"
+      - "${runs_dir}"
+
+  # ★ 双槽 M4-② 坏固件回滚：Reset 向量改 0xFFFFFFFF（CRC 重算）→ 试运行挂死
+  #   → openocd 周期复位 trial 递减 → === ROLLBACK === → 老固件心跳恢复
+  ota-badfw:
+    label: OTA·坏固件回滚
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      - "--fw-version-gen"
+      - "${work_dir}/elab_gen/ota_layout_gen.h"
+      - "--hijack-vector"
+      - "--listen"
+      - "6"
+      - "--emit-events"
+      - "${runs_dir}"
+
+  # M5.1 坏帧注入：帧 3 的 CRC 首发破坏 → boot NAK(STATUS=1) → 主机重传 → SUCCESS
+  ota-corrupt:
+    label: OTA·坏帧重传
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      - "--corrupt-frame"
+      - "2"
+      - "--emit-events"
+      - "${runs_dir}"
+
+  # M5.2 断点续传窗口：限速传输（约 20s）→ 中途拔电 → 重插后跑「OTA 升级」→ 断点续传
+  ota-throttle:
+    label: OTA·限速(拔电窗口)
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      - "--throttle"
+      - "0.06"
+      - "--emit-events"
+      - "${runs_dir}"
+
+  # M5.3 CRC_FAIL 恢复：截断注入 → boot 判 CRC_FAIL → '!' 重升 → 全量重传 → SUCCESS
+  ota-crcfail:
+    label: OTA·CRC_FAIL恢复
+    cwd: "C:/Users/xiao1/Desktop/STM32-OTA-QT/iap_host_tool"
+    env:
+      IAP_PROFILE: F411
+      PYTHONUTF8: "1"
+    cmd:
+      - "C:/Users/xiao1/AppData/Local/Programs/Python/Python312/python.exe"
+      - "-u"
+      - "panels/ota/cli_flash.py"
+      - "--port"
+      - "${serial_port}"
+      - "--firmware"
+      - "${work_dir}/411.bin"
+      - "--truncate"
+      - "20000"
+      - "--crcfail-test"
+      - "--emit-events"
+      - "${runs_dir}"
+
+# ── 串口闭环判据（docs/技术方案_闭环驾驶舱.md §16）───────────────
+serial:
+  port: auto        # 自动选口：会跳过蓝牙虚拟口（本机 COM3-8 均为 BthModem）
+
+# 固件探测到输出能力（见 provenance.stdout），故给出**真实判据** —— 闭环可被机器判定：
+#   close_on 命中任意一条 → ok；fail_on 优先于 close_on；都没中且超时 → inconclusive。
+#   pattern 逐行匹配，命中行会原文带进事件作证据。
+# ★ ^\[(boot|alive)\] 是 elab 约定的「存活关键字」；固件换关键字请同步改这里。
+monitor:
+  close_on:
+    - { kind: regex, pattern: "^\\[(boot|alive)\\]", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "HardFault|Hard Fault|assert|PANIC" }
+  idle_timeout_s: 30
+
+# ── 证据链 ───────────────────────────────────────────────────────
+provenance:
+  vendor:
+    value: "st（stm32cubemx）"
+    level: E4          # 结构约定
+    evidence: "CMakeLists.txt: add_subdirectory(cmake/stm32cubemx)"
+  archetype:
+    value: "A"
+    level: E4          # 结构约定
+    evidence: "CMakePresets.json: toolchainFile（命令行级，接管后不再加载）"
+  project_name:
+    value: "411"
+    level: E1          # 编译事实
+    evidence: "CMakeLists.txt: set(CMAKE_PROJECT_NAME 411)"
+  toolchain_cmake:
+    value: "cmake/gcc-arm-none-eabi.cmake"
+    level: E4          # 结构约定
+    evidence: "CMakePresets.json: toolchainFile = cmake/gcc-arm-none-eabi.cmake"
+  linker_script:
+    value: "STM32F411XX_FLASH.ld"
+    level: E3          # 链接事实
+    evidence: "工具链文件: -T STM32F411XX_FLASH.ld"
+  compile_flags:
+    value: "-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard"
+    level: E1          # 编译事实
+    evidence: "工具链文件: TARGET_FLAGS"
+  chip_macro:
+    value: "STM32F411xE"
+    level: E1          # 编译事实
+    evidence: "cmake/stm32cubemx/CMakeLists.txt: MX_Defines_Syms → USE_HAL_DRIVER, STM32F411xE"
+  chip:
+    value: "st/stm32f411ceux"
+    level: E1          # 编译事实
+    evidence: "编译宏 STM32F411xE == chips/st/stm32f411ceux.yaml:part"
+  memory:
+    value: "RAM=0x20000 FLASH=0x80000"
+    level: E3          # 链接事实
+    evidence: "STM32F411XX_FLASH.ld MEMORY 段"
+  uses_freertos:
+    value: "true"
+    level: E4          # 结构约定
+    evidence: "cmake/stm32cubemx/CMakeLists.txt: add_library(FreeRTOS OBJECT)"
+  stdout:
+    value: "有输出能力"
+    level: E4          # 结构约定
+    evidence: "Core/Src/freertos.c: 定义了 __io_putchar（带函数体）；Core/Src/freertos.c: 调用了 printf"
+  confidence: "high"
+  notes:
+    - "cmake/ 下另有候选工具链 ['cmake/starm-clang.cmake']，已按 CMakePresets.json 指定的 cmake/gcc-arm-none-eabi.cmake 为准（其余不参与）"

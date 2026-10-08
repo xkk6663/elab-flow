@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config, ElabError, Host, to_fwd
+from .ota_layout import gen_header_path, normalize_ota_layout
+from .version import parse_version
 
 
 @dataclass
@@ -33,6 +35,16 @@ class Plan:
     gdb_script: str = ""
     flash_images: list[dict] = field(default_factory=list)
     link_channel: str = "exe_flags"
+    # ★ OTA 布局单源化（方案 A/M1）：chips/*.yaml ota_layout 节的归一化视图
+    #   （int 值）。None = 芯片未声明 → 不下传 gen 头，port 头兜底（零回归）。
+    ota_layout: dict | None = None
+    # ★ 版本声明（双槽方案 §9.1）：projects yaml `version: "1.2.3"` → (maj,min,pat)。
+    #   None = 工程未声明版本（版本机制可选）。build 号由 builder 真跑时分配。
+    version: tuple[int, int, int] | None = None
+    # ★ C1 组合工程：chips yaml `ota_layout.boot_project` 声明的 boot 工程。
+    #   非空 = build app 成功后自动级联构建该工程（builder.build_with_boot）、
+    #   flash 时按台账决定 boot 镜像是否进烧录会话（flash.boot_flash_decision）。
+    boot_project: str = ""
 
     # ── 派生路径 ────────────────────────────────────────────────
     @property
@@ -112,6 +124,10 @@ def _parse_flash_images(proj: dict) -> list[dict]:
         if fmt not in ("elf", "bin"):
             raise ElabError(f"flash.images[{i}].format 只能是 elf 或 bin：{fmt!r}")
         addr = str(item.get("address") or "").strip()
+        # ★ 兼容裸 0x 字面量：YAML 会把 address: 0x08000000 解析成 int（f411_boot 实测），
+        #   这里归一化为 "0x..." 字符串，避免用户写法不同导致行为不一致。
+        if isinstance(item.get("address"), int):
+            addr = hex(item["address"])
         if fmt == "bin" and not addr:
             raise ElabError(
                 f"flash.images[{i}]（bin）必须声明 address —— "
@@ -126,6 +142,32 @@ def _parse_flash_images(proj: dict) -> list[dict]:
             "ld": to_fwd(item["ld"]) if item.get("ld") else "",
         })
     return out
+
+
+def resolve_boot_project(ota_raw: object, proj_name: str,
+                         project_names) -> str:
+    """★ C1 组合工程：解析 chips yaml ``ota_layout.boot_project``。
+
+    :param ota_raw: chip["ota_layout"] 原始 dict（未归一化）
+    :param proj_name: 当前工程名
+    :param project_names: cfg.projects 的键集合（校验工程存在）
+    :return: boot 工程名；未声明返回 ""
+    :raises ElabError: 声明的工程不存在（plan 阶段 fail-fast）
+
+    ★ 自引用 = "我就是 boot"：boot 工程与 app 共用同一份 chips yaml，
+      其 ota_layout.boot_project 天然指向自己 —— 此时返回 ""（boot 自身
+      不再级联、也不参与冻结台账），这正是组合工程的预期语义。
+    """
+    if not isinstance(ota_raw, dict):
+        return ""
+    bp = str(ota_raw.get("boot_project") or "").strip()
+    if not bp or bp == proj_name:
+        return ""
+    if bp not in set(project_names):
+        known = ", ".join(sorted(project_names)) or "(无)"
+        raise ElabError(
+            f"ota_layout.boot_project 未找到工程：{bp}（可选：{known}）")
+    return bp
 
 
 def plan_for(cfg: Config, proj_name: str) -> Plan:
@@ -157,6 +199,15 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
         raise ElabError(
             f"build.link_channel 只能是 exe_flags 或 c_flags：{p.link_channel!r}（{proj_name}）"
         )
+    # ★ OTA 布局单源化（方案 A/M1）：声明了 ota_layout 就在 plan 阶段归一化校验
+    #   （缺区/重叠 → fail-fast，不进构建）。未声明 → None，完全向后兼容。
+    if chip.get("ota_layout"):
+        p.ota_layout = normalize_ota_layout(chip["ota_layout"], chip.get("id", ""))
+        # ★ C1 组合工程：boot_project 与分区表同源（chips yaml），plan 阶段校验
+        p.boot_project = resolve_boot_project(chip["ota_layout"], proj_name,
+                                              cfg.projects)
+    # ★ 版本声明（双槽方案 §9.1）：声明非法在 plan 阶段 fail-fast。
+    p.version = parse_version(proj.get("version"), proj_name)
 
     core = chip.get("core") or {}
     args: list[str] = []
@@ -178,6 +229,10 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     # 芯片差异 —— 全部的跨芯片差异就浓缩在这 4 个值里
     args.append(f"-DELAB_CPU={core.get('cpu', '')}")
     args.append(f"-DELAB_FPU={core.get('fpu', '')}")
+    # ★ N7：M4F 级芯片（如 STM32F411）的 FPU 类型（fpv4-sp-d16）。老 yaml 无此字段
+    #   则不下传，gcc.cmake/inject.cmake 亦不产出 -mfpu —— 完全向后兼容。
+    if core.get('mfpu'):
+        args.append(f"-DELAB_MFPU={core.get('mfpu')}")
     args.append(f"-DELAB_CHIP={chip.get('id', '')}")
     if p.linker_script:
         args.append(f"-DELAB_LD={p.linker_script}")
@@ -199,6 +254,12 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     map_path = p.artifacts.get("map") or ""
     if map_path:
         args.append(f"-DELAB_MAP_FILE={to_fwd(map_path)}")
+
+    # ★ OTA 布局 gen 头路径下传（方案 A/M1）：inject.cmake 把它转成
+    #   `-include` 强制每个 C 翻译单元最先包含。文件本体由 builder 在
+    #   configure 前落盘（M2 干跑只读预演，plan 阶段刻意不写盘）。
+    if p.ota_layout:
+        args.append(f"-DELAB_OTA_LAYOUT_GEN={to_fwd(str(gen_header_path(p.work_dir)))}")
 
     args.append(f"-DCMAKE_BUILD_TYPE={p.build_type}")
     p.cmake_args = args

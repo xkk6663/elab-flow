@@ -8,8 +8,18 @@
 
 import type { ElabEvent } from "../api/types";
 import { lineTone, stripAnsi } from "../theme/ansi";
+import { channelOfEvent } from "../workspaces";
 
-export type LogTab = "build" | "flash" | "serial";
+/**
+ * 日志通道名 = 工作区 id（"build" | "flash" | "serial" | "tools"）。
+ * 通道不再枚举 —— 所有工具共用一个 "tools" 通道（二次收敛，2026-10-08；
+ * 第一版每工具一通道已被 7-Tab 溢出证伪），通道由 LogBook.ring() 工厂
+ * 按需创建，"加通道改 6 处"的结构病就此消灭。
+ */
+export type LogChannel = string;
+
+/** ★ 兼容别名：旧的持久化布局里叫 LogTab，语义已升级为通道 */
+export type LogTab = LogChannel;
 
 export interface LogLine {
   /** 原始文本（可能含 ANSI） */
@@ -23,34 +33,12 @@ export interface LogLine {
 }
 
 /**
- * 事件 → 证据轨的哪个 Tab。这是"三合一 Tab"的**唯一**归属规则。
- *
- * ★ 证据轨刻意只有三个 Tab（构建/烧录/串口，见方案 §5.4），而流水线有五步
- *   （doctor/build/flash/debug_verify/monitor）。所以这里有一条**显式兜底**：
- *     - `flash` / `debug_verify`  → 「烧录」（都是上板相关的）
- *     - `monitor`                 → 「串口」（板子的串口输出）
- *     - **其余一切**（含 `doctor`）→ 「构建」
- *   `doctor` 归到「构建」是**有意的**，不是漏写：体检与编译都是宿主侧、
- *   纯文本、不碰硬件的步骤，共用一个"宿主侧输出"面板比为它单开第四个 Tab
- *   更贴方案。代价是构建 Tab 的行数会包含体检输出 —— 徽标因此读作
- *   "构建 + 体检行数"。若将来要拆开，就在这里加分支，**不必改渲染层**。
+ * 事件 → 日志通道。规则唯一来源在 `workspaces.ts#channelOfEvent`
+ * （含 doctor 归"构建"、flash/debug_verify 归"烧录"、monitor 归"串口"、
+ * tool:<name> 统一归 "tools" 通道的完整理由）。
  */
 export function tabOfEvent(e: ElabEvent): LogTab | null {
-  const topic = String(e.topic || "");
-  const step = String(e.step || "");
-  if (topic.startsWith("serial/")) return "serial";
-  if (topic === "proc/stdout" || topic === "proc/stderr" ||
-      topic === "proc/stdout-batch") {
-    if (step === "flash" || step === "debug_verify") return "flash";
-    if (step === "monitor") return "serial";
-    return "build";
-  }
-  if (topic === "run/step-enter" || topic === "run/step-exit") {
-    if (step === "flash" || step === "debug_verify") return "flash";
-    if (step === "monitor") return "serial";
-    return "build";
-  }
-  return null;
+  return channelOfEvent(e);
 }
 
 function lineOf(text: string, step: string, kind: LogLine["kind"] = "line"): LogLine {
@@ -150,23 +138,52 @@ export class LogRing {
 }
 
 class LogBook {
-  build = new LogRing();
-  flash = new LogRing();
-  serial = new LogRing();
+  /**
+   * 通道 → 环形缓冲。★ **工厂自建**（ring()），不再逐个声明属性 ——
+   * 旧版固定 build/flash/serial/ota 四个属性，加通道漏注册 ring 就
+   * undefined.push 崩掉整棵 React 树（白屏，f411 实测）。工具通道是
+   * 动态的（projects/*.yaml tools: 节），Map + 工厂从结构上消灭这类事故。
+   */
+  private rings = new Map<string, LogRing>();
+  /** book 级订阅：任何通道有变化（新行/清空/新通道诞生）都通知 —— 导航徽标用 */
+  private anySubs = new Set<() => void>();
 
-  for(tab: LogTab): LogRing {
-    return this[tab];
+  /** 取（或惰性创建）一个通道的环形缓冲。永不返回 undefined。 */
+  ring(channel: LogChannel): LogRing {
+    let r = this.rings.get(channel);
+    if (!r) {
+      r = new LogRing();
+      this.rings.set(channel, r);
+      // 新通道诞生也要惊动 book 级订阅者（导航徽标从 0 变有）
+      for (const fn of this.anySubs) fn();
+    }
+    return r;
+  }
+
+  /** ★ 兼容别名（旧调用点 logs.for(tab)） */
+  for(tab: LogChannel): LogRing {
+    return this.ring(tab);
+  }
+
+  /** 当前所有通道名（导航徽标/全量清空用） */
+  channels(): LogChannel[] {
+    return [...this.rings.keys()];
+  }
+
+  /** book 级订阅：任何通道有任何变化都触发一次 */
+  subscribeAll(fn: () => void): () => void {
+    this.anySubs.add(fn);
+    return () => this.anySubs.delete(fn);
   }
 
   push(ev: ElabEvent): void {
     const r = linesOfEvent(ev);
-    if (r) this.for(r.tab).push(r.lines);
+    if (r) this.ring(r.tab).push(r.lines);
   }
 
   clearAll(): void {
-    this.build.clear();
-    this.flash.clear();
-    this.serial.clear();
+    for (const r of this.rings.values()) r.clear();
+    for (const fn of this.anySubs) fn();
   }
 
   /**
@@ -178,7 +195,7 @@ class LogBook {
    *   代价必须在界面上诚实体现：这些行**不能**靠重载页面恢复（而事件行可以）。
    *   故 step 标为 `"manual"`，与事件行可区分。
    */
-  local(tab: LogTab, text: string, tone?: LogLine["tone"]): void {
+  local(tab: LogChannel, text: string, tone?: LogLine["tone"]): void {
     const ln: LogLine = {
       raw: text,
       plain: stripAnsi(text),
@@ -186,7 +203,7 @@ class LogBook {
       step: "manual",
       kind: "line",
     };
-    this.for(tab).push([ln]);
+    this.ring(tab).push([ln]);
   }
 
   /**
@@ -200,9 +217,9 @@ class LogBook {
    *   省掉几十次 `LogView` 的追加调度 —— 与 `push()` 里那条"别每帧全扫缓冲"的
    *   理由同源。
    */
-  history(tab: LogTab, items: Array<{ text: string; tone?: LogLine["tone"] }>): void {
+  history(tab: LogChannel, items: Array<{ text: string; tone?: LogLine["tone"] }>): void {
     if (!items.length) return;
-    this.for(tab).push(
+    this.ring(tab).push(
       items.map((it) => ({
         raw: it.text,
         plain: stripAnsi(it.text),
@@ -213,8 +230,11 @@ class LogBook {
     );
   }
 
-  counts(): Record<LogTab, { lines: number; alerts: number; dropped: number }> {
-    return { build: this.build.stats, flash: this.flash.stats, serial: this.serial.stats };
+  /** 全通道计数（O(通道数)，通道内 O(1)）。导航徽标只读这里。 */
+  counts(): Record<string, { lines: number; alerts: number; dropped: number }> {
+    const out: Record<string, { lines: number; alerts: number; dropped: number }> = {};
+    for (const [k, r] of this.rings) out[k] = r.stats;
+    return out;
   }
 }
 

@@ -36,6 +36,7 @@ if str(_ROOT / "services") not in sys.path:
     sys.path.insert(0, str(_ROOT / "services"))
 
 from elab import adapt as adapt_mod                      # noqa: E402
+from elab import flash as flash_mod                      # noqa: E402
 from elab import run as run_mod                      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialmon as serialmon_mod          # noqa: E402
@@ -54,7 +55,7 @@ PROC_BATCH_S = 0.10           # §17.3：proc 行 100ms 合并，事件数降 1~
 QUEUE_MAX = 2000              # §17.3：每连接有界队列
 MAX_SSE_CONNS = 8
 DIST_DIR = _HERE / "web" / "dist"
-COCKPIT_VERSION = "1.0.0"
+COCKPIT_VERSION = "2.0.0"
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
@@ -234,7 +235,12 @@ class RunManager:
           否则父进程无法在"文件还没出现"时就知道该跟读哪个文件 —— 那是一个必然的竞态。
         """
         steps = list(steps or run_mod.DEFAULT_STEPS)
-        bad = [s for s in steps if s not in run_mod.ALL_STEPS]
+        # 与 run.parse_steps 同规则：tool:<name> 放行（<name> 是否声明由子进程
+        # _resolve_tool 校验 —— 项目 YAML 在那一侧才读得到）
+        bad = [s for s in steps
+               if s not in run_mod.ALL_STEPS
+               and not (s.startswith(run_mod.TOOL_PREFIX)
+                        and len(s) > len(run_mod.TOOL_PREFIX))]
         if bad:
             raise ElabError(f"未知步骤：{', '.join(bad)}")
 
@@ -259,10 +265,15 @@ class RunManager:
         env["PYTHONUNBUFFERED"] = "1"
 
         # ★ 独立进程组：cmake→ninja→gcc 是一棵树，取消时要整棵杀掉（K10）
+        # ★ CREATE_NO_WINDOW：服务已 pythonw 化（无控制台可继承），不挂这个
+        #   标志则每个子进程（python/cmake/openocd…）都会新弹一个黑色控制台
+        #   窗口——用户实测"一手动按命令就弹命令行框框"。隐藏控制台会被
+        #   孙进程继承，全树无窗口。
         kwargs: dict = {"cwd": str(_ROOT), "env": env,
                         "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                       | 0x08000000)  # CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
 
@@ -522,6 +533,18 @@ def project_cards(cfg: Config) -> dict:
             avail["monitor"] = {"ok": False,
                                 "reason": f"串口后端不可用（layer={caps.get('layer')}）"}
 
+        # ── OTA 投影（C1/C3，全部派生：chips yaml ota_layout + boot 台账文件）──
+        #   ota=None = 该芯片未声明 ota_layout（普通单镜像工程，UI 不渲染 OTA 行）
+        ota_layout = chip.get("ota_layout") or {}
+        ota = None
+        if ota_layout:
+            boot_proj = ota_layout.get("boot_project", "")
+            ota = {"boot_project": boot_proj, "slots": len(ota_layout.get("slots") or []),
+                   "boot_stamp": None}
+            if boot_proj:
+                # boot 台账 = C3 冻结策略的落盘状态（version/md5/flashed_at）
+                ota["boot_stamp"] = flash_mod.boot_stamp(cfg.root, boot_proj)
+
         cards.append({
             "name": name,
             "chip": chip_ref,
@@ -539,6 +562,12 @@ def project_cards(cfg: Config) -> dict:
                         "fail_on": len(monitor.get("fail_on") or []),
                         "idle_timeout_s": monitor.get("idle_timeout_s")},
             "provenance": proj.get("provenance") or {},
+            # 项目声明工具（通用机制）：驾驶舱据此渲染"工具"按钮
+            "tools": [{"name": k, "label": ((v or {}).get("label") or k)}
+                      for k, v in sorted((proj.get("tools") or {}).items())],
+            # OTA 投影（None=无 ota_layout；boot_owner 在下方第二遍填充）
+            "ota": ota,
+            "boot_owner": "",
             # ↓ 以下为派生状态位，不是新元数据
             "derived": {"built": built, "work_dir_exists": bool(work_dir) and Path(work_dir).is_dir()},
             "steps": avail,
@@ -550,6 +579,16 @@ def project_cards(cfg: Config) -> dict:
                 "debug": chip.get("debug") or {},
             },
         })
+
+    # 第二遍：boot 子工程归属（C1 交叉引用派生——被谁的 ota_layout.boot_project
+    # 指到，谁就是"boot 子工程"；自引用除外：boot 工程自己就是 boot）。
+    owners = {}
+    for c in cards:
+        bp = (c.get("ota") or {}).get("boot_project") or ""
+        if bp and bp != c["name"]:
+            owners[bp] = c["name"]
+    for c in cards:
+        c["boot_owner"] = owners.get(c["name"], "")
 
     return {
         "projects": cards,
@@ -1274,8 +1313,20 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"端口（默认 {DEFAULT_PORT}）")
     ap.add_argument("--dist", help="覆盖前端产物目录（默认 cockpit/web/dist）")
     ap.add_argument("--reload", action="store_true", help="不使用 dist/，仅提供 API")
+    ap.add_argument("--logfile", help="stdout/stderr 重定向到文件（pythonw 无窗口部署用；"
+                                      "行缓冲，替代'最小化控制台'的日志能力）")
     ap.add_argument("-v", "--verbose", action="store_true", help="打印访问日志")
     args = ap.parse_args(argv)
+
+    if args.logfile:
+        # C32 教训：重定向 stdout 在 GBK 代码页下会因 ✓ 字符崩服务 —— 显式 utf-8。
+        _lf = open(args.logfile, "a", encoding="utf-8")
+        sys.stdout = _lf
+        sys.stderr = _lf
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except Exception:
+            pass
 
     cfg = Config(args.root)
     dist = None if args.reload else (Path(args.dist) if args.dist else None)

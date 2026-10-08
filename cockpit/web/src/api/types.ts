@@ -161,6 +161,16 @@ export interface ProjectCard {
   /** 派生状态位（不是新元数据，只是"文件在不在"） */
   derived: { built: boolean; work_dir_exists: boolean };
   steps: Record<StepId, { ok: boolean; reason: string }>;
+  /** 项目声明工具（projects/*.yaml 的 tools: 节）；通用机制，见 run.py TOOL_PREFIX */
+  tools: Array<{ name: string; label: string }>;
+  /** OTA 投影（C1/C3）：芯片声明了 ota_layout 才有；boot_stamp=冻结台账（未烧录为 null） */
+  ota?: {
+    boot_project: string;
+    slots: number;
+    boot_stamp: { md5: string; version: string; bin: string; flashed_at: string } | null;
+  } | null;
+  /** boot 子工程归属（交叉引用派生）：被谁的 ota_layout.boot_project 指到 */
+  boot_owner?: string;
   chip_info: ChipInfo;
 }
 
