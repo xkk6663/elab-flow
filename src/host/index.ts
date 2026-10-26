@@ -20,6 +20,7 @@ import {
   type ProxyDeps,
 } from './routes.ts'
 import { runRetention } from './run-retention.ts'
+import type { SerialMutexTracker } from './routes.ts'
 
 export interface ApplyOptions {
   config?: Partial<HostRouteConfig>
@@ -27,6 +28,8 @@ export interface ApplyOptions {
   resolveCwd?: (sessionId: string | undefined) => string | undefined
   /** run 仲裁（P5）：/elab/api/run 路径上的单飞互斥。 */
   arbiter?: RunArbiter
+  /** 串口监视互斥记账（P5 §6.2 规则 2）。 */
+  serialMutex?: SerialMutexTracker
 }
 
 /** 从起点向上找 elab 仓库根（`cockpit/server.py` + `services/elab`）。 */
@@ -100,7 +103,12 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
     }
   }
 
-  const deps: ProxyDeps = { ensureHost, config: () => current, ...(options.arbiter !== undefined ? { arbiter: options.arbiter } : {}) }
+  const deps: ProxyDeps = {
+    ensureHost,
+    config: () => current,
+    ...(options.arbiter !== undefined ? { arbiter: options.arbiter } : {}),
+    ...(options.serialMutex !== undefined ? { serialMutex: options.serialMutex } : {}),
+  }
 
   const disposers: Array<() => void> = []
   disposers.push(registerApiRoute(ctx, deps))

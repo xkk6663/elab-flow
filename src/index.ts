@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { apply as applyHost } from './host/index.ts'
 import { applyDiscover, type DiscoverConfig } from './host/discover-route.ts'
+import { createSerialMutexTracker } from './host/routes.ts'
 import { RunArbiter } from './host/run-arbiter.ts'
 import { registerElabTools } from './host/tools.ts'
 import { registerOnce } from './host/route-guard.ts'
@@ -138,12 +139,15 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
       return true
     }
   })
+  // 串口监视互斥记账（§6.2 规则 2）
+  const serialMutex = createSerialMutexTracker()
 
   // ② API 代理 + SSE + 进程托管 + runs 清理
   const hostController = applyHost(ctx, {
     config: resolved.host,
     resolveCwd: cwdResolver(ctx),
     arbiter,
+    serialMutex,
   })
 
   // ③ 设置页配置（P4）：启动时先叠加持久化覆盖，再挂 GET/POST /elab/config

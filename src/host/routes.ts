@@ -16,8 +16,31 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { registerOnce } from './route-guard.ts'
 import { CockpitHost } from './host-process.ts'
 import { looksLikeElabRoot } from './host-process.ts'
+import { ONHW_STEPS } from './plans.ts'
 import type { RunArbiter } from './run-arbiter.ts'
 import { runRetention, type RetentionConfig } from './run-retention.ts'
+
+/**
+ * 串口监视互斥的宿主侧记账（§6.2 规则 2）：监视 open/close 都走本代理，
+ * 记账即准确；cockpit 生命周期由宿主管（空闲回收 / Job Object 全树终结），
+ * 进程死了监视必然一起没了 —— 重启后初值 false 与真实状态一致。
+ */
+export interface SerialMutexTracker {
+  setOpen(active: boolean): void
+  isActive(): boolean
+}
+
+export function createSerialMutexTracker(): SerialMutexTracker {
+  let active = false
+  return {
+    setOpen(v: boolean): void {
+      active = v
+    },
+    isActive(): boolean {
+      return active
+    },
+  }
+}
 
 export interface HostRouteContext {
   webServer: {
@@ -71,6 +94,8 @@ export interface ProxyDeps {
   config(): HostRouteConfig
   /** run 仲裁（P5）：POST /elab/api/run 路径上的单飞互斥；缺省不拦。 */
   arbiter?: RunArbiter
+  /** 串口监视互斥记账（P5 §6.2 规则 2）；缺省不拦。 */
+  serialMutex?: SerialMutexTracker
 }
 
 function json(res: ServerResponse, code: number, body: unknown): void {
@@ -148,7 +173,22 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
           const internal = req.headers['x-elab-actor']
           if (rel === 'run') {
             parsed.actor = internal === 'agent' ? 'agent' : 'human'
+            // ★ §6.2 规则 2 预判拦截：带 onhw 步骤的 run 与常驻串口监视互斥
+            //   （服务端只在监视 open/串口写侧查闭环，run 侧不查 —— 宿主提前拦）。
+            if (deps.serialMutex?.isActive() === true) {
+              const stepsNow = Array.isArray(parsed.steps) ? (parsed.steps as unknown[]).map(String) : []
+              if (stepsNow.some((s) => (ONHW_STEPS as readonly string[]).includes(s))) {
+                return json(res, 409, {
+                  ok: false,
+                  error: {
+                    code: 'serial-busy',
+                    message: '串口监视会话占用中（约束 N5）：先在「串口」通道点「关闭监视」，或等它结束后再发起含烧录/调试的 run',
+                  },
+                })
+              }
+            }
           }
+          // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
           // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
           //   人工 run 进行中 agent 请求返回 human-busy（不静默排队）。
           if (rel === 'run' && deps.arbiter !== undefined) {
@@ -190,6 +230,15 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
             else if (!upstream.ok) deps.arbiter.releaseIfPending(rootKey)
           } catch {
             if (!upstream.ok) deps.arbiter.releaseIfPending(rootKey)
+          }
+        }
+        // 串口监视记账（§6.2 规则 2）：open 成功 → 占用；close → 释放
+        if (rel === 'serial/monitor' && deps.serialMutex !== undefined && upstream.ok && typeof init.body === 'string') {
+          try {
+            const action = (JSON.parse(init.body) as { action?: string }).action
+            deps.serialMutex.setOpen(action === 'open')
+          } catch {
+            /* 解析失败不影响转发 */
           }
         }
         res.statusCode = upstream.status
