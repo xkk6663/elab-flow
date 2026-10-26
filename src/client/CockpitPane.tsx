@@ -19,6 +19,7 @@ import type { ReactNode } from 'react'
 
 import { elabApi, ElabApiError } from './api/client.ts'
 import type { DiscoverResponse } from './api/client.ts'
+import { setKernelMeta, type KernelMeta } from './model/kernel-meta.ts'
 import { channelOfEvent, channelOfStep } from './model/channels.ts'
 import type { LogChannelId } from './model/channels.ts'
 import { LOG_CHANNELS } from './model/channels.ts'
@@ -129,8 +130,11 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         }
         // §16 内核自描述探测：meta 缺失 = 内核较旧，面板降级到内置默认
         try {
-          const caps = (await elabApi.capabilities(sessionId)) as { meta?: unknown }
-          if (!cancelled) setKernelOld(caps.meta === undefined)
+          const caps = (await elabApi.capabilities(sessionId)) as { meta?: KernelMeta }
+          if (!cancelled) {
+            setKernelOld(caps.meta === undefined)
+            setKernelMeta(caps.meta ?? null)
+          }
         } catch {
           /* capabilities 拿不到不挡主流程 */
         }

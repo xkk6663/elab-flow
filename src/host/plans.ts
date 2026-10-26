@@ -51,8 +51,10 @@ export function resolvePlanById(
   id: PlanId,
   steps: StepAvailability,
   serialBusy = false,
+  plans: readonly PlanDef[] = PLANS,
 ): ResolvedPlan {
-  const def = PLANS.find((p) => p.id === id)
+  // §16：内核 meta.plans 优先（业务词汇唯一事实源），无则退回内置定义
+  const def = plans.find((p) => p.id === id)
   if (def === undefined) {
     throw new Error(`未知的 plan：${id}（可选：${PLANS.map((p) => p.id).join(', ')}）`)
   }
@@ -85,12 +87,14 @@ export function resolveRunSteps(input: {
   steps?: string[]
   availability?: StepAvailability
   serialBusy?: boolean
+  /** §16：内核 meta.plans 转换来的档位定义；缺省用内置 PLANS。 */
+  plans?: readonly PlanDef[]
 }): { steps: string[]; skipped: Array<{ step: string; reason: string }>; plan?: PlanId } {
   if (Array.isArray(input.steps) && input.steps.length > 0) {
     return { steps: input.steps, skipped: [] }
   }
   const id = (input.plan ?? 'basic') as PlanId
-  const resolved = resolvePlanById(id, input.availability ?? {}, input.serialBusy ?? false)
+  const resolved = resolvePlanById(id, input.availability ?? {}, input.serialBusy ?? false, input.plans)
   if (resolved.steps.length === 0) {
     throw new Error(`plan=${id} 过滤后没有任何可执行步骤`)
   }
