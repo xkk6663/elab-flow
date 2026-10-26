@@ -1498,5 +1498,5 @@ DSH 插件（通用壳）  ←—— 唯一缝隙：loopback HTTP ICD + capabili
 | 步 | 内容 | 状态 |
 |---|---|---|
 | ① | 内核自描述 meta + 版本握手 + 面板降级提示 | ✅ 本轮 |
-| ② | 插件消费 meta（标签/档位/通道从内核来，内置仅兑底）；**Agent 边界规则**入仓（业务代码进 services/elab 与 projects/，packages/ 是工具层，agent 不得改 packages/ 除非修工具 bug）；CI 守卫（packages/ 不得 import services/） | 待做 |
+| ② | 插件消费 meta（标签/档位标题/宿主档位定义已接；**Agent 边界规则**入仓 AGENTS.md；分层门禁 test/boundary.test.mjs ×2）| ✅ 二轮（剩余：通道标签、client 步骤集全量消费——内核档位变更时以宿主解析为准） |
 | ③ | 插件出仓：发 npm（dsh-market 安装），与业务仓彻底解耦；多内核版本兼容矩阵 | 待做 |

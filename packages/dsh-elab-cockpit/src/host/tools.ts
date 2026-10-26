@@ -12,7 +12,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import { resolveRunSteps, type StepAvailability } from './plans.ts'
+import { resolveRunSteps, type PlanDef, type PlanId, type StepAvailability } from './plans.ts'
 import type { RunArbiter } from './run-arbiter.ts'
 
 export interface ToolsDeps {
@@ -61,6 +61,30 @@ function makeTool(def: any) {
   })
 }
 
+/** §16：拉内核自描述的档位定义（meta.plans）；拿不到 = undefined，走内置 PLANS。 */
+async function kernelPlanDefs(deps: ToolsDeps): Promise<PlanDef[] | undefined> {
+  try {
+    const { baseUrl } = await deps.ensureHost()
+    const res = await fetch(`${baseUrl}/api/capabilities`, { headers: { Accept: 'application/json' } })
+    if (!res.ok) return undefined
+    const cap = (await res.json()) as { meta?: { plans?: Array<{ id?: unknown; steps?: unknown; requires_hardware?: unknown }> } }
+    const plans = cap.meta?.plans
+    if (!Array.isArray(plans)) return undefined
+    const out: PlanDef[] = []
+    for (const p of plans) {
+      if (typeof p?.id !== 'string' || !Array.isArray(p.steps)) continue
+      out.push({
+        id: p.id as PlanId,
+        steps: p.steps.map(String),
+        requiresHardware: p.requires_hardware === true,
+      })
+    }
+    return out.length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 三档工具的公共实现：解析 plan → 仲裁 → POST /api/run（actor=agent）。 */
 async function runPlanTool(
   deps: ToolsDeps,
@@ -79,7 +103,11 @@ async function runPlanTool(
     throw new Error(`未找到工程「${args.project}」（可用：${names.length > 0 ? names.join('、') : '（无）'}）；可先用 elab_status 查看`)
   }
   const availability = (card.steps ?? {}) as StepAvailability
-  const resolved = resolveRunSteps({ plan, availability })
+  const resolved = resolveRunSteps({
+    plan,
+    availability,
+    plans: await kernelPlanDefs(deps),
+  })
   const acquire = await deps.arbiter.tryAcquire('tool', 'agent', resolved.steps)
   if (!acquire.ok) {
     return {

@@ -10,6 +10,8 @@
  *   并在 tooltip / 日志首行显式写明跳过了什么。
  */
 
+import { kernelStepLabel, kernelPlanTitle } from './kernel-meta.ts'
+
 /** elab 的全部步骤（`services/elab/run.py:38-40` 实读）。 */
 export const ALL_STEPS = ['doctor', 'doctor_deep', 'build', 'flash', 'debug_verify', 'monitor'] as const
 
@@ -29,7 +31,8 @@ export const STEP_LABEL: Record<string, string> = {
 }
 
 export function stepLabel(id: string): string {
-  return STEP_LABEL[id] ?? (id.startsWith('tool:') ? `工具·${id.slice(5)}` : id)
+  // §16：内核 meta 的标签优先（业务词汇唯一事实源），无 meta 时退回内置默认
+  return kernelStepLabel(id, STEP_LABEL[id] ?? (id.startsWith('tool:') ? `工具·${id.slice(5)}` : id))
 }
 
 export type PlanId = 'basic' | 'triple' | 'loop'
@@ -128,6 +131,8 @@ export function resolvePlan(
   const primaryOk = effectiveSteps.includes(primary)
   return {
     ...plan,
+    // §16：内核 meta 的档位标题优先（业务词汇唯一事实源）
+    label: kernelPlanTitle(plan.id, plan.label),
     effectiveSteps,
     skipped,
     enabled: primaryOk,
