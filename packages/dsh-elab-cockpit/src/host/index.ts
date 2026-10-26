@@ -142,6 +142,7 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
             pid: info?.pid ?? null,
             job: info?.job ?? null,
             bootMs: info?.bootMs ?? null,
+            kernelVersion: info?.kernelVersion ?? null,
             idleKillSec: current.idleKillSec,
             retention: current.retention,
           }),

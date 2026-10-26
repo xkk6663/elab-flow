@@ -1457,3 +1457,46 @@ CockpitPane 出完整降级 UI（无 ELAB 根时的"驾驶舱未就绪"文案）
 | P4 融合（设置页/主题核对/大屏入口） | ✅ **完成**（大屏入口已被 §15.4 否决剔除）：设置页 + 主题令牌层 + 宽度三档，见 §15.6b |
 | P5 工具化与并存（`elab_*` 工具 + RunArbiter） | ✅ **代码完成**（§15.6c：8 工具 + 仲裁 + 面板门），待重启后真会话验证 |
 | **P0 宽度实测** | 档位机制已实装（§15.6b）；待真实会话读数回填 §5.4 阈值 |
+
+---
+
+## 16 分层解耦设计（2026-10-26，回应「工具与业务离得太近」）
+
+### 16.1 定位重申
+
+> **插件 = 开发工具整合器**：给 agent 一个 CLI/工具面调闭环，给开发者一个可视化面板。
+> **业务 = elab 内核**（services/elab + cockpit/server.py + projects/）：闭环怎么做、步骤叫什么、档位怎么分 —— 全是业务的事。
+
+### 16.2 耦合现状清单（诚实盘点）
+
+| 耦合点 | 现状 | 应属层 |
+|---|---|---|
+| 步骤标签（编译/烧录…） | 硬编码在插件 channels.ts / StageLadder.stepLabelOf | 内核（STEP_META） |
+| 三档定义（basic/triple/loop） | 硬编码在插件 host/plans.ts + client/plans.ts | 内核（KERNEL_PLANS） |
+| 通道划分（build/flash/debug/serial） | 硬编码在插件 channels.ts | 内核（meta.channels） |
+| plans 解析 / 事件归约 / ICD 契约 | 插件只讲 ICD，不 import 业务代码 | **本来就在正确的层** |
+| 进程托管 / 代理 / 仲裁 / 工具 | 通用壳 + elab 语义的工具描述 | 工具层（定位本身） |
+| 内核版本无握手 | 旧检出（2.0.0）打爆新工具（今天两次） | 需要握手 + 降级 |
+
+### 16.3 边界与唯一缝隙
+
+```
+DSH 插件（通用壳）  ←—— 唯一缝隙：loopback HTTP ICD + capabilities 自描述 ——→  elab 业务内核
+   工具面：elab_* 工具 / CLI（elab.cmd）                         自描述：meta（标签/通道/档位）+ 版本
+```
+
+**Agent 调闭环的两条等价路**：CLI（`elab.cmd`，业务仓自带）与 `elab_*` 工具（同一 HTTP 面）——插件只是把内核「装进 DSH」并让两者可见，不再是业务语义的归属地。
+
+### 16.4 已落地（本轮）
+
+1. **内核自描述**：capabilities.meta = STEP_META（标签/通道）/ KERNEL_PLANS（档位）——业务词汇的唯一事实源回到内核；两个检出（dsh-elab-flow 2.1.0 / elab-flow 2.0.0）均已携带。
+2. **版本握手 + 降级**：宿主就绪探针捕获 `cockpit.version` 与 meta 有无；面板在 meta 缺失时显示降级提示（标签/档位退回插件内置默认，不阻塞）。
+3. **内核过旧从「事故」变「提示」**：旧检出不再把工具打爆（镜像补丁类问题就此终结）。
+
+### 16.5 三步走
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| ① | 内核自描述 meta + 版本握手 + 面板降级提示 | ✅ 本轮 |
+| ② | 插件消费 meta（标签/档位/通道从内核来，内置仅兑底）；**Agent 边界规则**入仓（业务代码进 services/elab 与 projects/，packages/ 是工具层，agent 不得改 packages/ 除非修工具 bug）；CI 守卫（packages/ 不得 import services/） | 待做 |
+| ③ | 插件出仓：发 npm（dsh-market 安装），与业务仓彻底解耦；多内核版本兼容矩阵 | 待做 |

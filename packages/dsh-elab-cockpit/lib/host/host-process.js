@@ -49,11 +49,6 @@ export function parsePortFromBanner(line) {
     const port = Number(digits);
     return Number.isInteger(port) && port > 0 && port < 65536 ? port : undefined;
 }
-/** 启动横幅：`[cockpit] 监听 http://127.0.0.1:PORT/` */
-/**
- * 轮询直到 `/api/capabilities` 能响应。
- * 处理"横幅已打印但 accept 循环未启动"的窗口（见 start() 第 ⑤ 步）。
- */
 async function waitReachable(baseUrl, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     let last;
@@ -62,8 +57,20 @@ async function waitReachable(baseUrl, timeoutMs) {
             const res = await fetch(`${baseUrl}/api/capabilities`, {
                 signal: AbortSignal.timeout(1500),
             });
-            if (res.ok)
-                return;
+            if (res.ok) {
+                // 就绪即抓内核自描述（§16）：版本 + 是否带 meta（UI 提示内核过旧用）
+                let cap = {};
+                try {
+                    cap = (await res.json());
+                }
+                catch {
+                    /* 非 JSON：视为无版本信息 */
+                }
+                return {
+                    kernelVersion: typeof cap.cockpit?.version === 'string' ? cap.cockpit.version : undefined,
+                    hasMeta: cap.meta !== undefined,
+                };
+            }
             last = `HTTP ${res.status}`;
         }
         catch (error) {
@@ -187,13 +194,15 @@ export class CockpitHost {
         //      从横幅到 accept 循环启动之间有一个窗口，此时 TCP 连接会被拒
         //      （实测 ECONNREFUSED）。故用一次探活把窗口抹平，而不是让调用方撞运气。
         const base = `http://127.0.0.1:${port}`;
-        await waitReachable(base, Math.max(1000, 15_000 - (Date.now() - started)));
+        const kernel = await waitReachable(base, Math.max(1000, 15_000 - (Date.now() - started)));
         const bootMs = Date.now() - started;
         const handle = {
             pid: child.pid,
             port,
             baseUrl: base,
             bootMs,
+            ...(kernel.kernelVersion !== undefined ? { kernelVersion: kernel.kernelVersion } : {}),
+            ...(kernel.hasMeta !== undefined ? { hasMeta: kernel.hasMeta } : {}),
             job: armed === undefined ? 'unavailable' : 'armed',
             jobReason: jobRes.status === 'unavailable' ? jobRes.reason : undefined,
             async dispose() {

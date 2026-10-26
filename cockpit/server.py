@@ -55,7 +55,28 @@ PROC_BATCH_S = 0.10           # §17.3：proc 行 100ms 合并，事件数降 1~
 QUEUE_MAX = 2000              # §17.3：每连接有界队列
 MAX_SSE_CONNS = 8
 DIST_DIR = _HERE / "web" / "dist"
-COCKPIT_VERSION = "2.0.0"
+
+# ★ 内核自描述（§16 分层解耦）：业务词汇的唯一事实源。
+#   工具层（DSH 插件 / CLI 帮助）只渲染这里的定义，不自带业务名词 ——
+#   内核改名/加步骤/调档位，工具层无需改代码。
+STEP_META = {
+    "doctor":       {"label": "体检",     "channel": "build"},
+    "doctor_deep":  {"label": "深度体检", "channel": "build"},
+    "build":        {"label": "编译",     "channel": "build"},
+    "flash":        {"label": "烧录",     "channel": "flash"},
+    "debug_verify": {"label": "调试校验", "channel": "debug"},
+    "monitor":      {"label": "串口闭环", "channel": "serial"},
+}
+KERNEL_PLANS = [
+    {"id": "basic",  "title": "编译", "steps": ["build"],
+     "requires_hardware": False},
+    {"id": "triple", "title": "三连", "steps": ["build", "flash", "debug_verify"],
+     "requires_hardware": True},
+    {"id": "loop",   "title": "闭环", "steps": ["doctor", "build", "flash", "debug_verify", "monitor"],
+     "requires_hardware": False},
+]
+
+COCKPIT_VERSION = "2.1.0"
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
@@ -635,6 +656,9 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "steps": {"all": list(run_mod.ALL_STEPS),
                   "default": list(run_mod.DEFAULT_STEPS),
                   "onhw": sorted(run_mod.ONHW_STEPS)},
+        # 工具层自描述（§16）：标签/通道/档位由内核声明
+        "meta": {"steps": STEP_META, "plans": KERNEL_PLANS,
+                 "channels": ["build", "flash", "debug", "serial"]},
     }
 
 

@@ -959,6 +959,7 @@ function CockpitPane(props) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [kernelOld, setKernelOld] = useState(false);
   const [channel, setChannel] = useState("build");
   const [focusStep, setFocusStep] = useState(null);
   const [tailVersion, setTailVersion] = useState(0);
@@ -985,6 +986,11 @@ function CockpitPane(props) {
         setHostOk(h.ok && h.elabRoot !== null);
         if (!h.ok || h.elabRoot === null) {
           setHostError("\u672A\u627E\u5230 elab \u4ED3\u5E93\u6839\uFF08\u9700\u542B cockpit/server.py \u4E0E services/elab\uFF09");
+        }
+        try {
+          const caps = await elabApi.capabilities(sessionId);
+          if (!cancelled) setKernelOld(caps.meta === void 0);
+        } catch {
         }
       } catch (e) {
         if (cancelled) return;
@@ -1386,6 +1392,19 @@ function CockpitPane(props) {
         title: discover.candidates.filter((c) => c.adaptedAs === void 0).map((c) => c.path).join("\n")
       },
       `\u53D1\u73B0 ${discover.candidates.filter((c) => c.adaptedAs === void 0).length} \u4E2A\u672A\u63A5\u5165\u5DE5\u7A0B\uFF08${discover.candidates.filter((c) => c.adaptedAs === void 0).map((c) => c.dirname).join("\u3001")}\uFF09`
+    ) : null,
+    hostOk === true && kernelOld ? /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        style: {
+          flex: "0 0 auto",
+          padding: "3px 8px",
+          fontSize: "11px",
+          color: "var(--elab-status-run)",
+          borderBottom: "1px solid var(--elab-border)"
+        }
+      },
+      "\u5F53\u524D elab \u5185\u6838\u8F83\u65E7\uFF08\u65E0\u81EA\u63CF\u8FF0\u5143\u6570\u636E\uFF09\uFF1A\u6B65\u9AA4\u6807\u7B7E\u4E0E\u6863\u4F4D\u4F7F\u7528\u63D2\u4EF6\u5185\u7F6E\u9ED8\u8BA4\uFF1B\u540C\u6B65\u4F1A\u8BDD\u4ED3\u5E93\u7684 cockpit/server.py\uFF08v2.1.0+\uFF09\u540E\u6D88\u5931"
     ) : null,
     (() => {
       const ladder = /* @__PURE__ */ react_default.createElement(
