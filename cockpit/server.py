@@ -1333,8 +1333,12 @@ def main(argv=None) -> int:
     srv = make_server(cfg, host=args.host, port=args.port, dist=dist,
                       verbose=args.verbose)
     ready = (Path(dist) if dist else DIST_DIR) / "index.html"
+    # ★ 打印**实际绑定**的端口，而不是请求值：`--port 0` 时由 OS 分配，
+    #   请求值恒为 0（打印 0 会让调用方无法据此连接 —— DSH 插件托管正是这种用法）。
+    #   `--port 8333` 等显式端口下两者相同，行为不变。
+    bound_port = srv.server_address[1]
     print(f"[cockpit] ELAB_ROOT = {cfg.root}")
-    print(f"[cockpit] 监听 http://{args.host}:{args.port}/")
+    print(f"[cockpit] 监听 http://{args.host}:{bound_port}/")
     print(f"[cockpit] 前端产物 {'✓ ' + to_fwd(ready) if ready.exists() else '✗ 缺失（见页面提示）'}")
     print(f"[cockpit] 运行产物 {to_fwd(srv.run_manager.runs_dir)}")
     print("[cockpit] Ctrl-C 退出")

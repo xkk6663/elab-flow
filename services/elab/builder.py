@@ -373,7 +373,8 @@ def build_project(
     log(f"[elab] configure → {to_fwd(work_dir)}")
     if verbose:
         log("       " + " ".join(plan.configure_cmd()))
-    rc, out, err = _run(plan.configure_cmd(), env, plan.cfg.root, verbose)
+    rc, out, err = _run(plan.configure_cmd(), env, plan.cfg.root, verbose,
+                        stream=True, log=log)
     if rc != 0:
         result["status"] = "configure-failed"
         result["error"] = _tail(err or out)
@@ -384,7 +385,9 @@ def build_project(
     # ② build
     cmd = build_command(plan, jobs)
     log(f"[elab] build  → {plan.generator}")
-    rc, out, err = _run(cmd, env, plan.cfg.root, verbose)
+    # ★ 流式：Ninja 的 `[3/28] Building …` 会逐行进事件流（进度条的数据源）；
+    #   累积的 `out` 仍用于下面的 Linking 行与内存解析，两者缺一不可。
+    rc, out, err = _run(cmd, env, plan.cfg.root, verbose, stream=True, log=log)
     if rc != 0:
         result["status"] = "build-failed"
         result["error"] = _tail(err or out)
@@ -484,8 +487,63 @@ def build_project(
     return result
 
 
-def _run(cmd, env, cwd, verbose):
-    """执行子进程；verbose 时实时透传，否则捕获。"""
+def _stream(cmd, env, cwd, log):
+    """逐行执行：每行**先喂给 log()（→ 事件流）**，再累积进返回的 stdout。
+
+    ★ 为什么需要它（2026-10-26 实测）：
+      `subprocess.run(capture_output=True)` 是**一次性捕获** —— 构建期间零流，
+      结束时才把整份 stdout 交出去。于是"编译进度"在驾驶舱里表现为
+      "一步一行的摘要"（实测全量 28 个编译单元只推了 5 行）。
+      但 Ninja 在**非 TTY 管道**下本来就逐行吐 `[3/28] Building C object …`
+      （实测 32 行 / 28 条进度），所以只要改成逐行读，进度就自然有了。
+
+    ★ 为什么仍要返回累积 stdout：
+      build_project 依赖 `out` 做两件后续判断 ——
+        ① `link_line`（`[elab] ✓ build ([28/28] Linking C executable …)`）
+        ② `_parse_memory(out)`（FLASH/RAM 占位，来自链接器的 --print-memory-usage）
+      逐行透传若丢掉累积，这两处会静默退化成空值 —— 那正是 N6 那类
+      "声明了却拿不到、还不出声"的坑。故 stream **不是** verbose 的替代品。
+
+    ★ 行尾与流控：
+      - `universal_newlines=True` + `errors="replace"`：Windows 下 subprocess
+        用 locale 编码（GBK）解码会直接抛 UnicodeDecodeError（实测踩到），
+        显式指定 utf-8 才稳；`errors="replace"` 兜住个别非法字节。
+      - `[n/m]` 这类进度行**不丢弃**：它们进事件流后由界面自行分层
+        （进度条吃 `[n/m]`，日志尾保留摘要），此处不做 UI 判断。
+    """
+    win = proc_kwargs()
+    proc = subprocess.Popen(
+        cmd, cwd=str(cwd), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        **win,
+    )
+    collected: list[str] = []
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.rstrip("\r\n")
+        if not line:
+            continue
+        collected.append(line)
+        # 逐行上报：这里的 log 在 `elab run --emit-events` 下就是事件 sink，
+        # 在 CLI 下是终端回显 —— 两条通路共用一份实现，不会漂移。
+        try:
+            log(line)
+        except Exception:                     # noqa: BLE001
+            # 上报端（事件写盘/终端断开）出错**绝不能**打断构建本身
+            pass
+    rc = proc.wait()
+    return rc, "\n".join(collected), ""
+
+
+def _run(cmd, env, cwd, verbose, *, stream=False, log=None):
+    """执行子进程；verbose / stream 时实时透传，否则捕获。
+
+    :param stream: 逐行透传（构建立即产生进度）。需要 ``log``。
+    :param log: 逐行回调；缺省用 print（CLI 语义）。
+    """
+    if stream:
+        return _stream(cmd, env, cwd, log or print)
     win = proc_kwargs()
     if verbose:
         proc = subprocess.run(cmd, cwd=str(cwd), env=env, text=True, **win)

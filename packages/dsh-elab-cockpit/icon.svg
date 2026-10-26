@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="elab cockpit">
+  <rect x="6" y="8" width="52" height="48" rx="7" fill="none" stroke="#2478c8" stroke-width="4"/>
+  <path d="M6 20h52" stroke="#2478c8" stroke-width="4"/>
+  <circle cx="14" cy="14" r="2.4" fill="#2478c8"/>
+  <circle cx="22" cy="14" r="2.4" fill="#2478c8"/>
+  <path d="M16 30h20" stroke="#2478c8" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M16 38h14" stroke="#9cc3e6" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M16 46h24" stroke="#9cc3e6" stroke-width="3.5" stroke-linecap="round"/>
+  <circle cx="46" cy="30" r="4" fill="#3fa45b"/>
+</svg>

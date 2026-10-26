@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "build/client",
+    "rootDir": "src/client",
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+    "declaration": false,
+    "sourceMap": false,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [],
+    "typeRoots": [
+      "C:/Users/xiao1/.dsh/profiles/desktop/node_modules/@types"
+    ]
+  },
+  "include": [
+    "src/client/**/*.ts",
+    "src/client/**/*.tsx"
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "name": "elab 驾驶舱（探针）",
+  "description": "在右栏内嵌 elab-Flow 闭环驾驶舱，并显示可用宽高用于实测（P0）"
+}

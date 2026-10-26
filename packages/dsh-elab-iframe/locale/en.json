@@ -1,0 +1,4 @@
+{
+  "name": "elab Cockpit (Probe)",
+  "description": "Embeds the elab-Flow cockpit in the right sidebar and reports usable width/height (P0)"
+}
