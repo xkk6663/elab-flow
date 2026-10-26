@@ -11,6 +11,18 @@
  *   ⑤ 进程按需启动（`ensureHost`），空闲超时回收。
  */
 import { registerOnce } from "./route-guard.js";
+import { ONHW_STEPS } from "./plans.js";
+export function createSerialMutexTracker() {
+    let active = false;
+    return {
+        setOpen(v) {
+            active = v;
+        },
+        isActive() {
+            return active;
+        },
+    };
+}
 export const DEFAULT_HOST_ROUTE_CONFIG = {
     elabRoot: 'auto',
     pythonPath: 'auto',
@@ -100,7 +112,22 @@ export function registerApiRoute(ctx, deps) {
                     const internal = req.headers['x-elab-actor'];
                     if (rel === 'run') {
                         parsed.actor = internal === 'agent' ? 'agent' : 'human';
+                        // ★ §6.2 规则 2 预判拦截：带 onhw 步骤的 run 与常驻串口监视互斥
+                        //   （服务端只在监视 open/串口写侧查闭环，run 侧不查 —— 宿主提前拦）。
+                        if (deps.serialMutex?.isActive() === true) {
+                            const stepsNow = Array.isArray(parsed.steps) ? parsed.steps.map(String) : [];
+                            if (stepsNow.some((s) => ONHW_STEPS.includes(s))) {
+                                return json(res, 409, {
+                                    ok: false,
+                                    error: {
+                                        code: 'serial-busy',
+                                        message: '串口监视会话占用中（约束 N5）：先在「串口」通道点「关闭监视」，或等它结束后再发起含烧录/调试的 run',
+                                    },
+                                });
+                            }
+                        }
                     }
+                    // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
                     // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
                     //   人工 run 进行中 agent 请求返回 human-busy（不静默排队）。
                     if (rel === 'run' && deps.arbiter !== undefined) {
@@ -145,6 +172,16 @@ export function registerApiRoute(ctx, deps) {
                     catch {
                         if (!upstream.ok)
                             deps.arbiter.releaseIfPending(rootKey);
+                    }
+                }
+                // 串口监视记账（§6.2 规则 2）：open 成功 → 占用；close → 释放
+                if (rel === 'serial/monitor' && deps.serialMutex !== undefined && upstream.ok && typeof init.body === 'string') {
+                    try {
+                        const action = JSON.parse(init.body).action;
+                        deps.serialMutex.setOpen(action === 'open');
+                    }
+                    catch {
+                        /* 解析失败不影响转发 */
                     }
                 }
                 res.statusCode = upstream.status;
