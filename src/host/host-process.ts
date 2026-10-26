@@ -33,6 +33,10 @@ export interface HostHandle {
   baseUrl: string
   /** 启动耗时（ms），用于 UI 显示"内核就绪 329ms"。 */
   bootMs: number
+  /** 内核自述版本（capabilities.cockpit.version，§16 自描述）。 */
+  kernelVersion?: string
+  /** 内核是否带 meta 自描述块（false = 内核较旧，UI 提示同步）。 */
+  hasMeta?: boolean
   job: 'armed' | 'unavailable'
   jobReason?: string
   /** 优雅关闭：关 Job（优先）或 taskkill 树（降级）。 */
@@ -77,7 +81,12 @@ export function parsePortFromBanner(line: string): number | undefined {
  * 轮询直到 `/api/capabilities` 能响应。
  * 处理"横幅已打印但 accept 循环未启动"的窗口（见 start() 第 ⑤ 步）。
  */
-async function waitReachable(baseUrl: string, timeoutMs: number): Promise<void> {
+interface KernelSnapshot {
+  kernelVersion?: string
+  hasMeta?: boolean
+}
+
+async function waitReachable(baseUrl: string, timeoutMs: number): Promise<KernelSnapshot> {
   const deadline = Date.now() + timeoutMs
   let last: unknown
   while (Date.now() < deadline) {
@@ -85,7 +94,19 @@ async function waitReachable(baseUrl: string, timeoutMs: number): Promise<void> 
       const res = await fetch(`${baseUrl}/api/capabilities`, {
         signal: AbortSignal.timeout(1500),
       })
-      if (res.ok) return
+      if (res.ok) {
+        // 就绪即抓内核自描述（§16）：版本 + 是否带 meta（UI 提示内核过旧用）
+        let cap: { cockpit?: { version?: unknown }; meta?: unknown } = {}
+        try {
+          cap = (await res.json()) as { cockpit?: { version?: unknown }; meta?: unknown }
+        } catch {
+          /* 非 JSON：视为无版本信息 */
+        }
+        return {
+          kernelVersion: typeof cap.cockpit?.version === 'string' ? cap.cockpit.version : undefined,
+          hasMeta: cap.meta !== undefined,
+        }
+      }
       last = `HTTP ${res.status}`
     } catch (error) {
       last = error
@@ -217,7 +238,7 @@ export class CockpitHost {
     //      从横幅到 accept 循环启动之间有一个窗口，此时 TCP 连接会被拒
     //      （实测 ECONNREFUSED）。故用一次探活把窗口抹平，而不是让调用方撞运气。
     const base = `http://127.0.0.1:${port}`
-    await waitReachable(base, Math.max(1000, 15_000 - (Date.now() - started)))
+    const kernel = await waitReachable(base, Math.max(1000, 15_000 - (Date.now() - started)))
 
     const bootMs = Date.now() - started
     const handle: HostHandle = {
@@ -225,6 +246,8 @@ export class CockpitHost {
       port,
       baseUrl: base,
       bootMs,
+      ...(kernel.kernelVersion !== undefined ? { kernelVersion: kernel.kernelVersion } : {}),
+      ...(kernel.hasMeta !== undefined ? { hasMeta: kernel.hasMeta } : {}),
       job: armed === undefined ? 'unavailable' : 'armed',
       jobReason: jobRes.status === 'unavailable' ? jobRes.reason : undefined,
       async dispose() {

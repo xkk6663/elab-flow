@@ -93,6 +93,8 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<{ step: string; detail: string } | null>(null)
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null)
+  /** §16 内核自描述探测：meta 缺失 = 内核较旧（标签/档位退回插件内置默认）。 */
+  const [kernelOld, setKernelOld] = useState(false)
   const [channel, setChannel] = useState<LogChannelId>('build')
   const [focusStep, setFocusStep] = useState<string | null>(null)
   const [tailVersion, setTailVersion] = useState(0)
@@ -124,6 +126,13 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         setHostOk(h.ok && h.elabRoot !== null)
         if (!h.ok || h.elabRoot === null) {
           setHostError('未找到 elab 仓库根（需含 cockpit/server.py 与 services/elab）')
+        }
+        // §16 内核自描述探测：meta 缺失 = 内核较旧，面板降级到内置默认
+        try {
+          const caps = (await elabApi.capabilities(sessionId)) as { meta?: unknown }
+          if (!cancelled) setKernelOld(caps.meta === undefined)
+        } catch {
+          /* capabilities 拿不到不挡主流程 */
         }
       } catch (e) {
         if (cancelled) return
@@ -587,6 +596,21 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           {`发现 ${discover.candidates.filter((c) => c.adaptedAs === undefined).length} 个未接入工程（${
             discover.candidates.filter((c) => c.adaptedAs === undefined).map((c) => c.dirname).join('、')
           }）`}
+        </div>
+      ) : null}
+
+      {/* ── §16 内核过旧提示（capabilities 无 meta 时） ── */}
+      {hostOk === true && kernelOld ? (
+        <div
+          style={{
+            flex: '0 0 auto',
+            padding: '3px 8px',
+            fontSize: '11px',
+            color: 'var(--elab-status-run)',
+            borderBottom: '1px solid var(--elab-border)',
+          }}
+        >
+          {'当前 elab 内核较旧（无自描述元数据）：步骤标签与档位使用插件内置默认；同步会话仓库的 cockpit/server.py（v2.1.0+）后消失'}
         </div>
       ) : null}
 
