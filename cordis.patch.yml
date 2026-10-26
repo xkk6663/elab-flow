@@ -1,0 +1,9 @@
+# dsh-elab-cockpit bundle patch
+#
+# 与 dsh-plugin-wallpaper-engine 同形制：单条 insert，无 disabled 字段。
+# ★ 之前的 `disabled: !!js [...]` 防重复挂载表达式，在宿主扫描 client 半时
+#   可能把这行判成 disabled，导致 client 半不加载（实测：client 槽位始终不出现）。
+#   去掉它 —— 本插件不参与聚合包，重复挂载风险由宿主 loader 自身处理。
+- insert:
+    - id: elab-cockpit
+      name: 'dsh-elab-cockpit'
