@@ -1,0 +1,549 @@
+/**
+ * CockpitPane —— 窄栏根容器：**只剩渲染**（批 2 编排下沉后的形态）。
+ *
+ * 数据流（单向）：
+ *   cockpit-service（app 层编排）
+ *     ├─ snapshot（useSyncExternalStore）→ StageLadder / ManualBar / 状态条
+ *     └─ onRawEvent → 环形缓冲（日志行不进 React 状态）→ EvidenceTail
+ *
+ * 本组件的职责边界：
+ *  - 组装客户端半（elabApi + EventStream 端口 + sessionId → service）——
+ *    DSH 把槽位 props 传给组件而非 factory，所以客户端半的组装点在这里
+ *    （host 半的组装点在 main.ts）；
+ *  - 原始事件 → 日志行落缓冲（通道/语气/步骤行文案是呈现，不是业务）；
+ *  - 批 3 适配状态机 banner（unbound/discovered/adapting/bound 的可视化）。
+ *
+ * 关键纪律（继承自旧实现，一条不丢）：
+ *  - **可见性驱动 SSE**：visible 变化 → service.setVisible（断开/续传由端口管）；
+ *  - **失败即中断**：不做任何"自动重试"或"跳过继续"；
+ *  - 日志行只在 buffer 里追加，按 version 节流重绘。
+ */
+
+import React from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import type { ReactNode } from 'react'
+
+import { createCockpitService } from '../../app/cockpit-service.ts'
+import type { PlanPreview } from '../../domain/icd.ts'
+import { channelOfEvent, channelOfStep } from '../../domain/channels.ts'
+import type { LogChannelId } from '../../domain/channels.ts'
+import { LOG_CHANNELS } from '../../domain/channels.ts'
+import type { PlanView } from '../../domain/pipeline.ts'
+import { elabApi } from '../kernel-http/icd-client.ts'
+import { createRunEventsPort } from './events/run-events.ts'
+import { StageLadder, stepLabelOf } from './StageLadder.tsx'
+import type { LadderStep } from './StageLadder.tsx'
+import { ManualBar } from './ManualBar.tsx'
+import { EvidenceTail, TAIL_CAPACITY } from './EvidenceTail.tsx'
+import type { TailBuffers, TailLine } from './EvidenceTail.tsx'
+
+/** 每个通道的环形缓冲（最多 TAIL_CAPACITY 行）。 */
+function pushLine(buf: TailLine[], line: TailLine): void {
+  buf.push(line)
+  if (buf.length > TAIL_CAPACITY) buf.splice(0, buf.length - TAIL_CAPACITY)
+}
+
+function emptyBuffers(): TailBuffers {
+  const b: TailBuffers = {}
+  for (const c of LOG_CHANNELS) b[c] = []
+  return b
+}
+
+/** 行色调：stderr / 含 error 关键字 → alert；警告关键字 → warn。 */
+function toneOf(text: string): TailLine['tone'] {
+  const low = text.toLowerCase()
+  if (low.includes('hardfault') || low.includes('hard fault') || low.includes('panic')) return 'alert'
+  if (low.includes(' error') || low.includes('failed') || low.includes('✗') || low.startsWith('error')) return 'alert'
+  if (low.includes('warning') || low.includes('warn') || low.includes('⚠')) return 'warn'
+  return 'normal'
+}
+
+export interface CockpitPaneProps {
+  /** 会话 id（Host 半据此解析 cwd → elab 仓库根）。 */
+  sessionId?: string
+  /** 宿主是否把面板显示出来了（不可见时断开 SSE）。 */
+  visible?: boolean
+}
+
+/**
+ * §5.4 宽度三档：ResizeObserver 实测容器宽。
+ * 阈值 420/700 为方案初值，待 P0 真实会话读数后校准（见 §5.4 表）。
+ */
+function usePaneWidth(ref: { readonly current: HTMLDivElement | null }): number {
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const el = ref.current
+    if (el === null || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries: ResizeObserverEntry[]) => {
+      for (const entry of entries) setWidth(Math.round(entry.contentRect.width))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [ref])
+  return width
+}
+
+/** 批 3 适配状态机 banner（discovered/adapting/bound/error 的呈现）。 */
+function AdaptBanner(props: {
+  phase: string
+  pending: Array<{ path: string; dirname: string }>
+  adaptingPath: string | null
+  lastAdapted: string | null
+  error: string | null
+  disabled: boolean
+  onAdapt(path: string): void
+}): ReactNode {
+  const { phase, pending, adaptingPath, lastAdapted, error, disabled, onAdapt } = props
+
+  if (phase === 'adapting') {
+    return (
+      <div
+        style={{
+          flex: '0 0 auto',
+          padding: '3px 8px',
+          fontSize: '11px',
+          color: 'var(--elab-status-run)',
+          borderBottom: '1px solid var(--elab-border)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {`一键适配中：${adaptingPath ?? '…'}（探测证据 → 写 projects/*.yaml）`}
+      </div>
+    )
+  }
+  if (error !== null) {
+    return (
+      <div
+        role="alert"
+        style={{
+          flex: '0 0 auto',
+          padding: '3px 8px',
+          fontSize: '11px',
+          color: 'var(--elab-status-fail)',
+          borderBottom: '1px solid var(--elab-border)',
+        }}
+      >
+        {`适配失败：${error}`}
+      </div>
+    )
+  }
+  if (pending.length === 0) {
+    if (phase === 'bound' && lastAdapted !== null) {
+      return (
+        <div
+          style={{
+            flex: '0 0 auto',
+            padding: '3px 8px',
+            fontSize: '11px',
+            color: 'var(--elab-status-ok)',
+            borderBottom: '1px solid var(--elab-border)',
+          }}
+        >
+          {`已接入工程「${lastAdapted}」——建议跑一次三连自证（体检+编译）`}
+        </div>
+      )
+    }
+    return null
+  }
+  // discovered：每个未接入候选给一个「一键适配」按钮
+  return (
+    <div
+      style={{
+        flex: '0 0 auto',
+        padding: '3px 8px',
+        fontSize: '11px',
+        color: 'var(--elab-fg-muted)',
+        borderBottom: '1px solid var(--elab-border)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '2px',
+      }}
+    >
+      {pending.map((c) => (
+        <div key={c.path} style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+          <span
+            style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={c.path}
+          >
+            {`发现未接入工程：${c.dirname}`}
+          </span>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onAdapt(c.path)}
+            title={`接入 ${c.path}（只生成 projects/<name>.yaml，业务工程零改动）`}
+            style={{
+              flex: '0 0 auto',
+              padding: '0 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: 'var(--elab-accent)',
+              cursor: disabled ? 'default' : 'pointer',
+            }}
+          >
+            {'一键适配'}
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function CockpitPane(props: CockpitPaneProps): ReactNode {
+  const { sessionId, visible = true } = props
+
+  // ── 客户端半组装点：elabApi（kernel-http 客户端）+ EventStream 端口 → service ──
+  const service = useMemo(
+    () => createCockpitService({ api: elabApi, events: createRunEventsPort(), sessionId }),
+    [sessionId],
+  )
+  const snap = useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
+
+  // ── 本地呈现态（日志缓冲 / 频道聚焦，不进 service） ──
+  const buffersRef = useRef<TailBuffers>(emptyBuffers())
+  const [channel, setChannel] = useState<LogChannelId>('build')
+  const [focusStep, setFocusStep] = useState<string | null>(null)
+  const [tailVersion, setTailVersion] = useState(0)
+  const [cleanTarget, setCleanTarget] = useState<string | null>(null)
+
+  /** 日志追加后节流重绘（≤1 次/100ms）。 */
+  const bumpTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bumpTail = useCallback(() => {
+    if (bumpTimer.current !== null) return
+    bumpTimer.current = setTimeout(() => {
+      bumpTimer.current = null
+      setTailVersion((v) => v + 1)
+    }, 100)
+  }, [])
+
+  // ── 生命周期：init / 原始事件订阅 / 可见性 / 释放 ──
+  useEffect(() => {
+    void service.init()
+    return () => service.dispose()
+  }, [service])
+
+  useEffect(() => {
+    // 原始事件 → 日志行落缓冲（状态归约已由 service 完成，这里只管呈现）
+    const ingest = (e: Record<string, unknown>): void => {
+      const topic = String(e.topic ?? '')
+      const step = String(e.step ?? '')
+      const ch = channelOfEvent({ topic, step: e.step } as never)
+      if (ch === null) return
+      const buf = buffersRef.current[ch] ?? (buffersRef.current[ch] = [])
+      if (topic === 'proc/stdout-batch') {
+        for (const t of (e.lines as string[] | undefined) ?? []) {
+          pushLine(buf, { text: t, tone: toneOf(t), step })
+        }
+      } else if (topic === 'proc/stdout' || topic === 'proc/stderr') {
+        const t = String(e.line ?? '')
+        pushLine(buf, { text: t, tone: toneOf(t), step })
+      } else if (topic === 'run/step-exit') {
+        const ok = Boolean(e.ok)
+        const detail = String(e.detail ?? '')
+        pushLine(buf, {
+          text: `${ok ? '\u2713' : '\u2717'} ${stepLabelOf(step)} ${ok ? '完成' : '失败'}${detail !== '' ? `：${detail}` : ''}`,
+          tone: ok ? 'normal' : 'alert',
+          step,
+        })
+      } else if (topic === 'run/step-enter') {
+        pushLine(buf, { text: `\u25b6 进入 ${stepLabelOf(step)}`, tone: 'warn', step })
+      }
+      bumpTail()
+    }
+    return service.onRawEvent(ingest)
+  }, [service, bumpTail])
+
+  useEffect(() => {
+    // 只读预览命令 → build 通道缓冲（呈现；请求编排在 service.preview）
+    return service.onPreview((p: PlanPreview) => {
+      const lines: string[] = []
+      for (const entry of p.plan ?? []) {
+        for (const argv of entry.commands ?? []) lines.push(argv.join(' '))
+        if ((entry.effects ?? []).length > 0) lines.push(`! ${entry.effects.join('；')}`)
+      }
+      const buf = buffersRef.current.build
+      pushLine(buf, { text: '── 只读预览（不会执行）──', tone: 'warn', step: 'preview' })
+      for (const l of lines) if (l !== '') pushLine(buf, { text: l, tone: 'normal', step: 'preview' })
+      bumpTail()
+      setChannel('build')
+      // 内核预览的顶层没有稳定字段名：work_dir/clean_target 都试（与旧实现一致）
+      const wd = (p as unknown as Record<string, unknown>).work_dir
+      const ct = (p as unknown as Record<string, unknown>).clean_target
+      setCleanTarget(typeof wd === 'string' ? wd : typeof ct === 'string' ? ct : null)
+    })
+  }, [service, bumpTail])
+
+  useEffect(() => {
+    service.setVisible(visible)
+  }, [service, visible])
+
+  // run 切换 → 清缓冲 + 频道复位（旧实现同款）
+  const runId = snap.run.run
+  useEffect(() => {
+    if (runId === null) return
+    buffersRef.current = emptyBuffers()
+    setChannel('build')
+  }, [runId])
+
+  // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
+  const steps: LadderStep[] = snap.run.steps
+  const running = snap.run.status === 'running'
+  const failure = useMemo(() => {
+    for (let i = steps.length - 1; i >= 0; i -= 1) {
+      if (steps[i].state === 'failed') {
+        return { step: stepLabelOf(steps[i].id), detail: steps[i].detail || '见日志' }
+      }
+    }
+    return null
+  }, [steps])
+
+  const setProject = useCallback(
+    (name: string) => {
+      service.selectProject(name)
+      setFocusStep(null)
+    },
+    [service],
+  )
+
+  const onRunOne = useCallback((id: string) => void service.runOne(id), [service])
+
+  // ── 渲染 ──
+  if (snap.hostOk === false) {
+    return (
+      <div style={{ padding: '12px', fontSize: '12px', lineHeight: 1.6, color: 'var(--elab-fg-primary)' }}>
+        <div style={{ fontWeight: 600, marginBottom: '6px' }}>{'驾驶舱未就绪'}</div>
+        <div style={{ color: 'var(--elab-fg-secondary)' }}>{snap.hostError ?? '未知原因'}</div>
+        <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+          {'处理：确认 python 在 PATH，且当前会话位于 elab 仓库内（含 elab.host.yaml、cockpit/、services/elab）。'}
+        </div>
+      </div>
+    )
+  }
+
+  // ── §5.4 宽度三档 ──
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const paneWidth = usePaneWidth(rootRef)
+  const tier: 'narrow' | 'mid' | 'wide' = paneWidth >= 700 ? 'wide' : paneWidth >= 420 ? 'mid' : 'narrow'
+
+  const plans: PlanView[] = snap.plans
+
+  return (
+    <div
+      ref={rootRef}
+      className="elab-root"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        minHeight: 0,
+        background: 'var(--elab-bg-canvas)',
+        color: 'var(--elab-fg-primary)',
+      }}
+    >
+      {/* ── 工程条 ── */}
+      <div
+        style={{
+          flex: '0 0 auto',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '5px 8px',
+          borderBottom: '1px solid var(--elab-border)',
+          fontSize: '12px',
+        }}
+      >
+        <select
+          value={snap.project}
+          disabled={running}
+          onChange={(e: any) => setProject(e.currentTarget.value)}
+          style={{
+            flex: '1 1 auto',
+            minWidth: 0,
+            padding: '1px 4px',
+            fontSize: '12px',
+            borderRadius: '4px',
+            border: '1px solid var(--elab-border)',
+            background: 'var(--elab-bg-surface)',
+            color: 'var(--elab-fg-primary)',
+          }}
+          title={running ? '有任务在跑，先取消或等它结束' : '选择工程'}
+        >
+          {snap.projects.length === 0 ? <option value="">{'（无工程）'}</option> : null}
+          {snap.projects.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+
+        {snap.run.actor !== null ? (
+          <span
+            style={{
+              fontSize: '10px',
+              padding: '0 4px',
+              borderRadius: '3px',
+              background: 'var(--elab-bg-raised)',
+              color: snap.run.actor === 'human' ? 'var(--elab-accent)' : 'var(--elab-fg-muted)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {snap.run.actor === 'human' ? '我点的' : 'agent'}
+          </span>
+        ) : null}
+
+        {snap.run.status !== 'idle' ? (
+          <span
+            style={{
+              fontSize: '10px',
+              whiteSpace: 'nowrap',
+              color:
+                snap.run.status === 'ok'
+                  ? 'var(--elab-status-ok)'
+                  : snap.run.status === 'failed'
+                    ? 'var(--elab-status-fail)'
+                    : snap.run.status === 'cancelled'
+                      ? 'var(--elab-status-run)'
+                      : 'var(--elab-accent)',
+            }}
+          >
+            {snap.run.status}
+          </span>
+        ) : null}
+
+        <button
+          type="button"
+          onClick={() => void service.reloadProjects()}
+          title="重新读取 projects/*.yaml"
+          style={{
+            flex: '0 0 auto',
+            padding: '0 5px',
+            fontSize: '11px',
+            borderRadius: '4px',
+            border: '1px solid var(--elab-border)',
+            background: 'transparent',
+            color: 'var(--elab-fg-secondary)',
+            cursor: 'pointer',
+          }}
+        >
+          {'\u21bb'}
+        </button>
+      </div>
+
+      {/* ── 批 3 适配状态机 banner ── */}
+      {snap.hostOk === true ? (
+        <AdaptBanner
+          phase={snap.adapt.phase}
+          pending={snap.adapt.candidates
+            .filter((c) => c.adaptedAs === undefined)
+            .map((c) => ({ path: c.path, dirname: c.dirname }))}
+          adaptingPath={snap.adapt.target}
+          lastAdapted={snap.adapt.lastAdapted}
+          error={snap.adapt.error}
+          disabled={running || snap.busy}
+          onAdapt={(path) => void service.adaptProject(path)}
+        />
+      ) : null}
+
+      {/* ── §16 内核过旧提示（capabilities 无 meta 时） ── */}
+      {snap.hostOk === true && snap.kernelOld ? (
+        <div
+          style={{
+            flex: '0 0 auto',
+            padding: '3px 8px',
+            fontSize: '11px',
+            color: 'var(--elab-status-run)',
+            borderBottom: '1px solid var(--elab-border)',
+          }}
+        >
+          {'当前 elab 内核较旧（无自描述元数据）：步骤标签与档位使用插件内置默认；同步会话仓库的 cockpit/server.py（v2.1.0+）后消失'}
+        </div>
+      ) : null}
+
+      {/* ── 阶梯 / 控制条 / 错误 / 日志尾 —— wide 档双栏（左 40% 阶梯 + 右 60% 日志尾）—— */}
+      {(() => {
+        const ladder = (
+          <StageLadder
+            steps={steps}
+            availability={snap.availability}
+            focusStep={focusStep}
+            running={running}
+            density={tier}
+            onFocus={(id) => {
+              setFocusStep(id)
+              setChannel(channelOfStep(id))
+            }}
+            onRunOne={onRunOne}
+            progressOf={(id) =>
+              id === steps.find((s) => s.state === 'running')?.id && snap.progress !== null
+                ? { current: snap.progress.current, total: snap.progress.total }
+                : null
+            }
+          />
+        )
+        const bar = (
+          <ManualBar
+            plans={plans}
+            running={running}
+            busy={snap.busy}
+            cleanTarget={cleanTarget}
+            onRun={(id, opts) => void service.startPlan(id, opts)}
+            onCancel={() => void service.cancel()}
+            onPreview={(opts) => void service.preview(opts)}
+          />
+        )
+        const error = snap.error !== null ? (
+          <div
+            role="alert"
+            style={{
+              flex: '0 0 auto',
+              padding: '4px 8px',
+              fontSize: '11px',
+              color: 'var(--elab-status-fail)',
+              borderBottom: '1px solid var(--elab-border)',
+            }}
+          >
+            {snap.error}
+          </div>
+        ) : null
+        const tail = (
+          <EvidenceTail
+            channel={channel}
+            channels={LOG_CHANNELS}
+            buffers={buffersRef.current}
+            progress={snap.progress}
+            failure={failure}
+            onChannel={setChannel}
+            serial={channel === 'serial' ? { writable: true, port: 'auto', baud: 115200, onSend: () => {} } : null}
+          />
+        )
+        if (tier !== 'wide') {
+          return (
+            <>
+              {ladder}
+              {bar}
+              {error}
+              {tail}
+            </>
+          )
+        }
+        return (
+          <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', alignItems: 'stretch' }}>
+            <div style={{ flex: '0 0 40%', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+              {ladder}
+              {bar}
+              {error}
+              <div style={{ flex: '1 1 auto' }} />
+            </div>
+            <div style={{ flex: '1 1 60%', minWidth: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--elab-border)' }}>
+              {tail}
+            </div>
+          </div>
+        )
+      })()}
+    </div>
+  )
+}

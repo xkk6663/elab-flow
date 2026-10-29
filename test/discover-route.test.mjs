@@ -17,7 +17,7 @@ import {
   findElabRoot,
   readAdaptedProjects,
   resolveSessionCwd,
-} from '../src/host/discover-route.ts'
+} from '../src/adapters/kernel-http/discover-route.ts'
 
 let ROOT
 const norm = (p) => p.replace(/\\/g, '/').toLowerCase()

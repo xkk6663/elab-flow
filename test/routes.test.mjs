@@ -9,9 +9,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { registerApiRoute, registerEventsRoute } from '../src/host/routes.ts'
-import { apply as applyHostPackage } from '../src/index.ts'
-import { looksLikeElabRoot, parsePortFromBanner, resolvePython } from '../src/host/host-process.ts'
+import { registerApiRoute, registerEventsRoute } from '../src/adapters/kernel-http/routes.ts'
+import { apply as applyHostPackage } from '../src/main.ts'
+import { looksLikeElabRoot, parsePortFromBanner, resolvePython } from '../src/adapters/kernel-process/host-process.ts'
 
 function makeCtx({ reject = false } = {}) {
   const routes = []

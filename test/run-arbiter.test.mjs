@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { RunArbiter } from '../src/host/run-arbiter.ts'
+import { RunArbiter } from '../src/domain/arbiter.ts'
 
 test('空闲时 acquire 成功；第二个请求 busy 且带 holder', async () => {
   const arbiter = new RunArbiter(async (run) => run === 'r-1') // r-1 挂起后视为在跑

@@ -1,6 +1,6 @@
 /** 验证：把 cockpit 进程放进 Job 后，服务是否还能响应。 */
 import { spawn } from 'node:child_process'
-import { armJobForPid } from '../src/host/job-object.ts'
+import { armJobForPid } from '../src/adapters/kernel-process/job-object.ts'
 
 const root = process.argv[2]
 const useJob = process.argv[3] !== 'nojob'

@@ -2,7 +2,7 @@
  * 手工探针脚本（非测试）：对着真实仓库跑一次 discovery，看命中与耗时。
  *   node --experimental-strip-types packages/dsh-elab-cockpit/scripts/probe-discover.mjs <root>
  */
-import { discoverProjects } from '../src/host/discovery.ts'
+import { discoverProjects } from '../src/adapters/kernel-http/discovery.ts'
 
 const root = process.argv[2] ?? process.cwd()
 const r = await discoverProjects({ root })

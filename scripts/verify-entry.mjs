@@ -4,7 +4,7 @@
  */
 import { createServer } from 'node:http'
 
-import { apply, name, inject, resolveConfig } from '../src/index.ts'
+import { apply, name, inject, resolveConfig } from '../src/main.ts'
 
 const root = process.argv[2] ?? process.cwd()
 console.log('plugin name:', name, '| inject:', JSON.stringify(inject))
