@@ -5,7 +5,7 @@
     "moduleResolution": "bundler",
     "rewriteRelativeImportExtensions": true,
     "outDir": "build/client",
-    "rootDir": "src/client",
+    "rootDir": "src",
     "strict": true,
     "skipLibCheck": true,
     "jsx": "react",
@@ -22,7 +22,7 @@
     ]
   },
   "include": [
-    "src/client/**/*.ts",
-    "src/client/**/*.tsx"
+    "src/adapters/dsh-web/**/*.ts",
+    "src/adapters/dsh-web/**/*.tsx"
   ]
 }

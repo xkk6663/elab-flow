@@ -14,7 +14,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const CLIENT_DIR = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src', 'client')
+const CLIENT_DIR = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src', 'adapters', 'dsh-web')
 const MAP_FILE = /theme[/\\]dsw-map\.ts$/
 
 function walk(dir) {

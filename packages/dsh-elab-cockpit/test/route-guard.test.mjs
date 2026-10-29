@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { registerOnce, registeredRoutes } from '../src/host/route-guard.ts'
+import { registerOnce, registeredRoutes } from '../src/adapters/kernel-http/route-guard.ts'
 
 /** 假宿主：重复 path 一律抛 duplicate（与真实 webServer 行为一致）。 */
 function makeHost() {

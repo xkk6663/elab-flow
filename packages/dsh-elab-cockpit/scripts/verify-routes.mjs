@@ -4,7 +4,7 @@
  */
 import { createServer } from 'node:http'
 
-import { apply } from '../src/host/index.ts'
+import { apply } from '../src/app/host-app.ts'
 
 const root = process.argv[2] ?? process.cwd()
 const routes = []

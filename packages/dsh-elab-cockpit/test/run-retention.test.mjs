@@ -14,7 +14,7 @@ import {
   planDeletion,
   runIdOf,
   runRetention,
-} from '../src/host/run-retention.ts'
+} from '../src/adapters/fs-store/run-retention.ts'
 
 let ROOT
 let seq = 0

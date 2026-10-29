@@ -7,7 +7,7 @@
  */
 import { createServer } from 'node:http'
 
-import { applyDiscover } from '../src/host/discover-route.ts'
+import { applyDiscover } from '../src/adapters/kernel-http/discover-route.ts'
 
 const elabRoot = process.argv[2] ?? process.cwd()
 const routes = []

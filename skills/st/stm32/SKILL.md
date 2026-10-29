@@ -1,6 +1,6 @@
 ---
 name: stm32
-description: "stm32 平台芯片（STM32F103xB、STM32F411xE）在 elab-Flow 下的编译/烧录/调试闭环。当需要在 STM32F103xB/STM32F411xE 上改动固件并验证、或遇到构建/烧录/调试问题时使用。触发词：stm32、STM32F103xB、STM32F411xE、f411、stm32_test、elab build/flash/debug/monitor。"
+description: "stm32 平台芯片（STM32F103xB、STM32F411xE）在 elab-Flow 下的编译/烧录/调试闭环。当需要在 STM32F103xB/STM32F411xE 上改动固件并验证、或遇到构建/烧录/调试问题时使用。触发词：stm32、STM32F103xB、STM32F411xE、f411、f411_boot、stm32_test、elab build/flash/debug/monitor。"
 agent_created: true
 ---
 
@@ -84,6 +84,7 @@ elab monitor -p stm32_test           # 串口闭环判据：ok / failed / inconc
 | 工程 | 形态 | 业务工程目录（elab 只读，不改） |
 |---|---|---|
 | `f411` | A 类 | `${ELAB_ROOT}/examples/STM32F411CEU6` |
+| `f411_boot` | A 类 | `${ELAB_ROOT}/examples/F411CEU6_BOOT` |
 
 ### 闭环命令（以工程 `f411` 为例）
 
@@ -116,6 +117,13 @@ elab monitor -p f411           # 串口闭环判据：ok / failed / inconclusive
 - [ ] `elab build -p f411` 通过，`guard.untouched == true`（业务工程零改动）
 - [ ] `elab debug -p f411 --verify` 断到 `main`
 - [ ] `elab monitor -p f411` 判 **ok**（`^\[(boot|alive)\]` 判据命中）
+
+**工程 `f411_boot`**
+
+- [ ] `elab doctor -p f411_boot` 全绿（含漂移校验）
+- [ ] `elab build -p f411_boot` 通过，`guard.untouched == true`（业务工程零改动）
+- [ ] `elab debug -p f411_boot --verify` 断到 `main`
+- [ ] `elab monitor -p f411_boot` 判 **ok**（`^\[(boot|alive)\]` 判据命中）
 
 **工程 `stm32_test`**
 

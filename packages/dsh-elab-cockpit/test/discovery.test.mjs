@@ -12,7 +12,7 @@ import {
   normalizePath,
   stripComments,
   DEFAULT_MAX_DEPTH,
-} from '../src/host/discovery.ts'
+} from '../src/adapters/kernel-http/discovery.ts'
 
 /** 构造内存 fs。keys 用正斜杠绝对路径。 */
 function fakeFs(files, dirsOverride) {

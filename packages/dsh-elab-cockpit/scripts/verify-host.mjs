@@ -9,7 +9,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-import { CockpitHost, looksLikeElabRoot } from '../src/host/host-process.ts'
+import { CockpitHost, looksLikeElabRoot } from '../src/adapters/kernel-process/host-process.ts'
 
 const execFileAsync = promisify(execFile)
 const root = process.argv[2] ?? process.cwd()

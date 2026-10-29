@@ -24,7 +24,6 @@
     ]
   },
   "include": [
-    "src/index.ts",
-    "src/host/**/*.ts"
+    "src/main.ts"
   ]
 }

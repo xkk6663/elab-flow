@@ -232,8 +232,18 @@ def generate(cfg: Config, *, project: str | None = None, chip_ref: str | None = 
         out.parent.mkdir(parents=True, exist_ok=True)
         text = render_platform(cfg, vendor, platform, group, host)
         out.write_text(text, encoding="utf-8")
+        # DSH 发现路径桥（批 3，docs/架构调研 §5）：agent 运行时从
+        # `<root>/.agents/skills/<platform>/SKILL.md` 发现 skill（与
+        # `.agents/skills/elab-loop` 同一机制），而内核原生输出在
+        # `skills/<vendor>/<platform>/` —— 生成物与发现路径曾错位。
+        # 只加不改：原路径输出保留，这里双写镜像（§6 风险表"双写过渡"）。
+        mirror = cfg.root / ".agents" / "skills" / platform / "SKILL.md"
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        mirror.write_text(text, encoding="utf-8")
         chips_note = "、".join(c.get("part", "?") for c in group)
-        log(f"[elab] ✓ 生成平台 skill：{to_fwd(out)}  ({len(text)} B，芯片：{chips_note})")
+        log(f"[elab] ✓ 生成平台 skill：{to_fwd(out)}  (+镜像 {to_fwd(mirror)})"
+            f"  ({len(text)} B，芯片：{chips_note})")
         written.append({"platform": f"{vendor}/{platform}", "path": to_fwd(out),
+                        "mirror": to_fwd(mirror),
                         "bytes": len(text), "chips": [_chip_ref(c) for c in group]})
     return written
