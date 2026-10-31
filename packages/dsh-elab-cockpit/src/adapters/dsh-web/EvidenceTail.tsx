@@ -52,13 +52,8 @@ export interface EvidenceTailProps {
   /** 最近一次失败：显示常驻告警条。 */
   failure: { step: string; detail: string } | null
   onChannel(channel: LogChannelId): void
-  /** 串口通道才显示输入行。 */
-  serial?: {
-    writable: boolean
-    port: string
-    baud: number
-    onSend(line: string): void
-  } | null
+  /** 串口通道的融合工作区（行/字节/终端/波形 + 发送）；给定后替代日志区。 */
+  serialContent?: ReactNode
 }
 
 const TONE_COLOR: Record<TailLine['tone'], string> = {
@@ -116,13 +111,14 @@ function ProgressBar(props: { current: number; total: number; label: string; sta
 
 export function EvidenceTail(props: EvidenceTailProps): ReactNode {
   const { channel, channels, buffers, progress, failure } = props
-  const [draft, setDraft] = useState('')
   const [follow, setFollow] = useState(true)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followRef = useRef(true)
   followRef.current = follow
 
   const lines = buffers[channel] ?? []
+  /** 串口通道切到融合工作区：日志区整体让位（跟随/进度由工作区自己管）。 */
+  const serialMode = channel === 'serial' && props.serialContent !== undefined
 
   // 命令式追加后滚到底（只在"跟随"时；用户手动上滚则暂停）
   useEffect(() => {
@@ -187,25 +183,33 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
             )
           })}
 
-        <button
-          type="button"
-          onClick={() => setFollow((v) => !v)}
-          title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
-          style={{
-            marginLeft: 'auto',
-            padding: '1px 6px',
-            fontSize: '11px',
-            borderRadius: '4px',
-            border: '1px solid var(--elab-border)',
-            background: 'transparent',
-            color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
-            cursor: 'pointer',
-          }}
-        >
-          {follow ? '\u25be 跟随' : '\u21ba 恢复'}
-        </button>
+        {serialMode ? null : (
+          <button
+            type="button"
+            onClick={() => setFollow((v) => !v)}
+            title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
+            style={{
+              marginLeft: 'auto',
+              padding: '1px 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
+              cursor: 'pointer',
+            }}
+          >
+            {follow ? '\u25be 跟随' : '\u21ba 恢复'}
+          </button>
+        )}
       </div>
 
+      {serialMode ? (
+        <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {props.serialContent}
+        </div>
+      ) : (
+        <>
       {/* ── 进度条（有进度才显示） ── */}
       {progress !== null && progress.total > 0 ? (
         <ProgressBar current={progress.current} total={progress.total} label={progress.label} startedAt={null} />
@@ -283,48 +287,9 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
         )}
       </div>
 
-      {/* ── 串口输入行（仅串口通道） ── */}
-      {channel === 'serial' && props.serial !== null && props.serial !== undefined ? (
-        <form
-          onSubmit={(e: any) => {
-            e.preventDefault()
-            const text = draft.trim()
-            if (text === '' || !props.serial?.writable) return
-            props.serial.onSend(text)
-            setDraft('')
-          }}
-          style={{
-            flex: '0 0 auto',
-            display: 'flex',
-            gap: '4px',
-            alignItems: 'center',
-            padding: '4px 8px',
-            borderTop: '1px solid var(--elab-border)',
-          }}
-        >
-          <input
-            value={draft}
-            onChange={(e: any) => setDraft(e.currentTarget.value)}
-            disabled={!props.serial.writable}
-            placeholder={props.serial.writable ? '输入一行并回车发送到设备' : '串口写通道不可用'}
-            aria-label="串口手动输入"
-            style={{
-              flex: '1 1 auto',
-              minWidth: 0,
-              padding: '2px 6px',
-              fontSize: '11px',
-              fontFamily: 'var(--elab-font-mono)',
-              borderRadius: '4px',
-              border: '1px solid var(--elab-border)',
-              background: 'var(--elab-bg-surface)',
-              color: 'var(--elab-fg-primary)',
-            }}
-          />
-          <span style={{ fontSize: '10px', color: 'var(--elab-fg-muted)', whiteSpace: 'nowrap' }}>
-            {`${props.serial.port || 'auto'}@${props.serial.baud}`}
-          </span>
-        </form>
-      ) : null}
+      {/* ── 串口输入行已迁到 SerialPane（融合工作区自带发送面板） ── */}
+        </>
+      )}
     </div>
   )
 }

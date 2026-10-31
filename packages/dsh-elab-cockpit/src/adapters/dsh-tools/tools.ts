@@ -13,6 +13,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { resolveRunSteps, type PlanDef, type PlanId, type StepAvailability } from '../../domain/pipeline.ts'
+import type { SerialBytesTail } from '../../domain/icd.ts'
 import type { ToolDeps } from '../../app/ports.ts'
 
 /** 批 2 端口化：依赖形状收敛到 app/ports.ts（实现由 main.ts 组装注入）；旧名保留。 */
@@ -180,6 +181,29 @@ async function logTail(
   }
 }
 
+/** 拉一段字节批次（P1）：agent 读串口的唯一数据面。 */
+async function fetchBytes(
+  deps: ToolsDeps,
+  after: number,
+  opts: { direction?: 'all' | 'rx' | 'tx'; limit?: number } = {},
+): Promise<SerialBytesTail> {
+  const q = new URLSearchParams({ after: String(after) })
+  if (opts.direction !== undefined && opts.direction !== 'all') q.set('dir', opts.direction)
+  if (opts.limit !== undefined && opts.limit > 0) q.set('limit', String(opts.limit))
+  return cockpit<SerialBytesTail>(deps, `/api/serial/monitor/bytes?${q.toString()}`)
+}
+
+/** 批次 → agent 可读文本（UTF-8 投影 + 原始 hex 兜底）。 */
+function chunkText(dataB64: string): { text: string; hex: string } {
+  const bytes = Buffer.from(dataB64, 'base64')
+  return {
+    text: bytes.toString('utf8'),
+    hex: bytes.toString('hex').replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1 '),
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
 /** 注册全部 elab_* 工具（autoExposeTools=true 时由入口调用）。 */
 export function registerElabTools(
   register: (definition: unknown) => () => void,
@@ -299,15 +323,27 @@ export function registerElabTools(
   add(
     makeTool({
       name: 'elab_serial',
-      description: '向指定工程的串口写一行数据（写硬件！需要 allowAgentWrite 开启）。波特率默认 115200。',
+      description:
+        '向指定工程的串口写数据（写硬件！需要 allowAgentWrite 开启）。默认 UTF-8 文本 + CRLF；' +
+        'format=hex 时 data 按十六进制字节发送（空格可有可无）。',
       parameters: {
         project: { type: 'string', required: true, description: '工程名' },
-        data: { type: 'string', required: true, description: '要写入的一行（不含换行符）' },
+        data: { type: 'string', required: true, description: '要写入的内容（不含换行符；hex 格式时为十六进制串）' },
         baud: { type: 'number', description: '波特率（默认 115200）' },
+        format: { type: 'string', description: 'utf8 / ascii / gbk / hex（默认 utf8）' },
+        eol: { type: 'string', description: 'none / lf / crlf（默认 crlf；hex 自动 none）' },
+        encoding: { type: 'string', description: '文本编码（默认 utf-8）' },
       },
       output: jsonOutput,
       presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 串口写' }),
-      async execute(args: { project: string; data: string; baud?: number }) {
+      async execute(args: {
+        project: string
+        data: string
+        baud?: number
+        format?: string
+        eol?: string
+        encoding?: string
+      }) {
         if (!deps.allowAgentWrite()) {
           return {
             ok: false,
@@ -318,7 +354,245 @@ export function registerElabTools(
         return cockpit(deps, '/api/serial', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project: args.project, data: args.data, ...(args.baud !== undefined ? { baud: args.baud } : {}) }),
+          body: JSON.stringify({
+            project: args.project,
+            data: args.data,
+            ...(args.baud !== undefined ? { baud: args.baud } : {}),
+            ...(args.format !== undefined ? { format: args.format } : {}),
+            ...(args.eol !== undefined ? { eol: args.eol } : {}),
+            ...(args.encoding !== undefined ? { encoding: args.encoding } : {}),
+          }),
+        })
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_monitor',
+      description:
+        '常驻串口监视会话（open/close/clear/pause/resume）。agent 打开时默认带 lease_s 租约，' +
+        '到期自动释放端口（避免把串口一直占死）。读数据用 elab_serial_read / elab_serial_wait。',
+      parameters: {
+        action: {
+          type: 'string',
+          required: true,
+          description: 'open / close / clear / pause / resume',
+        },
+        project: { type: 'string', description: '工程名（open 时用于解析端口/波特率）' },
+        port: { type: 'string', description: '显式端口（缺省取工程配置）' },
+        baud: { type: 'number', description: '显式波特率（缺省取工程配置）' },
+        lease_s: { type: 'number', description: '租约秒数（open 时默认 120；0 = 无租约）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 串口监视' }),
+      async execute(args: {
+        action: string
+        project?: string
+        port?: string
+        baud?: number
+        lease_s?: number
+      }) {
+        const action = args.action as 'open' | 'close' | 'clear' | 'pause' | 'resume'
+        if (!['open', 'close', 'clear', 'pause', 'resume'].includes(action)) {
+          return { ok: false, code: 'bad-action', note: `action 必须是 open/close/clear/pause/resume：${args.action}` }
+        }
+        const body: Record<string, unknown> = { action }
+        if (action === 'open') {
+          body.actor = 'agent'
+          if (args.project !== undefined) body.project = args.project
+          if (args.port !== undefined) body.port = args.port
+          if (args.baud !== undefined) body.baud = args.baud
+          body.lease_s = args.lease_s !== undefined ? args.lease_s : 120
+          // 写权限随用户设置（默认关）；读不受限。
+          body.allow_agent_write = deps.allowAgentWrite()
+        }
+        return cockpit(deps, '/api/serial/monitor', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_read',
+      description:
+        '增量读取串口监视会话的原始字节（带方向/时间/序号）。返回 next_after 游标与 text/hex 投影；' +
+        '没有会话时先 elab_serial_monitor action=open。只读，不写硬件。',
+      parameters: {
+        after: { type: 'number', description: '上次返回的 next_after（缺省 0 = 从当前环起点）' },
+        direction: { type: 'string', description: 'all / rx / tx（默认 all；rx=设备输出，tx=我们写出的）' },
+        limit: { type: 'number', description: '最多返回多少批次（默认 500，上限 4096）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 读串口' }),
+      async execute(args: { after?: number; direction?: string; limit?: number }) {
+        const after = Math.max(0, Math.round(args.after ?? 0))
+        const direction = (args.direction ?? 'all') as 'all' | 'rx' | 'tx'
+        const limit = Math.min(4096, Math.max(1, Math.round(args.limit ?? 500)))
+        const tail = await fetchBytes(deps, after, { direction, limit })
+        if (tail.active !== true) {
+          return {
+            ok: false,
+            active: false,
+            note: '没有进行中的串口监视；先用 elab_serial_monitor action=open（需要硬件在位）',
+          }
+        }
+        const chunks = (tail.chunks ?? []).map((c) => {
+          const { text, hex } = chunkText(c.data_b64)
+          return { seq: c.seq, dir: c.dir, t: c.t, len: c.len, text, hex }
+        })
+        return {
+          ok: true,
+          active: true,
+          epoch: tail.epoch,
+          next_after: chunks.length > 0 ? chunks[chunks.length - 1].seq : after,
+          gap: tail.gap ?? 0,
+          paused: tail.paused === true,
+          error: tail.error ?? null,
+          chunks,
+        }
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_wait',
+      description:
+        '等待串口监视流里出现匹配文本（正则或子串），返回匹配时刻前后的批次。超时返回 ok=false。' +
+        '用于“发命令后等设备回 OK/数据”这类时序断言。只读。',
+      parameters: {
+        pattern: { type: 'string', required: true, description: '要等待的正则表达式（大小写敏感）' },
+        after: { type: 'number', description: '起始游标（缺省 = 当前环末尾之后的新数据）' },
+        direction: { type: 'string', description: 'all / rx / tx（默认 rx）' },
+        timeout_ms: { type: 'number', description: '超时毫秒（默认 5000，上限 60000）' },
+        poll_ms: { type: 'number', description: '轮询间隔毫秒（默认 150）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 等待串口输出' }),
+      async execute(args: {
+        pattern: string
+        after?: number
+        direction?: string
+        timeout_ms?: number
+        poll_ms?: number
+      }) {
+        let re: RegExp
+        try {
+          re = new RegExp(args.pattern)
+        } catch (error) {
+          return { ok: false, code: 'bad-pattern', note: error instanceof Error ? error.message : String(error) }
+        }
+        const direction = (args.direction ?? 'rx') as 'all' | 'rx' | 'tx'
+        const timeout = Math.min(60000, Math.max(100, Math.round(args.timeout_ms ?? 5000)))
+        const poll = Math.min(2000, Math.max(50, Math.round(args.poll_ms ?? 150)))
+        const start = Math.max(0, Math.round(args.after ?? 0))
+        const deadline = Date.now() + timeout
+        let cursor = start
+        const collected: Array<{ seq: number; dir: string; t: string; text: string }> = []
+        let carried = ''
+        while (Date.now() < deadline) {
+          const tail = await fetchBytes(deps, cursor, { direction, limit: 500 })
+          if (tail.active !== true) {
+            return {
+              ok: false,
+              active: false,
+              note: '串口监视会话不存在或已结束；先用 elab_serial_monitor action=open（需要硬件在位）',
+            }
+          }
+          for (const c of tail.chunks ?? []) {
+            const { text } = chunkText(c.data_b64)
+            collected.push({ seq: c.seq, dir: c.dir, t: c.t, text })
+            cursor = c.seq
+            if (re.test(text) || re.test(carried + text)) {
+              return {
+                ok: true,
+                matched: true,
+                pattern: args.pattern,
+                after: start,
+                next_after: cursor,
+                chunks: collected.slice(-32),
+              }
+            }
+            carried = (carried + text).slice(-512)
+          }
+          await sleep(poll)
+        }
+        return {
+          ok: false,
+          matched: false,
+          timeout: true,
+          pattern: args.pattern,
+          next_after: cursor,
+          chunks: collected.slice(-32),
+        }
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_decode',
+      description:
+        '无状态协议解码（justfloat / firewater）。justfloat = N×4 小端 float + 尾 00 00 80 7F；' +
+        'firewater = ASCII 逗号分隔 float + 换行。半帧以 pending_b64 原样带回，拼下一批再解。',
+      parameters: {
+        decoder: { type: 'string', required: true, description: 'justfloat / firewater' },
+        hex: { type: 'string', description: '十六进制字节串（与 data_b64 二选一）' },
+        data_b64: { type: 'string', description: 'base64 字节串（与 hex 二选一）' },
+        channels: { type: 'number', description: '显式通道数（缺省自动推断）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 串口解码' }),
+      async execute(args: { decoder: string; hex?: string; data_b64?: string; channels?: number }) {
+        return cockpit(deps, '/api/serial/decode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            decoder: args.decoder,
+            ...(args.hex !== undefined ? { hex: args.hex } : {}),
+            ...(args.data_b64 !== undefined ? { data_b64: args.data_b64 } : {}),
+            ...(args.channels !== undefined ? { channels: args.channels } : {}),
+          }),
+        })
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_capture',
+      description:
+        '显式录制串口字节（证据，可回放）：start 开始录、stop 收尾返回文件路径与统计、' +
+        'status 查当前录制。文件是有界 JSONL（默认上限 5 MiB），到顶自动停录并标 truncated。' +
+        '只存原始字节（bytes_b64），不存文本投影。',
+      parameters: {
+        action: { type: 'string', required: true, description: 'start / stop / status' },
+        project: { type: 'string', description: '工程名（可省略；用于文件命名与留档关联）' },
+        max_bytes: { type: 'number', description: '录制文件上限（字节；缺省 5 MiB）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 串口录制' }),
+      async execute(args: { action: string; project?: string; max_bytes?: number }) {
+        if (args.action !== 'status' && !deps.allowAgentWrite()) {
+          return {
+            ok: false,
+            code: 'agent-write-disabled',
+            nextAction: '录制会写盘，需要用户在设置里开启 allowAgentWrite；只用 status 可查看当前是否在录',
+          }
+        }
+        return cockpit(deps, '/api/serial/capture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: args.action,
+            ...(args.project !== undefined ? { project: args.project } : {}),
+            ...(args.max_bytes !== undefined ? { max_bytes: args.max_bytes } : {}),
+          }),
         })
       },
     }),

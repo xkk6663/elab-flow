@@ -1,4 +1,4 @@
-# chips/st/stm32f103xb.yaml —— 芯片参数层（L1）
+# packs/official/st/stm32/chips/stm32f103xb.yaml —— 芯片参数层（L1，随适配包分发）
 # 值来源：STM32_TEST 实测（cmake/stm32cubemx/CMakeLists.txt、cmake/gcc-arm-none-eabi.cmake、
 #         STM32F103XX_FLASH.ld、build/Debug/compile_commands.json）
 

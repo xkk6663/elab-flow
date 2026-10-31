@@ -187,6 +187,28 @@ export interface SerialPort {
   desc: string;
 }
 
+/**
+ * 内核自描述（§16）：工具层与前端只渲染这里的词汇，**不写死业务名词**。
+ *
+ * `meta` 缺失 = 内核过旧（插件会提示同步），前端则回退到内置默认。
+ */
+export interface SerialDecoderMeta {
+  id: string;
+  label: string;
+  channels: "auto" | number;
+  desc?: string;
+}
+
+export interface SerialMeta {
+  views?: string[];
+  formats?: string[];
+  encodings?: string[];
+  eols?: string[];
+  directions?: string[];
+  decoders?: SerialDecoderMeta[];
+  features?: string[];
+}
+
 export interface Capabilities {
   cockpit: {
     version: string;
@@ -199,6 +221,13 @@ export interface Capabilities {
   python: { version: string; executable: string };
   root: string;
   runs_dir: string;
+  /** 内核自描述（步骤/通道/串口词汇）；内核过旧时为 undefined */
+  meta?: {
+    steps?: Record<string, { label?: string; channel?: string }>;
+    plans?: Array<{ id: string; title: string; steps: string[]; requires_hardware?: boolean }>;
+    channels?: string[];
+    serial?: SerialMeta;
+  };
   serial: {
     pyserial: boolean;
     pyserial_version: string | null;
@@ -325,6 +354,8 @@ export interface SerialWriteResult {
   elapsed_s: number;
   /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
   eol: string;
+  /** 实际使用的发送表示（ascii/utf8/gbk/hex） */
+  format?: string;
   error: string | null;
   /** "monitor" = 写通道被路由进了常驻监视会话（不重开口；回显走实时流） */
   via?: "monitor";
@@ -386,6 +417,33 @@ export interface SerialMonitorSnapshot {
   seq?: number;
   /** 环形缓冲挤掉的总行数（>0 说明有行没活过缓冲期） */
   covered?: number;
+  /**
+   * 连接纪元：每次 open 自增。
+   *
+   * ★ 前端发现它变化**必须重置游标**：旧实现重开后 `seq` 归零，旧游标
+   *   （例如 800）会让新会话静默"永远没有新行"—— 这类缺陷最难查。
+   */
+  epoch?: number;
+  /** 字节面：累计批次序号 / 被挤掉的批次数 / 当前占用字节 */
+  chunk_seq?: number;
+  covered_chunks?: number;
+  bytes_total?: number;
+  /** 暂停入环（仍继续读口，避免设备侧缓冲被撑爆） */
+  paused?: boolean;
+  opened_by?: Actor;
+  allow_agent_write?: boolean;
+  lease_s?: number;
+  lease_remaining_s?: number;
+  /** 显式录制（K5）：null = 本会话从未录过；active=false 表示已停/已到顶 */
+  capture?: {
+    active: boolean;
+    path: string;
+    bytes: number;
+    chunks: number;
+    truncated: boolean;
+    error: string | null;
+    max_bytes: number;
+  } | null;
   /** 读线程异常自愈时留下的原因（拔线/口被抢）；null = 一切正常 */
   error?: string | null;
 }
@@ -395,6 +453,7 @@ export interface SerialMonitorLine {
   text: string;
   /** 服务端已格式化的 HH:MM:SS */
   t: string;
+  t_us?: number;
 }
 
 export interface SerialMonitorTail extends SerialMonitorSnapshot {
@@ -402,6 +461,53 @@ export interface SerialMonitorTail extends SerialMonitorSnapshot {
   /** 浏览器错过（被环形缓冲挤掉）的行数下限 —— 只报告、不抹平 */
   gap: number;
 }
+
+/**
+ * 一**批**原始字节（数据面的真值单位）。
+ *
+ * ★ 行文本只是投影：同一批字节可渲染成 HEX / ASCII / UTF-8 / GBK / 终端 /
+ *   波形，且**永远可以还原**（`data_b64`）。方向与采集时刻是行数组没有的信息。
+ */
+export interface SerialChunk {
+  seq: number;
+  dir: "rx" | "tx";
+  /** 采集时刻（微秒，做时间轴/波形横轴） */
+  t_us: number;
+  /** 服务端已格式化的 HH:MM:SS.mmm */
+  t: string;
+  len: number;
+  /** 原始字节（base64）—— 一切投影的唯一来源 */
+  data_b64: string;
+}
+
+export interface SerialBytesTail extends SerialMonitorSnapshot {
+  chunks: SerialChunk[];
+  /** 被环形缓冲挤掉的批次数下限；`dir` 过滤时为 0（序号不连续，gap 无意义） */
+  gap: number;
+  /** 本轮是否按方向过滤（过滤时 `gap` 不可信） */
+  filtered?: boolean;
+  covered: number;
+}
+
+// ── /api/serial/decode（P3，协议解码）────────────────────────────
+export interface SerialDecodeResult {
+  ok: boolean;
+  decoder: string;
+  channels: number;
+  /** 每帧的通道值（顺序 = 通道号） */
+  frames: number[][];
+  total_frames: number;
+  skipped: number;
+  /** 半帧字节数（尾标记缺失/最后一行没换行），由调用方拼进下一批 */
+  pending_bytes: number;
+  pending_b64: string;
+  input_bytes: number;
+  error?: string;
+}
+
+/** 发送面板的表示/行尾（与服务端 `serialterm` 的词汇一致） */
+export type SerialFormat = "ascii" | "utf8" | "gbk" | "hex";
+export type SerialEol = "none" | "lf" | "cr" | "crlf" | "tab";
 
 /** 监视中写一行（路由进会话，不重开口）。与 SerialWriteResult 同形但有 via 标记 */
 export interface SerialMonitorWriteResult {

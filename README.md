@@ -10,7 +10,7 @@
 
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
-[![tests](https://img.shields.io/badge/tests-209%20%2B%2037%20passing-2EA44F?style=flat)](tests/)
+[![tests](https://img.shields.io/badge/tests-224%20%2B%2037%20passing-2EA44F?style=flat)](tests/)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 [![stars](https://img.shields.io/github/stars/xkk6663/elab-flow?style=flat&color=08C)](https://github.com/xkk6663/elab-flow/stargazers)
@@ -52,10 +52,27 @@ CubeMX 一套、WorkBench 一套、Keil/IAR 又各一套 —— 工具链版本�
 git clone git@github.com:xkk6663/elab-flow.git
 cd elab-flow
 
-./elab doctor              # ① 环境体检（先全绿再往下）
-./elab loop -p at32_test   # ② 一键闭环：体检→编译→烧录→断到 main 自检→串口判据
-python -m cockpit.server   # ③ 闭环驾驶舱 → http://127.0.0.1:8333/（8333 避开 openocd 的 3333）
+./elab pkg bootstrap       # ① 安装内置包 st/stm32（生成平台 skill；未装也可直接用内置源）
+./elab doctor              # ② 环境体检（先全绿再往下）
+./elab loop -p at32_test   # ③ 一键闭环：体检→编译→烧录→断到 main 自检→串口判据
+python -m cockpit.server   # ④ 闭环驾驶舱 → http://127.0.0.1:8333/（8333 避开 openocd 的 3333）
 ```
+
+> **骨架 = 通用嵌入式开发工具链 + 可视化工程**：芯片参数 / 厂商指纹 / 平台坑位
+> **全部来自适配包**（`elab pkg search` 浏览社区市场，按需 `elab pkg install <vendor>/<platform>`）。
+> 不装包时 `elab doctor` 仍能体检主机，`elab list` 会显示"无已装适配包"。
+
+**内置 vs 外置**（两者走同一套 `pack.yaml` 协议，互不依赖）：
+
+| 包 | 类型 | 来源 | 安装方式 |
+|---|---|---|---|
+| `st/stm32` | **内置** | 本仓 `packs/official/st/stm32`（开箱可用；`bootstrap` 生成 skill 并落到 `packs/installed/`） | `elab pkg bootstrap` |
+| `artery/at32` | **外置（GitHub）** | [elab-pack-artery-at32](https://github.com/xkk6663/elab-pack-artery-at32) | `elab pkg search at32` → `elab pkg install artery/at32` |
+
+外置包由社区仓库维护，市场索引在
+[elab-pack-market](https://github.com/xkk6663/elab-pack-market)（零服务器：
+一份 `index.json` + 作者仓库里的包本体）；索引不可达时自动回退本仓
+`market/index.json`。
 
 - 要求：**Python ≥ 3.10（无第三方依赖；3.12 / 3.13 实测）**；可选 CMake + Ninja + ARM GCC + OpenOCD（上板闭环用）
 - Windows：`elab.cmd` / Git Bash 用 `./elab`；桌面场景直接**双击 `cockpit.cmd`**
@@ -106,7 +123,7 @@ OTA 的"怎么升级"全部住在组件 `components/ota` 与项目 yaml 里。
 | `0x08040000` | **槽 B（INACTIVE）** | 256KB（S6+S7） | 升级目标槽（交替使用） |
 
 状态页与偏移页**各占独立扇区**（防互擦）；slot 为 append-only 磨损均衡
-（16KB ÷ 4B = 4096 槽）。分区表的**唯一事实源是 `chips/*.yaml` 的 `ota_layout:` 节**
+（16KB ÷ 4B = 4096 槽）。分区表的**唯一事实源是适配包里的 `chips/*.yaml` 的 `ota_layout:` 节**
 （方案 A/M1）：构建期生成 `ota_layout_gen.h` 经 `-include` 强制注入（port 头同名宏
 带 `#ifndef` 兜底），`doctor --deep` 三方对账（yaml 分区 ↔ 烧录地址 ↔ ld ORIGIN），
 漂移在编译前变红灯 —— 换芯片改分区 = 改 yaml 一处，不再 5 处人肉同步。
@@ -233,7 +250,7 @@ chips yaml 一字段 `ota_layout.boot_project: f411_boot`：
     </td>
     <td width="50%" valign="top">
       <h3>平台级 AI Skill</h3>
-      <p><code>elab skill</code> 从 <code>chips/*.yaml</code> 渲染**平台聚合** SKILL.md
+      <p><code>elab skill</code> 从适配包里的 <code>chips/*.yaml</code> 渲染**平台聚合** SKILL.md
       （<code>skills/st/stm32</code>、<code>skills/artery/at32</code>，具体型号是平台条目）：
       芯片身份表 + 闭环命令 + 坑位 + 验收清单。AI 读的提示与 doctor 校验的参数来自同一份 YAML，不会悄悄过期。</p>
     </td>
@@ -291,22 +308,31 @@ $ ./elab loop -p at32_test --clean
 
 <a id="addchip"></a>
 
-## 接入一颗新芯片 = 3 步
+## 接入一颗新芯片 = 4 步（走适配包）
 
 ```bash
-# ① 写芯片参数（唯一的"跨芯片差异"所在）
-$EDITOR chips/<vendor>/<id>.yaml     # cpu/fpu/memory/openocd_target/verify(expect_*)/pitfalls
+# ① 从社区市场找到/安装芯片适配包（骨架本身零芯片）
+./elab pkg search <厂商/平台>
+./elab pkg install <vendor>/<platform>
 
-# ② 写项目接入（指向业务工程的只读指针）
+# ② 社区作者：为新芯片做包（内置模板 = packs/official/，外置模板 = 独立仓库）
+#    pack.yaml（name/vendor/platform/version/license/requires + vendor_fingerprints）
+#    chips/<id>.yaml（cpu/fpu/memory/openocd_target/verify(expect_*)/pitfalls）
+#    外置包示例：https://github.com/xkk6663/elab-pack-artery-at32
+./elab pkg install ./my-pack --from ./my-pack     # 本地自测
+
+# ③ 写项目接入（指向业务工程的只读指针）
 $EDITOR projects/<name>.yaml         # root / chip / archetype / toolchain_file / linker_script
 
-# ③ 跑起来
+# ④ 跑起来
 ./elab doctor -p <name> --deep       # 两源对账
 ./elab loop   -p <name>              # 闭环
 ./elab skill  -p <name>              # 更新该芯片所属平台的 AI skill
 ```
 
 不需要改 `services/` 下任何代码，也不需要新增 CMake 文件。
+发布到社区只需把包仓库登记进市场索引（`market/index.json` 的
+`name/version/source/sha256/requires/license/chips`），零服务器。
 
 <a id="constraints"></a>
 
@@ -337,6 +363,7 @@ $EDITOR projects/<name>.yaml         # root / chip / archetype / toolchain_file 
 | 事件契约 ICD（topic 全集 / SSE 帧格式 / 兼容承诺） | [docs/ICD_cockpit_events.md](docs/ICD_cockpit_events.md) |
 | 驾驶舱方案与实现记录（决策 D / 约束 N / 串口判据） | [docs/技术方案_闭环驾驶舱.md](docs/技术方案_闭环驾驶舱.md) |
 | 跨平台 CI 工作流架构设计 | [docs/ELAB_跨平台CI工作流架构设计.md](docs/ELAB_跨平台CI工作流架构设计.md) |
+| **社区适配包市场与芯片适配包**（包协议 / 零服务器索引 / 安全边界） | [docs/可行性研究_社区插件市场与芯片适配包.md](docs/可行性研究_社区插件市场与芯片适配包.md) |
 | 与 ELAB 框架的横向对比 | [docs/架构对比_ELAB_vs_elab-Flow.md](docs/架构对比_ELAB_vs_elab-Flow.md) |
 | 干跑验证报告（AT32 / STM32 / CLI / 上板闭环） | [docs/](docs/) 四篇，约束 C1–C16 的出处 |
 

@@ -19,6 +19,11 @@ import type {
   ElabConfig,
   HostInfo,
   PlanPreview,
+  SerialAction,
+  SerialBytesTail,
+  SerialDecodeResult,
+  SerialMonitorTail,
+  SerialWriteResult,
 } from '../../domain/icd.ts'
 
 export type { AdaptResponse, DiscoverResponse, ElabConfig, HostInfo } from '../../domain/icd.ts'
@@ -106,12 +111,78 @@ export const elabApi = {
     post<{ run: string }>(withSession('/elab/api/run', opts.sessionId), opts, { 'x-elab-actor': 'agent' }),
   cancel: (run: string, reason?: string, sessionId?: string) =>
     post<{ ok: boolean }>(withSession('/elab/api/cancel', sessionId), { run, reason }),
-  serial: (opts: { project: string; data: string; baud?: number; newline?: boolean; sessionId?: string }) =>
-    post<Record<string, unknown>>(withSession('/elab/api/serial', opts.sessionId), opts),
+  serial: (opts: {
+    project: string
+    data: string
+    baud?: number
+    port?: string
+    newline?: boolean
+    hex?: boolean
+    /** P1：utf8/ascii/gbk/hex；与 newline/eol 互斥由服务端 build_payload 统一裁决 */
+    format?: string
+    eol?: string
+    encoding?: string
+    sessionId?: string
+  }) => post<SerialWriteResult>(withSession('/elab/api/serial', opts.sessionId), opts),
   serialMonitor: (after = 0, sessionId?: string) =>
-    request<Record<string, unknown>>(withSession(`/elab/api/serial/monitor?after=${after}`, sessionId)),
-  serialMonitorToggle: (action: 'open' | 'close', opts?: { project?: string; baud?: number; sessionId?: string }) =>
-    post<Record<string, unknown>>(withSession(`/elab/api/serial/monitor?action=${action}`, opts?.sessionId), opts ?? {}),
+    request<SerialMonitorTail>(withSession(`/elab/api/serial/monitor?after=${after}`, sessionId)),
+  /** P1 字节真值：增量拉取原始批次（方向/时间/序号 + base64）。 */
+  serialMonitorBytes: (
+    after = 0,
+    opts?: { dir?: 'all' | 'rx' | 'tx'; limit?: number; sessionId?: string },
+  ) => {
+    const q = new URLSearchParams({ after: String(after) })
+    if (opts?.dir !== undefined && opts.dir !== 'all') q.set('dir', opts.dir)
+    if (opts?.limit !== undefined && opts.limit > 0) q.set('limit', String(opts.limit))
+    return request<SerialBytesTail>(withSession(`/elab/api/serial/monitor/bytes?${q.toString()}`, opts?.sessionId))
+  },
+  /**
+   * 监视会话动作（open/close/clear/pause/resume）。
+   * ★ action **必须在 body 里**：服务端 POST /api/serial/monitor 读的是 body.action
+   *   （此前只放 query → clear/pause/resume 全部落到 400）。
+   */
+  serialMonitorToggle: (
+    action: SerialAction,
+    opts?: {
+      project?: string
+      port?: string
+      baud?: number
+      actor?: 'human' | 'agent'
+      lease_s?: number
+      allow_agent_write?: boolean
+      sessionId?: string
+    },
+  ) =>
+    post<Record<string, unknown>>(
+      withSession('/elab/api/serial/monitor', opts?.sessionId),
+      { ...(opts ?? {}), action },
+    ),
+  /** P3 无状态协议解码（JustFloat / FireWater）。 */
+  serialDecode: (opts: {
+    decoder: string
+    dataB64?: string
+    hex?: string
+    channels?: number
+    sessionId?: string
+  }) =>
+    post<SerialDecodeResult>(withSession('/elab/api/serial/decode', opts.sessionId), {
+      decoder: opts.decoder,
+      ...(opts.dataB64 !== undefined ? { data_b64: opts.dataB64 } : {}),
+      ...(opts.hex !== undefined ? { hex: opts.hex } : {}),
+      ...(opts.channels !== undefined ? { channels: opts.channels } : {}),
+    }),
+  /** K5 显式录制：字节写成有界 JSONL（证据，可回放）。 */
+  serialCapture: (opts: {
+    action: 'start' | 'stop' | 'status'
+    project?: string
+    maxBytes?: number
+    sessionId?: string
+  }) =>
+    post<Record<string, unknown>>(withSession('/elab/api/serial/capture', opts.sessionId), {
+      action: opts.action,
+      ...(opts.project !== undefined ? { project: opts.project } : {}),
+      ...(opts.maxBytes !== undefined ? { max_bytes: opts.maxBytes } : {}),
+    }),
   serialConsole: (limit = 60, sessionId?: string) =>
     request<Record<string, unknown>>(withSession(`/elab/api/serial/console?limit=${limit}`, sessionId)),
   adapt: (opts: { action: 'probe' | 'write'; path: string; name?: string; force?: boolean; sessionId?: string }) =>

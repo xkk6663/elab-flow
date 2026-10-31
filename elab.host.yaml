@@ -103,3 +103,13 @@ svd_roots:
   - C:/Users/xiao1/AppData/Local/stm32cube/packs/STMicroelectronics/stm32f1xx_dfp/1.1.0/SVD
   - C:/Users/xiao1/AppData/Local/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.1.0/SVD
 
+# ── 芯片适配包（L1 的唯一来源）─────────────────────────────────────
+# 骨架仓**不含任何芯片**：芯片参数 / 厂商指纹 / 平台坑位全部来自适配包。
+# roots   : 包搜索根（第一个也是安装目标）；可用 ELAB_PACK_ROOTS 覆盖
+# market  : 社区市场索引（本地文件或 GitHub raw URL）；留空 = 只用本地索引
+packs:
+  roots:
+    - ${ELAB_ROOT}/packs/installed
+  # 社区市场：零服务器 GitHub 索引；不可达时自动回退到本仓 market/index.json
+  market: https://raw.githubusercontent.com/xkk6663/elab-pack-market/main/index.json
+

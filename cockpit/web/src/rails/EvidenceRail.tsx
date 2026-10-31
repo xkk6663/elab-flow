@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Capabilities, ProjectCard, SerialMonitorSnapshot, StepId } from "../api/types";
+import { useCallback, useEffect, useState } from "react";
+import type { Capabilities, ProjectCard, StepId } from "../api/types";
 import { api } from "../api/client";
 import { logs } from "../store/logs";
 import { useRun } from "../store/runStore";
 import { workspacesFor, type WorkspaceDef, type WorkspaceId } from "../workspaces";
 import { LogView, ringToText } from "../render/LogView";
+import { useSerialStream } from "../serial/useSerialStream";
+import { SerialWorkspace } from "../serial/SerialWorkspace";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { SegmentedTabs, type SegTab } from "../primitives/SegmentedTabs";
@@ -29,9 +31,6 @@ export interface EvidenceRailProps {
   ws: WorkspaceId;
   onWs: (id: WorkspaceId) => void;
 }
-
-/** 轮询间隔（ms）。600ms ≈ 人眼"实时"，又远低于服务端环形缓冲的挤出速度。 */
-const MONITOR_POLL_MS = 600;
 
 /** 常用波特率。工程配置里若是非标值，也插进列表 —— 否则 select 显示不出当前值 */
 const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
@@ -105,70 +104,32 @@ export function EvidenceRail({
   const run = useRun();
 
   // ── 常驻串口监视（serialmon）───────────────────────────────
-  // 快照来源优先级：本组件拉到的 → capabilities 里那份（别的标签页开的会话）。
-  const [mon, setMon] = useState<SerialMonitorSnapshot | null>(null);
-  const monSnap: SerialMonitorSnapshot | null = mon ?? caps?.serial.monitor ?? null;
-  const monActive = !!monSnap?.active;
-  const afterRef = useRef(0);
+  // 数据面全部收在 `useSerialStream`：行 + 字节双游标、纪元重置、本地镜像。
+  // 只有串口工作区可见时才轮询（离开页面不占带宽）。
+  const serialWsActive = active.id === "serial";
+  const stream = useSerialStream({
+    initial: caps?.serial.monitor ?? null,
+    project: serialProject,
+    port: serialPort,
+    baud: serialBaud,
+    enabled: serialWsActive,
+  });
 
   const toggleMonitor = useCallback(async () => {
-    if (monActive) {
-      try {
-        await api.serialMonitorToggle("close");
-        logs.local("serial", "── 监视已关闭 ──");
-        setMon({ active: false });
-      } catch (e) {
-        logs.local("serial", `✗ 关闭监视失败：${e instanceof Error ? e.message : String(e)}`, "alert");
-      }
+    if (stream.active) {
+      await stream.close();
+      logs.local("serial", "── 监视已关闭 ──");
       return;
     }
-    try {
-      const r = await api.serialMonitorToggle("open", { project: serialProject, baud: serialBaud });
-      if (!r.active) {
-        logs.local("serial", `✗ 打开监视失败：${r.error ?? "未知原因"}`, "alert");
-        return;
-      }
-      afterRef.current = 0;
-      setMon(r);
-      logs.local("serial",
-        `── 监视已打开 ${r.port}@${r.baud}（实时流只在本页缓冲，重载即失；` +
-        `监视期间闭环/CLI 用不了串口 —— 约束 N5）──`);
-    } catch (e) {
-      // 409（闭环占用）等 —— 服务端已指名道姓，原样上屏
-      logs.local("serial", `✗ 打开监视失败：${e instanceof Error ? e.message : String(e)}`, "alert");
+    const r = await stream.open();
+    if (!r.ok) {
+      logs.local("serial", `✗ 打开监视失败：${r.error ?? "未知原因"}`, "alert");
+      return;
     }
-  }, [monActive, serialProject, serialBaud]);
-
-  // 轮询增量读回。★ 不进 React 渲染树（logs.local 走命令式追加），重渲染极轻。
-  useEffect(() => {
-    if (!monActive) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const st = await api.serialMonitor(afterRef.current);
-        if (cancelled) return;
-        setMon(st);
-        if (st.gap > 0) {
-          logs.local("serial", `── （服务端缓冲追不上：已挤掉 ≥${st.gap} 行）──`, "warn");
-        }
-        for (const ln of st.lines) logs.local("serial", ln.text);
-        if (st.lines.length) afterRef.current = st.lines[st.lines.length - 1].seq;
-        if (!st.active && st.error) {
-          // 读线程异常自愈（拔线/口被抢）—— 服务端已收摊，这边如实收尾
-          logs.local("serial", `✗ 监视已中断：${st.error}`, "alert");
-          setMon({ active: false });
-        }
-      } catch {
-        /* 网络抖动：下一轮再试 */
-      }
-    };
-    void tick();
-    const id = window.setInterval(tick, MONITOR_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [monActive]);
+    logs.local("serial",
+      `── 监视已打开 ${stream.snap?.port ?? "?"}@${stream.snap?.baud ?? "?"}（实时流只在本页缓冲，重载即失；` +
+      `监视期间闭环/CLI 用不了串口 —— 约束 N5）──`);
+  }, [stream]);
 
   /**
    * 手写通道（M3-b）：一次「写一条 → 收一小段回显」。
@@ -339,8 +300,8 @@ export function EvidenceRail({
           })}
         {/* ── 串口工作区：打开/关闭监视（常驻会话，不是闭环判定）── */}
         {active.id === "serial" ? (
-          monActive ? (
-            <Tooltip tip={`监视中：${monSnap?.port ?? "?"}@${monSnap?.baud ?? "?"} · 已收 ${monSnap?.seq ?? 0} 行 —— 点击关闭并释放串口`}>
+          stream.active ? (
+            <Tooltip tip={`监视中：${stream.snap?.port ?? "?"}@${stream.snap?.baud ?? "?"} · 已收 ${stream.snap?.seq ?? 0} 行 / ${stream.snap?.chunk_seq ?? 0} 批 —— 点击关闭并释放串口`}>
               <Button size="sm" variant="outline" onClick={() => void toggleMonitor()}>
                 关闭监视
               </Button>
@@ -392,17 +353,29 @@ export function EvidenceRail({
         </div>
       ) : null}
 
-      <LogView
-        key={active.id}
-        ring={ring}
-        autoScroll={autoScroll}
-        onAutoScrollChange={setAutoScroll}
-        empty={active.emptyText(card, caps)}
-      />
+      {/* ── 监视会话开着：整块换成完整串口工作区（行/字节/终端/波形）──
+          ★ 不开监视时仍显示闭环日志（monitor 步骤的 serial/* 事件 + 手写留档），
+            两者职责不同：run 事件是"证据"，监视是"实时看"。 */}
+      {serialWsActive && stream.active ? (
+        <SerialWorkspace
+          stream={stream}
+          caps={caps}
+          project={serialProject}
+          running={running}
+        />
+      ) : (
+        <LogView
+          key={active.id}
+          ring={ring}
+          autoScroll={autoScroll}
+          onAutoScrollChange={setAutoScroll}
+          empty={active.emptyText(card, caps)}
+        />
+      )}
 
       {/* ── 串口手动输入（M3-b 已通：写一条 → 收一段回显，一次请求内闭环）──
-          ★ 只在串口工作区挂载（按需渲染） */}
-      {active.id === "serial" ? (
+          ★ 监视开着时由 SerialWorkspace 的发送面板接管（同口写穿，不重开） */}
+      {active.id === "serial" && !stream.active ? (
         <form
           className={s.write}
           onSubmit={(e) => {

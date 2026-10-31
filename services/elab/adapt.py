@@ -46,11 +46,6 @@ _LEVEL_DESC = {
     E6_NAME: "文件名猜测",
 }
 
-# 厂商生成器目录 → vendor
-VENDOR_BY_GEN_DIR = {"at32_workbench": "artery", "stm32cubemx": "st"}
-# 生成器 define 变量名（第二指纹）
-SYMS_VAR_BY_GEN = {"at32_workbench": "WK_Defines_Syms", "stm32cubemx": "MX_Defines_Syms"}
-
 _STD_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
 
 
@@ -135,46 +130,67 @@ def _nearest_baud(n: int) -> int:
 
 # ── 探测：厂商 / 生成器（E4 + E5）───────────────────────────────────
 def _detect_vendor(root: Path, cmake_text: str, gen_dirs: list[str],
-                   atwp: list[Path], ioc: list[Path]) -> tuple[str, str, str, list[str]]:
-    """返回 (vendor, generator, evidence, extra_notes)。"""
-    hits: dict[str, list[tuple[str, str]]] = {"artery": [], "st": []}
+                   template_hits: list[tuple[dict, Path]],
+                   fps: list[dict]) -> tuple[str, str, str, list[str]]:
+    """返回 (vendor, generator, evidence, extra_notes)。
 
-    for d, v in VENDOR_BY_GEN_DIR.items():
-        if re.search(rf"add_subdirectory\(\s*(?:cmake/)?{re.escape(d)}\b", cmake_text):
-            hits[v].append((E4_STRUCT, f"CMakeLists.txt: add_subdirectory(cmake/{d})"))
+    ★ 厂商指纹**不再硬编码在内核里**：全部来自已安装适配包的
+      ``pack.yaml: vendor_fingerprints``。没有安装包时无法探测厂商——
+      这是"骨架无芯片业务"的直接体现。
+    """
+    if not fps:
+        return "", "", "", [
+            "未安装任何芯片适配包 —— 无法进行厂商探测。"
+            "请先 `elab pkg search` / `elab pkg install <vendor>/<platform>`。"
+        ]
 
-    for d in gen_dirs:
-        p = root / "cmake" / d / "CMakeLists.txt"
-        t = _read(p)
-        var = SYMS_VAR_BY_GEN.get(d)
-        if var and var in t:
-            hits[VENDOR_BY_GEN_DIR[d]].append(
-                (E4_STRUCT, f"cmake/{d}/CMakeLists.txt: {var}"))
+    hits: dict[str, list[tuple[str, str]]] = {}
+    for fp in fps:
+        vendor = str(fp.get("vendor") or "")
+        d = str(fp.get("gen_dir") or "")
+        if not vendor:
+            continue
+        if d and re.search(rf"add_subdirectory\(\s*(?:cmake/)?{re.escape(d)}\b", cmake_text):
+            hits.setdefault(vendor, []).append(
+                (E4_STRUCT, f"CMakeLists.txt: add_subdirectory(cmake/{d})"))
+        if d in gen_dirs:
+            t = _read(root / "cmake" / d / "CMakeLists.txt")
+            var = str(fp.get("syms_var") or "")
+            if var and var in t:
+                hits.setdefault(vendor, []).append(
+                    (E4_STRUCT, f"cmake/{d}/CMakeLists.txt: {var}"))
 
-    if atwp:
-        hits["artery"].append((E5_TEMPLATE, f"{_rel(root, atwp[0])}: 存在 *.ATWP 工程文件"))
-    if ioc:
-        hits["st"].append((E5_TEMPLATE, f"{_rel(root, ioc[0])}: 存在 *.ioc 工程文件"))
+    for fp, path in template_hits:
+        vendor = str(fp.get("vendor") or "")
+        if vendor:
+            hits.setdefault(vendor, []).append(
+                (E5_TEMPLATE,
+                 f"{_rel(root, path)}: 存在 {fp.get('project_glob') or '生成器工程文件'}"))
 
-    a, s = hits["artery"], hits["st"]
     notes: list[str] = []
-    if a and s:
-        notes.append("同时发现 artery 与 st 的生成器特征 —— 请人工确认厂商")
+    vendors = [v for v, items in hits.items() if items]
+    if len(vendors) > 1:
+        names = "、".join(sorted(vendors))
+        notes.append(f"同时发现多个厂商的生成器特征（{names}）—— 请人工确认厂商")
         return "", "", "", notes
-    if not a and not s:
-        return "", "", "", ["未发现任何已知生成器特征（既非 AT32 WorkBench 也非 STM32CubeMX）"]
+    if not vendors:
+        known = "、".join(sorted({str(fp.get('vendor')) for fp in fps})) or "（无）"
+        return "", "", "", [
+            f"未发现任何已安装适配包的生成器特征（已装厂商：{known}）"
+        ]
 
-    pick = a or s
-    vendor = "artery" if a else "st"
-    # 生成器目录名
+    vendor = vendors[0]
+    # 生成器：优先取 cmake/<gen_dir> 实际存在的那一个
     gen = ""
-    for d, v in VENDOR_BY_GEN_DIR.items():
-        if v == vendor and d in gen_dirs:
+    for fp in fps:
+        d = str(fp.get("gen_dir") or "")
+        if str(fp.get("vendor")) == vendor and d in gen_dirs:
             gen = d
+            break
     if not gen:
-        gen = "at32_workbench" if vendor == "artery" else "stm32cubemx"
-    # 取最高级别证据作代表
-    best = sorted(pick, key=lambda x: _LEVEL_RANK[x[0]])[0]
+        gen = str(next((fp.get("generator") or fp.get("gen_dir")
+                        for fp in fps if str(fp.get("vendor")) == vendor), "") or "")
+    best = sorted(hits[vendor], key=lambda x: _LEVEL_RANK[x[0]])[0]
     return vendor, gen, best[1], notes
 
 
@@ -295,9 +311,12 @@ def _detect_flags(tc_text: str) -> tuple[str, str, str, str]:
 
 
 # ── 探测：芯片宏（E1）────────────────────────────────────────────
-def _detect_defines(root: Path, generator: str) -> tuple[list[str], str, str]:
+def _detect_defines(root: Path, generator: str,
+                    fps: list[dict]) -> tuple[list[str], str, str]:
     """返回 (defines, 主要型号宏, evidence)。"""
-    var = SYMS_VAR_BY_GEN.get(generator, "")
+    var = str(next((fp.get("syms_var") for fp in fps
+                    if str(fp.get("gen_dir") or "") == generator
+                    or str(fp.get("generator") or "") == generator), "") or "")
     p = root / "cmake" / generator / "CMakeLists.txt"
     t = _read(p)
     if not var or var not in t:
@@ -470,12 +489,12 @@ def _match_chip(cfg: Config, macro: str, defines: list[str]) -> tuple[str, str, 
         if "/" not in ref:
             continue
         if (chip.get("part") or "") == macro:
-            return ref, f"编译宏 {macro} == chips/{ref}.yaml:part", ""
+            return ref, f"编译宏 {macro} == 适配包芯片 {ref}:part", ""
     for ref, chip in cfg.chips.items():
         if "/" not in ref:
             continue
         if macro in (chip.get("compiler_defines") or []):
-            return ref, f"编译宏 {macro} ∈ chips/{ref}.yaml:compiler_defines", ""
+            return ref, f"编译宏 {macro} ∈ 适配包芯片 {ref}:compiler_defines", ""
 
     for ref, chip in cfg.chips.items():
         if "/" not in ref:
@@ -484,7 +503,11 @@ def _match_chip(cfg: Config, macro: str, defines: list[str]) -> tuple[str, str, 
         if part and (part.startswith(macro) or macro.startswith(part)):
             return ref, f"前缀相近：{part} ≈ {macro}", \
                 f"芯片为前缀近似匹配（{part} ≈ {macro}），请人工确认"
-    return "", "", f"chips/ 下没有与编译宏 {macro} 匹配的芯片 —— 需先纳新芯片"
+    if not cfg.packs:
+        return "", "", (f"尚未安装任何适配包，无法匹配编译宏 {macro} —— "
+                        "先 `elab pkg search` / `elab pkg install <vendor>/<platform>`")
+    return "", "", (f"已安装适配包中没有与编译宏 {macro} 匹配的芯片 —— "
+                    "需贡献/安装对应芯片包")
 
 
 # ── 主探测 ────────────────────────────────────────────────────────
@@ -499,18 +522,25 @@ def probe_project(cfg: Config, path) -> Probe:
         p.tier = "T3"
         p.ambiguities.append(
             "工程根目录没有 CMakeLists.txt —— 属于 T3（需真改造）。"
-            "请在 AT32 WorkBench / STM32CubeMX 里把工具链切换到 CMake 后重新导出。")
+            "请在图形配置器（CubeMX / WorkBench 等）里把工具链切换到 CMake 后重新导出。")
         return p
 
     cmake_text = _read(entry)
     presets_text = _read(root / "CMakePresets.json")
-    atwp = sorted(root.glob("*.ATWP"))
-    ioc = sorted(root.glob("*.ioc"))
-    gen_dirs = [d for d in VENDOR_BY_GEN_DIR
-                if (root / "cmake" / d / "CMakeLists.txt").exists()]
+    fps = cfg.vendor_fingerprints
+    gen_dirs = sorted({str(fp.get("gen_dir")) for fp in fps
+                       if fp.get("gen_dir")
+                       and (root / "cmake" / str(fp["gen_dir"]) / "CMakeLists.txt").exists()})
+    template_hits: list[tuple[dict, Path]] = []
+    for fp in fps:
+        glob = str(fp.get("project_glob") or "")
+        if glob:
+            for path in sorted(root.glob(glob)):
+                template_hits.append((fp, path))
 
-    # ① 厂商 / 生成器
-    vendor, generator, v_ev, v_notes = _detect_vendor(root, cmake_text, gen_dirs, atwp, ioc)
+    # ① 厂商 / 生成器（指纹来自已安装适配包）
+    vendor, generator, v_ev, v_notes = _detect_vendor(
+        root, cmake_text, gen_dirs, template_hits, fps)
     p.vendor, p.generator = vendor, generator
     if v_ev:
         p.facts.append(Fact("vendor", f"{vendor}（{generator}）", E4_STRUCT, v_ev))
@@ -565,7 +595,7 @@ def probe_project(cfg: Config, path) -> Probe:
         p.facts.append(Fact("compile_flags", raw.strip(), E1_COMPILE, f"工具链文件: TARGET_FLAGS"))
 
     # ⑦ 芯片宏
-    defines, macro, d_ev = _detect_defines(root, generator)
+    defines, macro, d_ev = _detect_defines(root, generator, fps)
     p.defines, p.chip_macro = defines, macro
     if d_ev:
         p.facts.append(Fact("chip_macro", macro, E1_COMPILE, d_ev))
@@ -588,6 +618,8 @@ def probe_project(cfg: Config, path) -> Probe:
                                 E3_LINK, f"{ld} MEMORY 段"))
 
     # ⑩ 生成器模板（E5）+ 冲突
+    atwp = [path for _, path in template_hits if path.suffix.lower() == ".atwp"]
+    ioc = [path for _, path in template_hits if path.suffix.lower() == ".ioc"]
     declared, baud_raw, usart, tx, rx, conflicts = _check_template(
         root, atwp, ioc, macro)
     p.baud_raw, p.usart, p.tx_pin, p.rx_pin = baud_raw, usart, tx, rx
@@ -604,7 +636,7 @@ def probe_project(cfg: Config, path) -> Probe:
             got = (p.memory.get(k.upper()) or {}).get("length")
             if got is not None and got != v:
                 p.conflicts.append(
-                    f"{k} 内存不一致：工程 ld={hex(got)} ≠ chips/{ref}.yaml={hex(v)}"
+                    f"{k} 内存不一致：工程 ld={hex(got)} ≠ 适配包芯片 {ref}={hex(v)}"
                     f"（{E3_LINK} 为准的是 ld，请同步 chip.yaml）")
 
     # ⑫ FreeRTOS（E4，信息性）

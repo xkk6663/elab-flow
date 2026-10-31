@@ -5,7 +5,10 @@ import type {
   PlanPreview,
   ProjectsResponse,
   RunsResponse,
+  SerialBytesTail,
   SerialConsoleResponse,
+  SerialDecodeResult,
+  SerialFormat,
   SerialMonitorSnapshot,
   SerialMonitorTail,
   SerialWriteResult,
@@ -100,6 +103,12 @@ export const api = {
     readMs?: number;
     newline?: boolean;
     hex?: boolean;
+    /** 发送表示（P1）：ascii/utf8/gbk/hex；与 `hex` 是别名关系 */
+    format?: SerialFormat | "text";
+    /** 行结束符：none/lf/cr/crlf/tab */
+    eol?: string;
+    /** 文本编码：utf-8/gbk */
+    encoding?: string;
   }) =>
     req<SerialWriteResult>("/api/serial", {
       method: "POST",
@@ -112,6 +121,9 @@ export const api = {
         read_ms: opts.readMs,
         newline: opts.newline,
         hex: opts.hex,
+        format: opts.format,
+        eol: opts.eol,
+        encoding: opts.encoding,
       }),
     }),
 
@@ -137,16 +149,96 @@ export const api = {
   serialMonitor: (after: number) =>
     req<SerialMonitorTail>(`/api/serial/monitor?after=${encodeURIComponent(after)}`),
 
-  /** 打开/关闭监视会话。POST = 明确的副作用（占住/释放一个独占资源）。 */
-  serialMonitorToggle: (action: "open" | "close", opts?: { project?: string; baud?: number }) =>
-    req<SerialMonitorSnapshot & { ok: boolean; note?: string; error?: string | null }>(
-      "/api/serial/monitor",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, project: opts?.project, baud: opts?.baud }),
-      },
-    ),
+  /**
+   * 字节面增量拉取（P1）—— **原文为真**，行只是投影。
+   *
+   * ★ 默认 `dir=all`（含 TX/RX）；`limit` 截断时调用方按最后一条的 `seq` 继续拉。
+   */
+  serialMonitorBytes: (after: number, opts?: { dir?: "all" | "rx" | "tx"; limit?: number }) => {
+    const q = new URLSearchParams({ after: String(after) });
+    q.set("dir", opts?.dir ?? "all");
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    return req<SerialBytesTail>(`/api/serial/monitor/bytes?${q.toString()}`);
+  },
+
+  /** 打开/关闭/清空/暂停/继续监视会话。POST = 明确的副作用（占住/释放独占资源）。 */
+  serialMonitorToggle: (
+    action: "open" | "close" | "clear" | "pause" | "resume",
+    opts?: {
+      project?: string;
+      baud?: number;
+      port?: string;
+      actor?: "human" | "agent";
+      lease_s?: number;
+      allow_agent_write?: boolean;
+    },
+  ) =>
+    req<SerialMonitorSnapshot & {
+      ok: boolean;
+      note?: string;
+      error?: string | null;
+      cleared_lines?: number;
+      cleared_chunks?: number;
+      paused?: boolean;
+    }>("/api/serial/monitor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        project: opts?.project,
+        baud: opts?.baud,
+        port: opts?.port,
+        actor: opts?.actor,
+        lease_s: opts?.lease_s,
+        allow_agent_write: opts?.allow_agent_write,
+      }),
+    }),
+
+  /** 无状态协议解码（P3）：输入一段原始字节，返回通道帧。 */
+  serialDecode: (opts: {
+    decoder: string;
+    dataB64?: string;
+    hex?: string;
+    channels?: number;
+  }) =>
+    req<SerialDecodeResult>("/api/serial/decode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decoder: opts.decoder,
+        data_b64: opts.dataB64,
+        hex: opts.hex,
+        channels: opts.channels,
+      }),
+    }),
+
+  /**
+   * 显式录制（K5）：`start` 把字节写成有界 JSONL（`.work/.cockpit/`），
+   * `stop` 收尾并返回文件路径与统计。**只存字节**，可回放。
+   */
+  serialCapture: (action: "start" | "stop" | "status", project = "") =>
+    req<{
+      ok: boolean;
+      path?: string;
+      bytes?: number;
+      chunks?: number;
+      truncated?: boolean;
+      error?: string;
+      note?: string;
+      capture?: {
+        active: boolean;
+        path: string;
+        bytes: number;
+        chunks: number;
+        truncated: boolean;
+        error: string | null;
+        max_bytes: number;
+      } | null;
+    }>("/api/serial/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, project }),
+    }),
 
   /**
    * 一键适配（M5.6）。**两段式**：`action:"probe"`（只读）永远在前，

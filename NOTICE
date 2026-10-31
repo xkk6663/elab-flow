@@ -1,0 +1,16 @@
+elab-Flow
+Copyright (c) elab-Flow contributors
+
+This product includes software developed as part of Lissio
+(https://codeberg.org/Horldsence/Lissio), licensed under the Apache License 2.0.
+
+Portions ported from Lissio (https://codeberg.org/Horldsence/Lissio), Apache-2.0,
+commit edf17b5.
+
+Modified files / rewrites (see docs/技术迁移方案_串口监视与调试可视化.md §11 for the
+full mapping table):
+
+  cockpit/web/src/serial/ansiTerminal.ts   — ANSI 流式终端解析器（按 elab 轮询字节模型重写）
+  cockpit/web/src/serial/bytes.ts          — HEX/ASCII/UTF-8/GBK 投影
+  cockpit/web/src/serial/useSerialStream.ts — 双游标/纪元重置的轮询缓冲（重写）
+  services/elab/serialcodec.py             — JustFloat / FireWater 解码（按算法重写）

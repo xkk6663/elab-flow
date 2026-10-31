@@ -381,7 +381,21 @@ class SerialIO:
             raise OSError("端口名为空 —— 请先用 select_port() 把 serial.port 解析成具体 COM 号")
         mod, _lp = _pyserial()
         if mod is not None:
-            self._ser = mod.Serial(self.port, self.baud, timeout=0.2)
+            # ★ 写超时必须给上限（与下面 ctypes 路径的 WriteTotalTimeout 逐字一致）。
+            #   只读实例不需要；而**可写实例**一旦撞上"口还在、链路已经没了"
+            #   （拔线、蓝牙 SPP 未连接），pyserial 的 write 会一直阻塞 —— 实测
+            #   直接把 HTTP 请求挂死 10s+，界面表现为"点发送毫无反应"。
+            wt = 2.0 if self.for_write else None
+            # pyserial 的 **URL 端口**（loop://、socket:// 等）只能走 serial_for_url，
+            # Serial() 不认。支持它的唯一目的是无硬件自测：loop:// 把写出的字节原样
+            # 回读成 RX，整条数据面（TX 入环 / RX 投影 / 解码）都能端到端跑，不必为
+            # 测试在生产代码里开特判分支。
+            if "://" in self.port:
+                self._ser = mod.serial_for_url(self.port, self.baud, timeout=0.2,
+                                               write_timeout=wt)
+            else:
+                self._ser = mod.Serial(self.port, self.baud, timeout=0.2,
+                                       write_timeout=wt)
             self.backend = "pyserial"
             return
         env, err = _win32()
@@ -458,8 +472,13 @@ class SerialIO:
         if not data:
             return 0
         if self._ser is not None:
-            n = self._ser.write(data)
-            self._ser.flush()
+            # 契约是"写失败返回 0，不抛"：写超时（SerialTimeoutException）与
+            # 链路断开（SerialException）都必须落在这条分支上，让 HTTP 层能
+            # 如实回 `ok:false` —— 而不是把异常抛给请求线程。
+            try:
+                n = self._ser.write(data)
+            except Exception:                 # noqa: BLE001
+                return 0
             return int(n or 0)
         if self._h is None:
             return 0

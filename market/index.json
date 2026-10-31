@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "packs": [
+    {
+      "name": "artery/at32",
+      "vendor": "artery",
+      "platform": "at32",
+      "version": "0.1.0",
+      "description": "AT32F421 芯片适配包（外置 GitHub 芯片包：AT32 WorkBench 指纹 + 芯片参数 + 平台坑位）",
+      "status": "official",
+      "license": "MIT",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "artery/at32f421g8"
+      ],
+      "source": {
+        "type": "git",
+        "url": "https://github.com/xkk6663/elab-pack-artery-at32.git",
+        "ref": "main"
+      },
+      "sha256": "605d71e2d854423f258eabe5ce112450e0b07c7de297c23aa3225a02ffc8192a"
+    },
+    {
+      "name": "st/stm32",
+      "vendor": "st",
+      "platform": "stm32",
+      "version": "0.1.0",
+      "description": "STM32F1/F4 芯片适配包（STM32CubeMX 工程指纹 + 芯片参数 + 平台坑位）",
+      "status": "official",
+      "license": "MIT",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "st/stm32f103xb",
+        "st/stm32f411ceux"
+      ],
+      "source": {
+        "type": "local",
+        "path": "packs/official/st/stm32"
+      },
+      "sha256": "2257a4e2d4f56cfa8e73730fe660b0f4434403729395e3575fe98b023864a8c9"
+    }
+  ]
+}

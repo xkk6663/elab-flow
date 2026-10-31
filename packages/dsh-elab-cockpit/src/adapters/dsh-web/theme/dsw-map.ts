@@ -88,11 +88,17 @@ export const DSW_MAP_CSS: string = `\
   --elab-btn-primary-fg: var(--elab-fg-primary);
   --elab-btn-primary-border: var(--elab-accent);
   /* 字体（宿主无字号令牌，实测其自身 CSS 也用 px —— 字号保留 px，见 §15.6） */
+  --elab-font-sans: var(--dsh-font-family-default, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
   --elab-font-mono: var(--dsh-font-family-code-default, ui-monospace, Consolas, monospace);
+  /* 字号（与融合工程 tokens.css 同值，保证窄栏里视觉一致） */
+  --elab-fs-xs: 11px;
+  --elab-fs-sm: 12px;
   /* 几何（与主题无关，本地常量，§5.5.3） */
   --elab-space-1: 4px;
   --elab-space-2: 8px;
   --elab-space-3: 12px;
+  --elab-space-4: 16px;
+  --elab-radius-sm: 4px;
   --elab-radius: 8px;
   /* ANSI 深色（默认基座） */
 ${ansiBlock(ANSI_DARK)}

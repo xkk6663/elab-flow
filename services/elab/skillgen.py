@@ -77,7 +77,12 @@ def render_chip_section(cfg: Config, chip: dict, host: Host) -> list[str]:
     L: list[str] = []
     A = L.append
 
-    A(f"## 芯片 {part}（数据源：`chips/{vendor}/{cid}.yaml`）")
+    raw_path = str(chip.get("_path") or f"chips/{vendor}/{cid}.yaml")
+    try:
+        src_path = to_fwd(Path(raw_path).relative_to(cfg.root))
+    except ValueError:
+        src_path = raw_path
+    A(f"## 芯片 {part}（数据源：`{src_path}`，适配包 `{chip.get('_pack', '?')}`）")
     A("")
     A("| 项 | 值 |")
     A("|---|---|")

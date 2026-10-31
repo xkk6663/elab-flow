@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import __version__
-from .config import Config, ElabError, Host
+from .config import Config, ElabError, Host, to_fwd
 from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
 from . import monitor as monitor_mod
+from . import pkg as pkg_mod
 from . import run as run_mod
 from . import serialconsole as serialconsole_mod
 from . import serialport as serialport_mod
@@ -149,6 +151,57 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--chip", help="按 vendor/id 指定芯片")
     p.add_argument("--all", action="store_true", help="为所有芯片生成")
 
+    p = sub.add_parser("pkg",
+                       help="芯片适配包：社区市场搜索 / 安装 / 卸载 / 校验（一切芯片差异皆包）")
+    pkg_sub = p.add_subparsers(dest="pkg_cmd", required=True)
+
+    def _pkg_sub(name, help_):
+        sp = pkg_sub.add_parser(name, help=help_)
+        _add_common(sp)
+        return sp
+
+    sp = _pkg_sub("search", "搜索市场索引（可叠加关键词）")
+    sp.add_argument("query", nargs="?", default="", help="关键词（名称/厂商/平台/芯片）")
+
+    sp = _pkg_sub("install", "安装适配包（市场名 / 本地目录 / git / 压缩包）")
+    sp.add_argument("source", nargs="?",
+                    help="包名（如 st/stm32），或本地目录 / git URL / 压缩包 URL")
+    sp.add_argument("--from", dest="from_path", help="本地包目录")
+    sp.add_argument("--git", help="git 仓库 URL")
+    sp.add_argument("--ref", help="git 分支 / tag")
+    sp.add_argument("--subdir", default="", help="git 仓库内的包子目录")
+    sp.add_argument("--archive", help="zip / tar.gz 压缩包 URL")
+    sp.add_argument("--sha256", help="期望的整包内容哈希（强校验）")
+    sp.add_argument("--force", action="store_true", help="覆盖已安装的同名包")
+    sp.add_argument("--no-skill", action="store_true", help="安装后不自动重生成平台 skill")
+    sp.add_argument("--status", choices=["official", "community"],
+                    help="安装状态标记（市场条目有值时以市场为准）")
+
+    sp = _pkg_sub("bootstrap", "安装 packs/official 下的全部官方包（离线）")
+    sp.add_argument("--from", dest="from_path", help="官方包源目录（默认 packs/official）")
+    sp.add_argument("--force", action="store_true", help="覆盖已安装的同名包")
+    sp.add_argument("--no-skill", action="store_true", help="安装后不自动重生成平台 skill")
+
+    sp = _pkg_sub("list", "列出已安装适配包与芯片")
+    sp = _pkg_sub("remove", "卸载适配包（只删安装目录）")
+    sp.add_argument("name", help="包名（如 st/stm32）")
+    sp.add_argument("--force", action="store_true", help="跳过目录范围保护（谨慎）")
+
+    sp = _pkg_sub("update", "按市场索引更新（缺省更新全部已装包）")
+    sp.add_argument("name", nargs="?", help="包名；缺省 = 全部")
+    sp.add_argument("--force", action="store_true", help="同版本也重装")
+    sp.add_argument("--no-skill", action="store_true", help="更新后不自动重生成平台 skill")
+
+    sp = _pkg_sub("verify", "校验已装包的结构/安全/内容哈希")
+    sp.add_argument("name", nargs="?", help="包名；缺省 = 全部")
+
+    sp = _pkg_sub("index", "生成或校验市场索引（官方包自吃狗粮）")
+    sp.add_argument("--from", dest="from_path",
+                    help="包源目录（默认 packs/official）")
+    sp.add_argument("--out", help="索引输出路径（默认 market/index.json）")
+    sp.add_argument("--base", help="source 相对路径基准（默认索引文件所在目录）")
+    sp.add_argument("--check", action="store_true", help="只校验索引与包内容是否漂移")
+
     p = sub.add_parser("adapt",
                        help="一键适配图形配置器导出的工程（确定性探测 → 生成 projects/*.yaml）")
     _add_common(p)
@@ -201,6 +254,8 @@ def _dispatch(args) -> int:
         return cmd_ci(cfg, args)
     if args.cmd == "run":
         return cmd_run(cfg, args)
+    if args.cmd == "pkg":
+        return cmd_pkg(cfg, args)
     if args.cmd == "skill":
         return cmd_skill(cfg, args)
     if args.cmd == "adapt":
@@ -234,6 +289,12 @@ def cmd_list(cfg: Config, args) -> int:
              "root": p.get("root")}
             for p in cfg.projects.values()
         ],
+        "pack_roots": [str(x).replace("\\", "/") for x in cfg.pack_roots],
+        "packs": [
+            {"name": r["name"], "version": (r.get("manifest") or {}).get("version"),
+             "dir": r["dir"], "installed": r["installed"], "chips": r["chips"]}
+            for r in cfg.packs.values()
+        ],
     }
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -245,6 +306,14 @@ def cmd_list(cfg: Config, args) -> int:
     print(f"ninja           {host.ninja}")
     print(f"openocd         {host.openocd}")
     print()
+    print("packs:")
+    if data["packs"]:
+        for p in data["packs"]:
+            print(f"  {p['name']:<20} v{p['version']:<8} "
+                  f"{'installed' if p['installed'] else 'source':<10} {p['dir']}")
+    else:
+        print("  （无 —— 通用骨架不内置任何芯片；用 `elab pkg bootstrap` 装官方包，"
+              "或 `elab pkg search` 浏览社区市场）")
     print("chips:")
     for c in data["chips"]:
         print(f"  {c['ref']:<26} cpu={c['cpu']:<12} fpu={c['fpu']:<6} {c['part']}")
@@ -593,6 +662,225 @@ def cmd_run(cfg: Config, args) -> int:
             print(f"[elab] 事件 → {res['events']['state']}")
             print(f"       跟读 → {res['events']['proc']}")
     return 0 if res["ok"] else 1
+
+
+# ── pkg：适配包 / 社区市场 ─────────────────────────────────────────
+def _regen_skills(cfg: Config, chip_refs, log) -> list[dict]:
+    """安装/更新后重生成平台 skill（失败只提示，不回滚安装）。"""
+    if not chip_refs:
+        return []
+    cfg2 = Config(cfg.root)          # 重载：新包已落盘
+    written: list[dict] = []
+    seen: set = set()
+    for ref in chip_refs:
+        chip = cfg2.chips.get(ref)
+        if not chip:
+            continue
+        key = (chip.get("vendor"), chip.get("platform") or chip.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            written += skillgen.generate(cfg2, chip_ref=ref, log=log)
+        except ElabError as exc:
+            log(f"[elab] ! 平台 skill 未生成：{exc}")
+            break
+    return written
+
+
+def _install_kwargs(cfg: Config, args) -> tuple[dict, dict | None]:
+    """把 CLI 参数解析成 ``pkg.install`` 的关键字参数。"""
+    if args.from_path:
+        return {"local": args.from_path}, None
+    if args.git:
+        return {"git": args.git, "ref": args.ref, "subdir": args.subdir or ""}, None
+    if args.archive:
+        return {"archive": args.archive}, None
+    if not args.source:
+        raise ElabError("请给出来源：市场名，或 --from / --git / --archive")
+    entry = pkg_mod.market_entry(cfg, args.source)
+    if entry:
+        info = pkg_mod.entry_source(entry, entry.get("_base", ""))
+        return info, entry
+    return {"source": args.source}, None
+
+
+def _prune_skills(cfg: Config, platforms, log) -> list[dict]:
+    """卸载包后清理不再被任何已装芯片使用的平台 skill（含 DSH 镜像）。"""
+    cfg2 = Config(cfg.root)
+    alive = {(c.get("vendor"), c.get("platform") or c.get("id"))
+             for c in cfg2.chips.values()}
+    removed: list[dict] = []
+    for vendor, platform in platforms:
+        if (vendor, platform) in alive:
+            continue
+        for path in (cfg2.root / "skills" / vendor / platform / "SKILL.md",
+                     cfg2.root / ".agents" / "skills" / platform / "SKILL.md"):
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append({"path": to_fwd(path)})
+            log(f"[elab] — 已清理平台 skill：{to_fwd(path)}")
+    return removed
+
+
+def cmd_pkg(cfg: Config, args) -> int:
+    cmd = args.pkg_cmd
+    log = (lambda *a, **k: None) if args.json else print
+
+    if cmd == "search":
+        hits = pkg_mod.search(cfg, args.query)
+        market = pkg_mod.load_market(cfg)
+        if args.json:
+            print(json.dumps({"path": market.get("path"),
+                              "error": market.get("error"),
+                              "packs": [{k: v for k, v in e.items() if k != "_base"}
+                                        for e in hits]},
+                             ensure_ascii=False, indent=2))
+        else:
+            print(f"[elab] 市场索引：{market.get('path') or '(未配置)'}")
+            if market.get("error"):
+                print(f"[elab] ! {market['error']}")
+            if not hits:
+                print("  （没有匹配的适配包）")
+            for e in hits:
+                mark = "已装" if e.get("installed") else "　　"
+                chips = "、".join(e.get("chips") or []) or "-"
+                print(f"  {mark} {e.get('name'):<18} v{e.get('version'):<7} "
+                      f"[{e.get('status')}] {chips}")
+                if e.get("description"):
+                    print(f"       {e['description']}")
+        return 0 if hits or not market.get("error") else 1
+
+    if cmd == "install":
+        kwargs, entry = _install_kwargs(cfg, args)
+        sha = args.sha256 or (entry or {}).get("sha256")
+        status = args.status or (entry or {}).get("status")
+        rec = pkg_mod.install(cfg, sha256=sha, force=args.force, status=status,
+                              log=log, **kwargs)
+        written = [] if args.no_skill else _regen_skills(cfg, rec.get("chips"), log)
+        if args.json:
+            print(json.dumps({**rec, "skills": written}, ensure_ascii=False, indent=2))
+        else:
+            print(f"[elab] 芯片：{', '.join(rec.get('chips') or []) or '(无)'}")
+            print("[elab] 下一步：elab doctor / elab build -p <工程>")
+        return 0
+
+    if cmd == "bootstrap":
+        recs = pkg_mod.bootstrap(cfg, root=args.from_path or None,
+                                 force=args.force, log=log)
+        refs = [c for r in recs for c in r.get("chips") or []]
+        written = [] if args.no_skill else _regen_skills(cfg, refs, log)
+        if args.json:
+            print(json.dumps({"installed": recs, "skills": written},
+                             ensure_ascii=False, indent=2))
+        else:
+            print(f"[elab] 官方包安装完成：{len(recs)} 个")
+        return 0
+
+    if cmd == "list":
+        st = pkg_mod.status(cfg, include_market=False)
+        if args.json:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+            return 0
+        print(f"[elab] 安装目录：{st['install_root']}")
+        print(f"[elab] 搜索根：{', '.join(st['roots'])}")
+        if not st["installed"]:
+            print("  （无已装适配包 —— 通用骨架不内置芯片。"
+                  "`elab pkg bootstrap` 装官方包，`elab pkg search` 浏览社区市场）")
+        for r in st["installed"]:
+            mark = "已装" if r.get("installed") else "源"
+            print(f"  {mark} {r['name']:<18} v{r.get('version'):<7} "
+                  f"[{r.get('status')}] {r.get('dir')}")
+            print(f"       chips：{', '.join(r.get('chips') or []) or '(无)'}")
+        return 0
+
+    if cmd == "remove":
+        platforms = set()
+        for ref in (pkg_mod.discover(cfg).get(args.name) or {}).get("chips") or []:
+            chip = cfg.chips.get(ref) or {}
+            platforms.add((chip.get("vendor"), chip.get("platform") or chip.get("id")))
+        rec = pkg_mod.remove(cfg, args.name, force=args.force, log=log)
+        pruned = _prune_skills(cfg, platforms, log)
+        if args.json:
+            print(json.dumps({**rec, "skills_removed": pruned},
+                             ensure_ascii=False, indent=2))
+        return 0
+
+    if cmd == "update":
+        st = pkg_mod.status(cfg, include_market=False)
+        names = [args.name] if args.name else [
+            r["name"] for r in st["installed"] if r.get("installed")]
+        if not names:
+            raise ElabError("没有可更新的已装包")
+        results = []
+        for name in names:
+            entry = pkg_mod.market_entry(cfg, name)
+            if not entry:
+                log(f"[elab] ! {name} 不在市场索引中，跳过")
+                continue
+            cur = next((r for r in st["installed"] if r["name"] == name), {})
+            if cur.get("version") == entry.get("version") and not args.force:
+                log(f"[elab] — {name} 已是最新 v{entry.get('version')}")
+                continue
+            kwargs = pkg_mod.entry_source(entry, entry.get("_base", ""))
+            rec = pkg_mod.install(cfg, sha256=entry.get("sha256"), force=True,
+                                  status=entry.get("status"), log=log, **kwargs)
+            results.append(rec)
+        refs = [c for r in results for c in r.get("chips") or []]
+        written = [] if args.no_skill else _regen_skills(cfg, refs, log)
+        if args.json:
+            print(json.dumps({"updated": results, "skills": written},
+                             ensure_ascii=False, indent=2))
+        return 0
+
+    if cmd == "verify":
+        results = pkg_mod.verify(cfg, args.name)
+        if args.json:
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+        else:
+            for r in results:
+                mark = "✓" if r["ok"] else "✗"
+                print(f"  [{mark}] {r['name']}  {r.get('dir', '')}")
+                for p in r.get("problems") or []:
+                    print(f"       ! {p}")
+        return 0 if all(r["ok"] for r in results) else 1
+
+    if cmd == "index":
+        root = Path(args.from_path) if args.from_path else pkg_mod.official_root(cfg)
+        out = Path(args.out) if args.out else Path(cfg.root) / "market" / "index.json"
+        # 仓库内索引的 source.path 相对仓库根（与 load_market 的 _base 约定一致）
+        base = Path(args.base) if args.base else Path(cfg.root)
+        if args.check:
+            probs = pkg_mod.index_problems(root, base, out)
+            if args.json:
+                print(json.dumps({"ok": not probs, "problems": probs},
+                                 ensure_ascii=False, indent=2))
+            else:
+                for p in probs:
+                    print(f"  ✗ {p}")
+                print("[elab] ✓ 市场索引与包内容一致" if not probs
+                      else f"[elab] ✗ 索引漂移 {len(probs)} 项")
+            return 0 if not probs else 1
+        keep = []
+        if out.exists():
+            try:
+                keep = (json.loads(out.read_text(encoding="utf-8"))
+                        .get("packs") or [])
+            except ValueError:
+                keep = []
+        data = pkg_mod.build_index(root, base, keep=keep)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+            print(f"[elab] ✓ 已生成市场索引：{out}（{len(data['packs'])} 个包）")
+        return 0
+
+    return 2
 
 
 # ── skill：生成 per-chip AI skill ─────────────────────────────────

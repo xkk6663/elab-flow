@@ -242,6 +242,16 @@ SSE 层为压掉"一秒上万行"的编译输出，会把**只有进程输出**�
 与闭环的双向互斥（监视 ↔ flash/debug_verify/monitor）在 HTTP 层以 **409 指名道姓**，
 不产生任何事件。
 
+**字节面（P1）**：`GET /api/serial/monitor/bytes?after=N&dir=all|rx|tx&limit=` 是行投影
+的上游真值（`dir/t_us/chunk_seq/data_b64`），同样不进事件流。**连接纪元 `epoch` 每次
+open 自增** —— 前端发现它变化必须同时重置"行/字节"两个游标（只重置一个就会静默停在
+旧会话的序号上，表现为"重开后一直没有新数据"）。
+
+**显式录制（K5）**：`POST /api/serial/capture {action:"start"|"stop"|"status"}` 把原始
+**字节**写成有界 JSONL（`.work/.cockpit/serial-capture-e<epoch>-<ts>.jsonl`，默认上限
+5 MiB，到顶停录并标 `truncated`）—— 它是"证据"，与 console 留档（§3.5，会滚动）是
+两回事；录制内容**仍不进事件流**，也不写 run 的 `.jsonl`。
+
 ---
 
 ## 4. 步骤序列（stage pipeline）

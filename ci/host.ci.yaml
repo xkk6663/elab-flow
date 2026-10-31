@@ -48,3 +48,11 @@ serial:
   baud: 115200
 
 svd_roots: []                   # 云端不需要寄存器视图
+
+# 芯片适配包：CI 与本地同一套协议；workflow 在 cp 本文件后用
+# `./elab pkg bootstrap`（或 `pkg install st/stm32`）按需安装。
+packs:
+  roots:
+    - ${ELAB_ROOT}/packs/installed
+  # CI 只装内置包（bootstrap），不依赖外部网络市场
+  market: ${ELAB_ROOT}/market/index.json

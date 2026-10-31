@@ -1,0 +1,29 @@
+# packs/official/st/stm32/pack.yaml —— ST 芯片适配包（官方首发样例）
+#
+# 适配包 = elab 骨架**唯一**的芯片知识来源：骨架不认识任何厂商，只认这里。
+# 社区可按同样格式复制此包，改成自己的 vendor/platform 后提交到市场索引。
+
+schema_version: 1
+name: st/stm32
+vendor: st
+platform: stm32
+version: 0.1.0
+license: MIT
+status: official
+description: STM32F1/F4 芯片适配包（STM32CubeMX 工程指纹 + 芯片参数 + 平台坑位）
+
+# 兼容性握手：内核 v1 自描述 API；芯片 YAML schema v1。
+# 内核升级后不满足约束时，安装阶段会 fail-fast，避免"半兼容"运行。
+requires:
+  kernel_api: ">=1 <2"
+  schema_version: 1
+
+# 厂商/生成器指纹 —— adapt 探测器从这里读取，内核不再硬编码任何厂商。
+# gen_dir   : 工程里 CMakeLists 的 add_subdirectory(cmake/<gen_dir>) 目录名
+# syms_var  : cmake/<gen_dir>/CMakeLists.txt 里的编译宏变量名（E1 证据）
+# project_glob: 生成器工程文件（E5 证据，可能过期，仅作辅助）
+vendor_fingerprints:
+  - generator: stm32cubemx
+    gen_dir: stm32cubemx
+    syms_var: MX_Defines_Syms
+    project_glob: "*.ioc"

@@ -29,6 +29,7 @@ import { channelOfEvent, channelOfStep } from '../../domain/channels.ts'
 import type { LogChannelId } from '../../domain/channels.ts'
 import { LOG_CHANNELS } from '../../domain/channels.ts'
 import type { PlanView } from '../../domain/pipeline.ts'
+import type { SerialMonitorSnapshot } from '../../domain/icd.ts'
 import { elabApi } from '../kernel-http/icd-client.ts'
 import { createRunEventsPort } from './events/run-events.ts'
 import { StageLadder, stepLabelOf } from './StageLadder.tsx'
@@ -36,6 +37,8 @@ import type { LadderStep } from './StageLadder.tsx'
 import { ManualBar } from './ManualBar.tsx'
 import { EvidenceTail, TAIL_CAPACITY } from './EvidenceTail.tsx'
 import type { TailBuffers, TailLine } from './EvidenceTail.tsx'
+import { SerialPane } from './SerialPane.tsx'
+import { useSerialStream } from './serial/useSerialStream.ts'
 
 /** 每个通道的环形缓冲（最多 TAIL_CAPACITY 行）。 */
 function pushLine(buf: TailLine[], line: TailLine): void {
@@ -210,6 +213,20 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   const [tailVersion, setTailVersion] = useState(0)
   const [cleanTarget, setCleanTarget] = useState<string | null>(null)
 
+  // ── 串口：端口/波特率来自 capabilities；数据面统一在 useSerialStream ──
+  const [serialMeta, setSerialMeta] = useState<{ port: string; baud: number; writable: boolean }>({
+    port: 'auto',
+    baud: 115200,
+    writable: false,
+  })
+  /** capabilities 里的监视快照（别处已开的会话能立刻接上）。 */
+  const [serialInitial, setSerialInitial] = useState<SerialMonitorSnapshot | null>(null)
+  /** 协议解码器（caps.meta.serial.decoders；缺失时用内置两种）。 */
+  const [decoders, setDecoders] = useState<Array<{ id: string; label: string; desc?: string }>>([
+    { id: 'justfloat', label: 'JustFloat' },
+    { id: 'firewater', label: 'FireWater' },
+  ])
+
   /** 日志追加后节流重绘（≤1 次/100ms）。 */
   const bumpTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bumpTail = useCallback(() => {
@@ -289,6 +306,95 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     setChannel('build')
   }, [runId])
 
+  // ── 串口元数据：能力面（端口/波特率/可写） → 工程卡片覆盖 ──
+  useEffect(() => {
+    let cancelled = false
+    void elabApi
+      .capabilities(sessionId)
+      .then((caps) => {
+        if (cancelled) return
+        const s = (caps as {
+          serial?: {
+            host_default?: string
+            host_baud?: number
+            write_available?: boolean
+            ports?: Array<{ name?: string }>
+            monitor?: SerialMonitorSnapshot
+          }
+          meta?: { serial?: { decoders?: Array<{ id?: string; label?: string; desc?: string }> } }
+        })
+        const serial = s.serial
+        if (serial !== undefined) {
+          setSerialMeta({
+            port: serial.host_default || serial.ports?.[0]?.name || 'auto',
+            baud: serial.host_baud ?? 115200,
+            writable: serial.write_available === true,
+          })
+          // ★ 已有会话（别处打开/刷新前就在跑）：直接接上（游标由 hook 从 0 追起）。
+          if (serial.monitor !== undefined) setSerialInitial(serial.monitor)
+        }
+        const list = s.meta?.serial?.decoders
+        if (Array.isArray(list) && list.length > 0) {
+          setDecoders(
+            list
+              .filter((d) => typeof d.id === 'string' && d.id !== '')
+              .map((d) => ({ id: String(d.id), label: String(d.label ?? d.id), ...(d.desc !== undefined ? { desc: d.desc } : {}) })),
+          )
+        }
+      })
+      .catch(() => {
+        /* capability 读不到不挡主流程 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    if (snap.project === '') return
+    let cancelled = false
+    void elabApi
+      .projects(sessionId)
+      .then((r) => {
+        if (cancelled) return
+        const cards = (r.projects ?? r.cards ?? []) as Array<{
+          name?: string
+          serial?: { port?: string; baud?: number }
+        }>
+        const card = cards.find((c) => String(c.name ?? '') === snap.project)
+        const serial = card?.serial
+        if (serial === undefined) return
+        setSerialMeta((prev) => ({
+          ...prev,
+          port: serial.port || prev.port,
+          baud: serial.baud || prev.baud,
+        }))
+      })
+      .catch(() => {
+        /* 读不到就用 capabilities 默认 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [snap.project, sessionId])
+
+  // ── 串口数据面（行 + 字节批次）：只在串口通道可见时轮询 ──
+  const serialStream = useSerialStream({
+    api: elabApi,
+    initial: serialInitial,
+    project: snap.project,
+    port: serialMeta.port,
+    baud: serialMeta.baud,
+    enabled: channel === 'serial' && visible === true,
+    sessionId,
+  })
+
+  /** 串口通道的「启动」：切到串口页 + 打开常驻监视（已在跑则只切页）。 */
+  const onSerialStart = useCallback(() => {
+    setChannel('serial')
+    if (!serialStream.active) void serialStream.open()
+  }, [serialStream])
+
   // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
   const steps: LadderStep[] = snap.run.steps
   const running = snap.run.status === 'running'
@@ -309,7 +415,14 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     [service],
   )
 
-  const onRunOne = useCallback((id: string) => void service.runOne(id), [service])
+  /** 单步启动：先切到该步骤对应通道，再发起（点了就能看见自己的输出）。 */
+  const onRunOne = useCallback(
+    (id: string) => {
+      setChannel(channelOfStep(id))
+      void service.runOne(id)
+    },
+    [service],
+  )
 
   // ── 渲染 ──
   if (snap.hostOk === false) {
@@ -490,7 +603,11 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             running={running}
             busy={snap.busy}
             cleanTarget={cleanTarget}
+            availability={snap.availability}
+            serialActive={serialStream.active}
             onRun={(id, opts) => void service.startPlan(id, opts)}
+            onRunOne={onRunOne}
+            onSerial={onSerialStart}
             onCancel={() => void service.cancel()}
             onPreview={(opts) => void service.preview(opts)}
           />
@@ -517,7 +634,23 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             progress={snap.progress}
             failure={failure}
             onChannel={setChannel}
-            serial={channel === 'serial' ? { writable: true, port: 'auto', baud: 115200, onSend: () => {} } : null}
+            serialContent={
+              channel === 'serial' ? (
+                <SerialPane
+                  api={elabApi}
+                  stream={serialStream}
+                  decoders={decoders}
+                  project={snap.project}
+                  running={running}
+                  port={serialMeta.port}
+                  baud={serialMeta.baud}
+                  writable={serialMeta.writable}
+                  runLines={buffersRef.current.serial ?? []}
+                  runLinesVersion={tailVersion}
+                  sessionId={sessionId}
+                />
+              ) : undefined
+            }
           />
         )
         if (tier !== 'wide') {

@@ -16,6 +16,7 @@ HTTP 服务拖死、SSE 推不出去（``flash.debug`` 起 openocd 时还要阻�
 from __future__ import annotations
 
 import json
+import base64
 import mimetypes
 import os
 import queue
@@ -38,12 +39,14 @@ if str(_ROOT / "services") not in sys.path:
 from elab import adapt as adapt_mod                      # noqa: E402
 from elab import flash as flash_mod                      # noqa: E402
 from elab import run as run_mod                      # noqa: E402
+from elab import serialcodec as serialcodec_mod      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
+from elab import pkg as pkg_mod                       # noqa: E402
 
 HOST = "127.0.0.1"            # ★ 只监听本地（§5.6：本地工具，不做远程暴露）
 #: ★ C34：默认端口**刻意避开 3333** —— openocd 的 gdb server 固定绑 3333，
@@ -75,6 +78,19 @@ KERNEL_PLANS = [
     {"id": "loop",   "title": "闭环", "steps": ["doctor", "build", "flash", "debug_verify", "monitor"],
      "requires_hardware": False},
 ]
+
+#: 串口词汇表（内核自描述，§16 / §4.4）：视图、表示、编码、行尾、解码器。
+#: 工具层与前端**只渲染**这里的清单；新增能力只改内核，别在工具层写死业务名词。
+SERIAL_META = {
+    "views": ["lines", "bytes", "terminal", "wave"],
+    "formats": list(serialterm_mod.SEND_FORMATS),
+    "encodings": ["utf-8", "gbk"],
+    "eols": list(serialterm_mod.EOLS.keys()),
+    "directions": ["all", "rx", "tx"],
+    "decoders": list(serialcodec_mod.DECODERS),
+    "features": ["hex", "search", "clear", "pause", "epoch", "lease",
+                 "capture", "capture_export", "waveform"],
+}
 
 COCKPIT_VERSION = "2.1.0"
 
@@ -598,6 +614,8 @@ def project_cards(cfg: Config) -> dict:
                 "package": chip.get("package", ""), "frequency": chip.get("frequency", ""),
                 "core": chip.get("core") or {}, "memory": chip.get("memory") or {},
                 "debug": chip.get("debug") or {},
+                # ★ 芯片来自哪个适配包（骨架本身不含芯片；空 = 未安装适配包）
+                "pack": chip.get("_pack", ""),
             },
         })
 
@@ -621,6 +639,15 @@ def project_cards(cfg: Config) -> dict:
     }
 
 
+def _packs_summary(cfg: Config) -> dict:
+    """适配包最小投影（capabilities 用；市场索引走 ``/api/packs``）。"""
+    try:
+        return pkg_mod.status(cfg, include_market=False)
+    except Exception as exc:                          # noqa: BLE001
+        return {"roots": [], "install_root": "", "installed": [],
+                "chips": [], "error": str(exc)}
+
+
 def capabilities(cfg: Config, mgr: RunManager) -> dict:
     caps = serialport_mod.capabilities()
     ports, backend = ("[]", "")
@@ -641,6 +668,8 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "python": {"version": sys.version.split()[0], "executable": sys.executable},
         "root": to_fwd(cfg.root),
         "runs_dir": to_fwd(mgr.runs_dir),
+        # ★ 适配包投影（骨架无芯片：此处为空即"通用工具链"形态）
+        "packs": _packs_summary(cfg),
         "serial": {**caps, "backend": backend, "ports": ports,
                    "host_default": (host.get("serial") or {}).get("default", "auto"),
                    "host_baud": (host.get("serial") or {}).get("baud", 115200),
@@ -658,7 +687,8 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
                   "onhw": sorted(run_mod.ONHW_STEPS)},
         # 工具层自描述（§16）：标签/通道/档位由内核声明
         "meta": {"steps": STEP_META, "plans": KERNEL_PLANS,
-                 "channels": ["build", "flash", "debug", "serial"]},
+                 "channels": ["build", "flash", "debug", "serial"],
+                 "serial": SERIAL_META},
     }
 
 
@@ -819,6 +849,11 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 return self._json(capabilities(self.cfg, self.mgr))
             if path == "/api/projects":
                 return self._json(project_cards(self.cfg))
+            if path == "/api/packs":
+                # 适配包 / 社区市场投影（内核事实源；工具层只渲染）。
+                # ?market=0 可跳过市场索引读取（离线/慢网络）。
+                with_market = (qs.get("market") or ["1"])[0].lower() not in ("0", "false", "no")
+                return self._json(pkg_mod.status(self.cfg, include_market=with_market))
             if path == "/api/runs":
                 return self._json({"runs": ev_mod.list_runs(self.mgr.runs_dir),
                                    "active": self.mgr.list_active()})
@@ -843,6 +878,24 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 recs = clog.tail(limit)
                 return self._json({"records": recs, "count": clog.count(),
                                    "requested": limit, "path": to_fwd(clog.path)})
+            if path == "/api/serial/monitor/bytes":
+                # P1 字节真值：带方向/时间/序号的原始批次（data_b64）。
+                # ?after=批次序号 &dir=all|rx|tx &limit=最多返回几个批次
+                raw = (qs.get("after") or ["0"])[0]
+                try:
+                    after = int(raw)
+                except ValueError:
+                    raise ElabError(f"after 必须是整数：{raw!r}")
+                direction = (qs.get("dir") or ["all"])[0]
+                if direction not in ("all", "rx", "tx"):
+                    raise ElabError(f"dir 必须是 all/rx/tx：{direction!r}")
+                raw_lim = (qs.get("limit") or ["0"])[0]
+                try:
+                    limit = int(raw_lim) if raw_lim else 0
+                except ValueError:
+                    raise ElabError(f"limit 必须是整数：{raw_lim!r}")
+                return self._json(serialmon_mod.tail_bytes(
+                    after, direction=direction, limit=limit))
             if path == "/api/serial/monitor":
                 # 常驻监视会话的增量读回（tail）。「after」= 浏览器已收到的最大 seq。
                 raw = (qs.get("after") or ["0"])[0]
@@ -912,20 +965,30 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         f"步骤 {'/'.join(busy.get('steps') or [])}）—— 它要用串口/SWD，"
                         f"手写通道已在让路（约束 N5）。等它跑完，或先取消它。"))
                 project = body.get("project") or ""
+                fmt = body.get("format")
+                eol = body.get("eol")
+                encoding = body.get("encoding")
                 # ★ 监视会话开着 → 写通道路由**进会话**（同一个口直接 write，
                 #   不重开口 —— 不破坏 N5）。回显不再由本请求带回：读线程会把它
                 #   送进实时流。TX 照旧落 console 留档（"我敲过这一行"不因失败消失）。
                 payload, perr = serialterm_mod.build_payload(
                     data, newline=bool(body.get("newline", True)),
-                    hex_=bool(body.get("hex")))
+                    hex_=bool(body.get("hex")), format=fmt, eol=eol,
+                    encoding=encoding)
                 if perr:
                     return self._json({"ok": False, "error": perr, "port": "",
                                        "baud": 0, "written": 0, "echoed": [],
                                        "via": "monitor"}, 200)
                 n = serialmon_mod.write_through(payload)
                 if n is not None:
+                    fmt_key = (fmt or ("hex" if body.get("hex") else "utf8")).lower()
+                    eol_key = "none" if fmt_key == "hex" else \
+                        (eol or ("crlf" if body.get("newline", True) else "none"))
                     via_res = {"ok": n == len(payload), "via": "monitor",
                                "written": n, "payload_bytes": len(payload),
+                               "format": fmt_key,
+                               "eol": serialterm_mod.EOLS.get(
+                                   str(eol_key).lower(), b"").decode("ascii"),
                                "echoed": [], "error": None if n == len(payload)
                                else "只写出部分字节（口可能已失效，试试关闭重开监视）"}
                     st_ok = serialmon_mod.status()
@@ -936,7 +999,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         serialconsole_mod.journal_for(self.cfg, project=project)({
                             "dir": "tx", "text": data, "ok": via_res["ok"],
                             "written": n, "payload_bytes": len(payload),
-                            "via": "monitor",
+                            "via": "monitor", "format": fmt_key,
                             "port": via_res["port"], "baud": via_res["baud"],
                             "error": via_res["error"]})
                     except Exception as exc:               # noqa: BLE001
@@ -951,14 +1014,16 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     read_ms=body.get("read_ms") or serialterm_mod.DEFAULT_READ_MS,
                     newline=bool(body.get("newline", True)),
                     hex_=bool(body.get("hex")),
+                    format=fmt, eol=eol, encoding=encoding,
                     # ★ 落盘：写通道**不属于任何 run**，所以落到独立的 console 日志，
                     #   绝不写进 run 的 .jsonl（那会破坏单写者模型，约束 C17）。
                     journal=serialconsole_mod.journal_for(self.cfg, project=project),
                 )
                 return self._json(res, 200)
             if u.path == "/api/serial/monitor":
-                # 常驻串口监视（「打开监视 / 关闭监视」）。open 前先查闭环占用：
-                # 与手写通道同款 409 指名道姓 —— 不让用户对着 ERROR_ACCESS_DENIED 拔插。
+                # 常驻串口监视（「打开监视 / 关闭监视 / 清空 / 暂停」）。
+                # open 前先查闭环占用：与手写通道同款 409 指名道姓 ——
+                # 不让用户对着 ERROR_ACCESS_DENIED 拔插。
                 body = self._body()
                 action = body.get("action") or ""
                 if action == "open":
@@ -968,14 +1033,69 @@ class CockpitHandler(BaseHTTPRequestHandler):
                             f"有闭环正在跑（run={busy.get('run')}，"
                             f"步骤 {'/'.join(busy.get('steps') or [])}）—— "
                             f"它要用串口/SWD（约束 N5）。等它跑完，或先取消它。"))
+                    try:
+                        lease_s = float(body.get("lease_s") or 0)
+                    except (TypeError, ValueError):
+                        raise ElabError(f"lease_s 必须是数字：{body.get('lease_s')!r}")
                     res = serialmon_mod.open_session(
                         self.cfg, body.get("project") or "",
                         port=body.get("port") or "",
-                        baud=body.get("baud") or 0)
+                        baud=body.get("baud") or 0,
+                        opened_by=str(body.get("actor") or "human"),
+                        lease_s=lease_s,
+                        allow_agent_write=bool(body.get("allow_agent_write")))
                     return self._json(res, 200)
                 if action == "close":
                     return self._json(serialmon_mod.close_session(), 200)
-                raise ElabError(f"action 必须是 open 或 close：{action!r}")
+                if action == "clear":
+                    return self._json(serialmon_mod.clear(), 200)
+                if action == "pause":
+                    return self._json(serialmon_mod.set_paused(True), 200)
+                if action == "resume":
+                    return self._json(serialmon_mod.set_paused(False), 200)
+                raise ElabError(
+                    f"action 必须是 open/close/clear/pause/resume：{action!r}")
+            if u.path == "/api/serial/capture":
+                # K5 显式录制：把**字节**录成有界 JSONL（不录文本投影，可回放）。
+                # start/stop 幂等；status 走 capabilities.serial.monitor.capture。
+                body = self._body()
+                action = body.get("action") or "start"
+                if action == "start":
+                    raw_mb = body.get("max_bytes")
+                    try:
+                        max_bytes = int(raw_mb or 0)
+                    except (TypeError, ValueError):
+                        raise ElabError(f"max_bytes 必须是整数：{raw_mb!r}")
+                    return self._json(serialmon_mod.capture_start(
+                        self.cfg, project=body.get("project") or "",
+                        max_bytes=max_bytes), 200)
+                if action == "stop":
+                    return self._json(serialmon_mod.capture_stop(), 200)
+                if action == "status":
+                    return self._json({"ok": True,
+                                       **serialmon_mod.status()}, 200)
+                raise ElabError(f"action 必须是 start/stop/status：{action!r}")
+            if u.path == "/api/serial/decode":
+                # P3 无状态协议解码：给一段字节（hex 或 base64），返回通道帧。
+                # ★ 不解码"会话状态"：半帧由调用方拼下一批（pending 原样带回）。
+                body = self._body()
+                decoder = str(body.get("decoder") or "justfloat")
+                if body.get("data_b64"):
+                    try:
+                        data = base64.b64decode(str(body.get("data_b64")))
+                    except Exception as exc:               # noqa: BLE001
+                        raise ElabError(f"data_b64 不是合法 base64：{exc}")
+                elif body.get("hex"):
+                    try:
+                        data = bytes.fromhex(
+                            "".join(str(body.get("hex")).split()))
+                    except ValueError as exc:
+                        raise ElabError(f"hex 不是合法十六进制：{exc}")
+                else:
+                    data = b""
+                res = serialcodec_mod.decode(data, decoder,
+                                             channels=body.get("channels"))
+                return self._json(res, 200 if res.get("ok") else 400)
             if u.path == "/api/adapt":
                 # 一键适配（M5.6）：probe 只读在前，write 显式第二段。
                 return self._adapt(self._body())

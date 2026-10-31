@@ -5,17 +5,27 @@
 # （elab 自身产物落在 .work/；examples/ 的源码照常入库，CI 依赖它）
 build/
 
+# 适配包安装目录（按需从市场/官方源安装，不入库）；
+# 随仓只保留 packs/official/**（官方包源）与 market/index.json（索引）
+packs/installed/
+
+# 芯片平台 skill 由 `elab pkg install` / `elab skill` 从适配包生成（骨架不含芯片）。
+# 入库的只有通用 elab-loop skill。
+skills/*/*/SKILL.md
+.agents/skills/*/SKILL.md
+!.agents/skills/elab-loop/SKILL.md
+
 # Python 字节码
 __pycache__/
 *.pyc
 
 
-# 待删除（用户已授权，外部有备份；删掉后此条可移除）
-examples/AT32F421G8U7_WorkBench/
+# 浏览器验证截图（临时产物，不入库）
+.screenshots/
 
 # WorkBuddy 会话数据（不入库）
 .workbuddy/
 
-# DSH \u63d2\u4ef6\u5305\u7684\u7b2c\u4e09\u65b9\u4f9d\u8d56\uff08@deepseek-ai/dsh-tools \u7b49\uff09\uff0c\u5165\u5e93\u7684\u53ea\u6709 lib/ \u4ea7\u7269\uff08R8\uff09
+# 插件的第三方依赖（@deepseek-ai/dsh-tools 等），入库的只有 lib/ 产物
 node_modules/
 

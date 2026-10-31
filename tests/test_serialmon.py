@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -66,6 +69,9 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         sm.MAX_LINES = 4                      # 小缓冲：让"挤掉旧行"可测
+        sm.MAX_CHUNKS = 4                     # 字节环的批次上限也要可测
+        sm.MAX_BYTES = 1 << 20
+        sm.PARTIAL_FLUSH_S = 1.0
         self.io = FakeIO("COM9", 115200, for_write=True)
         self._orig_sp, self._orig_st = sm.sp, sm.st
         sm.sp = types.SimpleNamespace(SerialIO=lambda p, b, **kw: self.io,
@@ -84,6 +90,9 @@ class Base(unittest.TestCase):
         sm.close_session(log=lambda *a: None)
         sm.sp, sm.st = self._orig_sp, self._orig_st
         sm.MAX_LINES = 2000
+        sm.MAX_CHUNKS = 4096
+        sm.MAX_BYTES = 1 << 20
+        sm.PARTIAL_FLUSH_S = 1.0
 
     # ── 小工具 ──────────────────────────────────────────────────
     def open(self, **kw) -> dict:
@@ -218,6 +227,189 @@ class WriteThrough(Base):
         self.wait_for(lambda: not sm.status()["active"], what="读线程自愈收摊")
         self.assertEqual(sm.write_through(b"x"), 0)
         self.assertIn("读失败", sm.status()["error"])
+
+
+class BytePlane(Base):
+    """P1：字节为真值 —— RX/TX 同构入环、纪元、覆盖计数。"""
+
+    def chunks(self, after: int = 0, **kw) -> list[dict]:
+        return sm.tail_bytes(after, **kw)["chunks"]
+
+    def test_rx_bytes_are_recorded_with_direction(self):
+        self.assertTrue(self.open()["ok"])
+        self.io.rx.append(b"hello\n")
+        self.wait_for(lambda: sm.tail_bytes(0)["chunk_seq"] >= 1, what="RX 批次")
+        c = self.chunks()[0]
+        self.assertEqual(c["dir"], "rx")
+        self.assertEqual(base64.b64decode(c["data_b64"]), b"hello\n")
+        self.assertEqual(c["len"], 6)
+
+    def test_tx_bytes_enter_the_same_plane(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertEqual(sm.write_through(b"help\r\n"), 6)
+        c = self.chunks()[0]
+        self.assertEqual(c["dir"], "tx")
+        self.assertEqual(base64.b64decode(c["data_b64"]), b"help\r\n")
+
+    def test_direction_filter(self):
+        self.assertTrue(self.open()["ok"])
+        self.io.rx.append(b"in\n")
+        self.wait_for(lambda: sm.tail_bytes(0)["chunk_seq"] >= 1, what="RX 批次")
+        sm.write_through(b"out\r\n")
+        self.assertEqual([x["dir"] for x in self.chunks()], ["rx", "tx"])
+        tx = sm.tail_bytes(0, direction="tx")
+        self.assertEqual([x["dir"] for x in tx["chunks"]], ["tx"])
+        self.assertTrue(tx["filtered"])
+
+    def test_tail_bytes_after_is_incremental(self):
+        self.assertTrue(self.open()["ok"])
+        sm.write_through(b"a")
+        sm.write_through(b"b")
+        self.assertEqual([x["seq"] for x in self.chunks(1)], [2])
+
+    def test_ring_overflow_reports_chunk_gap(self):
+        self.assertTrue(self.open()["ok"])
+        for i in range(6):                   # MAX_CHUNKS=4 → 最旧两批被挤掉
+            sm.write_through(bytes([i]))
+        t = sm.tail_bytes(0)
+        self.assertEqual([x["seq"] for x in t["chunks"]], [3, 4, 5, 6])
+        self.assertGreaterEqual(t["covered"], 2)
+        self.assertGreaterEqual(t["gap"], 2)
+
+    def test_epoch_increases_on_reopen(self):
+        r1 = self.open()
+        e1 = r1["epoch"]
+        sm.close_session(log=lambda *a: None)
+        self.io2 = FakeIO("COM9", 115200, for_write=True)
+        sm.sp = types.SimpleNamespace(SerialIO=lambda p, b, **kw: self.io2,
+                                      capabilities=sm.sp.capabilities)
+        r2 = self.open()
+        self.assertEqual(r2["epoch"], e1 + 1)
+
+    def test_snapshot_reports_byte_fields(self):
+        self.assertTrue(self.open()["ok"])
+        sm.write_through(b"x")
+        st = sm.status()
+        for k in ("epoch", "chunk_seq", "covered_chunks", "bytes_total",
+                  "paused", "opened_by", "allow_agent_write", "lease_s"):
+            self.assertIn(k, st)
+
+    def test_tail_bytes_without_session(self):
+        r = sm.tail_bytes(0)
+        self.assertFalse(r["active"])
+        self.assertEqual(r["chunks"], [])
+
+
+class ClearPause(Base):
+    def test_clear_keeps_seq_monotonic_and_counts_covered(self):
+        self.assertTrue(self.open()["ok"])
+        self.io.rx.append(b"a\nb\n")
+        self.wait_for(lambda: sm.tail(0)["seq"] >= 2, what="两行")
+        r = sm.clear()
+        self.assertEqual(r["cleared_lines"], 2)
+        self.assertGreaterEqual(r["cleared_chunks"], 1)
+        self.assertEqual(sm.tail(0)["lines"], [])
+        self.assertEqual(sm.status()["seq"], 2)          # seq 不回退
+        self.assertGreaterEqual(sm.status()["covered"], 2)
+
+    def test_clear_without_session(self):
+        self.assertFalse(sm.clear()["ok"])
+
+    def test_pause_stops_ring_but_keeps_reading(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertTrue(sm.set_paused(True)["paused"])
+        self.io.rx.append(b"hidden\n")
+        time.sleep(0.3)
+        self.assertEqual(sm.tail_bytes(0)["chunks"], [])
+        self.assertTrue(sm.set_paused(False)["ok"])
+        self.io.rx.append(b"visible\n")
+        self.wait_for(lambda: sm.tail(0)["seq"] >= 1, what="恢复后入环")
+        self.assertEqual(sm.tail(0)["lines"][0]["text"], "visible")
+
+    def test_pause_without_session(self):
+        self.assertFalse(sm.set_paused(True)["ok"])
+
+
+class AgentLease(Base):
+    def test_lease_expires_and_releases_port(self):
+        r = self.open(lease_s=0.2, opened_by="agent", allow_agent_write=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["opened_by"], "agent")
+        self.assertTrue(r["allow_agent_write"])
+        self.wait_for(lambda: not sm.status()["active"], what="租约到期自愈")
+        self.assertEqual(sm.status()["error"], "lease_expired")
+        self.assertTrue(self.io.closed)      # 到期必须真的放开独占口（N5）
+
+    def test_tail_renews_lease(self):
+        self.assertTrue(self.open(lease_s=1.0, opened_by="agent")["ok"])
+        for _ in range(4):
+            time.sleep(0.3)
+            self.assertTrue(sm.status()["active"], "tail 应当续租")
+            sm.tail(0)
+        remaining = sm.status()["lease_remaining_s"]
+        self.assertGreater(remaining, 0.0)
+
+
+class Capture(Base):
+    """K5：显式录制 —— 有界 JSONL、只存字节、到顶如实标 truncated。"""
+
+    def setUp(self):
+        super().setUp()
+        # 录制落在 cfg.root/.work/.cockpit —— 测试必须用临时根，别写进仓库
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config(self.tmp.name)
+
+    def tearDown(self):
+        super().tearDown()
+        self.tmp.cleanup()
+
+    def test_capture_records_both_directions(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["path"].endswith(".jsonl"))
+        self.io.rx.append(b"cap\n")
+        self.wait_for(lambda: sm.status()["chunk_seq"] >= 1, what="RX 批次")
+        self.assertTrue(sm.write_through(b"tx\n"))
+        self.wait_for(lambda: sm.status()["capture"]["chunks"] >= 2, what="两条录制")
+        stopped = sm.capture_stop()
+        self.assertTrue(stopped["ok"], stopped)
+        self.assertEqual(stopped["chunks"], 2)
+        lines = Path(stopped["path"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        recs = [json.loads(x) for x in lines]
+        self.assertEqual([x["dir"] for x in recs], ["rx", "tx"])
+        for rec in recs:
+            self.assertEqual(set(rec), {"seq", "t_us", "dir", "bytes_b64"})
+        self.assertEqual(base64.b64decode(recs[1]["bytes_b64"]), b"tx\n")
+
+    def test_capture_stops_at_cap_and_marks_truncated(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, max_bytes=150)
+        self.assertTrue(r["ok"], r)
+        for i in range(2):
+            sm.write_through(f"line-{i}\n".encode())
+        stop = sm.capture_stop()
+        self.assertTrue(stop["truncated"])       # 第二条超上限 → 停录
+        self.assertLessEqual(stop["bytes"], 150)
+        text = Path(stop["path"]).read_text(encoding="utf-8")
+        self.assertTrue(text.strip())            # 不全空
+        for line in text.splitlines():
+            json.loads(line)                     # 每条都是完整 JSON（不截半条）
+
+    def test_capture_status_visible_in_snapshot(self):
+        self.assertTrue(self.open()["ok"])
+        sm.capture_start(self.cfg)
+        cap = sm.status()["capture"]
+        self.assertTrue(cap["active"])
+        self.assertTrue(cap["path"].endswith(".jsonl"))
+        sm.capture_stop()
+        self.assertFalse(sm.status()["capture"]["active"])
+
+    def test_capture_without_session_is_honest(self):
+        r = sm.capture_start(self.cfg)
+        self.assertFalse(r["ok"])
+        self.assertIn("监视", r["error"])
 
 
 if __name__ == "__main__":

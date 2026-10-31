@@ -17,54 +17,107 @@ M3-b 曾裁定"不做常驻会话"，那个结论**没有被推翻**——串口
     ③ 会话期间，手写通道**路由进会话**（同一个口直接 write，不再重开口）——
        不破坏 N5，也让"边看输出边敲命令"成为自然的体验。
 
-代价（物理事实，写进 UI 提示）：监视开着时，``elab run`` 的
-flash/debug_verify/monitor 步骤与 CLI ``elab serial`` **打不开口** ——
-服务端会 409 指名道姓（"串口监视正占用 COM10，先关闭监视"），而不是让用户
-对着一串 ``ERROR_ACCESS_DENIED`` 去拔插。
+数据平面（P1 起）
+-----------------
+**原文为真**：每次 ``read()`` 的原始字节是一条 **RX 批次**，每次 ``write()``
+成功的字节是一条 **TX 批次**；行文本只是字节流的投影。批次带：
+
+    seq        会话内单调的批次序号（与行的 ``seq`` 独立）
+    dir        rx / tx
+    t_us       采集时刻（微秒，前端可做时间轴）
+    data       原始字节（HTTP 出口转 base64）
+
+另有三样老接口没有、但"看得懂"必需的语义：
+
+    epoch            连接纪元：每次 open 自增；前端发现变化必须重置游标
+    covered_chunks   环形缓冲挤掉的批次数（gap 的证据）
+    paused           暂停入环（仍继续读口，避免把设备侧缓冲撑爆）
 
 输出走哪条道
 ------------
 **不进 run 事件流**（不属于任何 run —— C17 单写者与 C28 同源的理由）；
 **也不落 console 留档**（留档是"我敲过什么"的 TX/RX 历史，监视输出是设备
-喋喋不休的心跳，落盘只会把留档撑爆）。只活在**服务端环形缓冲**（MAX_LINES）
-与浏览器本地缓冲里，服务重启即失。它是"看"，不是"证据"；要证据走闭环的
-monitor 步骤（有 verdict、有事件流、有 .jsonl）。
+喋喋不休的心跳，落盘只会把留档撑爆）。只活在**服务端环形缓冲**与浏览器本地
+缓冲里，服务重启即失。它是"看"，不是"证据"；要证据走闭环的 monitor 步骤
+（有 verdict、有事件流、有 .jsonl）。
+
+Agent 租约
+---------
+Agent 打开的监视会话可以带 ``lease_s``：``tail`` / ``tail_bytes`` 每次访问都会
+续租；租约到期 → 读线程自行收摊，``error="lease_expired"``。这样"Agent 忘关"
+不会把串口一直占死（N5）。
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from . import serialport as sp
 from . import serialterm as st
 from .config import Config
 
-#: 服务端环形缓冲上限。浏览器 600ms 轮询一次，正常永远追得上；
+#: 行环形缓冲上限。浏览器轮询一次，正常永远追得上；
 #: 真追不上（页面挂后台被节流）时用 ``gap`` 显式告诉前端"缺了行"，不抹平。
 MAX_LINES = 2000
-#: 残留半行的冲刷时限：设备只发提示符不发 ``\\n`` 时（如 ``> ``），
+#: 字节环上限：双上限防"1 字节批次"把内存撑爆（1 MiB / 4096 批）。
+MAX_BYTES = 1 << 20
+MAX_CHUNKS = 4096
+#: 残留半行的冲刷时限：设备只发提示符不发 ``\n`` 时（如 ``> ``），
 #: 靠"静默超过这么久就把残留当一行"让它可见。
 PARTIAL_FLUSH_S = 1.0
+#: 录制文件上限（K5）：**有界**是硬要求 —— 不设上限的录制迟早把磁盘写满，
+#: 而串口是设备喋喋不休的心跳。到顶就停录并标 ``truncated``，不静默继续。
+CAP_MAX_BYTES = 5 << 20
+
+
+def _now() -> tuple[float, int, str]:
+    """(unix 秒, 微秒时间戳, HH:MM:SS.mmm)。"""
+    t = time.time()
+    dt = datetime.fromtimestamp(t)
+    return t, int(t * 1_000_000), dt.strftime("%H:%M:%S.%f")[:-3]
 
 
 class _Session:
-    """一次监视会话：一个口、一个读线程、一个环形缓冲。"""
+    """一次监视会话：一个口、一个读线程、行环 + 字节环。"""
 
-    def __init__(self, project: str, port: str, baud: int, io: "sp.SerialIO"):
+    def __init__(self, project: str, port: str, baud: int, io: "sp.SerialIO",
+                 *, epoch: int = 1, opened_by: str = "human",
+                 lease_s: float = 0.0, allow_agent_write: bool = False):
         self.project = project
         self.port = port
         self.baud = baud
         self.io = io
         self.backend = ""
+        self.epoch = epoch
+        self.opened_by = opened_by
+        self.allow_agent_write = allow_agent_write
+
+        # ── 行投影 ──
         self.lines: deque[dict] = deque(maxlen=MAX_LINES)
-        self.seq = 0                    # 会话内单调，浏览器用它做增量游标
-        self.covered = 0                # 环形缓冲挤掉的总行数（gap 的证据）
+        self.seq = 0                    # 行序号（旧接口的游标）
+        self.covered = 0                # 行环挤掉的总行数（gap 的证据）
+
+        # ── 字节真值 ──
+        self.chunks: deque[dict] = deque()
+        self.chunk_seq = 0
+        self.covered_chunks = 0
+        self.bytes_total = 0
+        self.dlock = threading.Lock()   # 行/批次/计数器/录制的互斥
+        # 显式录制（K5）：None = 从未录过；active=False 表示已停/已到顶。
+        self.cap: dict | None = None
+
         self.stop = threading.Event()
         self.error: str | None = None
         self.alive = True
+        self.paused = False
+        self.lease_s = max(0.0, float(lease_s or 0))
+        self.lease_deadline = (time.time() + self.lease_s) if self.lease_s else 0.0
         self.thread = threading.Thread(target=self._reader, name="serialmon",
                                        daemon=True)
         self.wlock = threading.Lock()   # write() 与读线程收尾（close io）互斥
@@ -75,53 +128,192 @@ class _Session:
         self.backend = self.io.backend
         self.thread.start()
 
+    def _lease_due(self) -> bool:
+        return bool(self.lease_s) and time.time() > self.lease_deadline
+
     def _reader(self) -> None:
         buf = b""
         last_data = time.time()
         try:
             # ★ io 已在 start() 里 open 过 —— 绝不再走 `with`（__enter__ 会二次
             #   open 同一个口，撞上自己持有的独占句柄 → ACCESS_DENIED，
-            #   真机首测即抓出）。收口统一在 shutdown()。
+            #   真机首测即抓出）。收口统一在 finally / shutdown()。
             s = self.io
             while not self.stop.is_set():
+                if self._lease_due():
+                    # Agent 忘了关 → 租约到期自愈，不把口一直占死（N5）。
+                    self.error = "lease_expired"
+                    break
                 chunk = s.read(4096)
                 if not chunk:
                     # 静默期：残留半行放久了也要可见（提示符型设备）
-                    if buf and time.time() - last_data > PARTIAL_FLUSH_S:
-                        self._push(buf.decode("utf-8", errors="replace").rstrip("\r"))
+                    if buf and not self.paused and \
+                            time.time() - last_data > PARTIAL_FLUSH_S:
+                        self._push_line(buf.decode("utf-8", errors="replace").rstrip("\r"))
                         buf = b""
                     time.sleep(0.02)
                     continue
                 last_data = time.time()
+                # 原文先入字节环（暂停也不丢"已经读过"的字节 —— 暂停只表示
+                # 不再展示/入环；这里等待，故先判断）。
+                if not self.paused:
+                    self._push_chunk(chunk, "rx")
                 buf += chunk
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
-                    self._push(raw.decode("utf-8", errors="replace").rstrip("\r"))
+                    if not self.paused:
+                        self._push_line(raw.decode("utf-8", errors="replace").rstrip("\r"))
         except Exception as exc:                     # noqa: BLE001
             # 拔线 / 口被抢 / 驱动报错 —— 记下、收摊。绝不带着死口挂着。
             self.error = f"{type(exc).__name__}: {exc}"
         finally:
             self.alive = False
+            with self.wlock:
+                try:
+                    self.io.close()      # 二次关闭无害（SerialIO.close 幂等）
+                except Exception:        # noqa: BLE001
+                    pass
 
-    def _push(self, text: str) -> None:
-        if len(self.lines) == self.lines.maxlen:
-            self.covered += 1        # deque 自动挤掉最旧的 —— 这里留个证据
-        self.seq += 1
-        self.lines.append({"seq": self.seq, "text": text,
-                           "t": datetime.now().strftime("%H:%M:%S")})
+    def _push_line(self, text: str) -> None:
+        with self.dlock:
+            if len(self.lines) == self.lines.maxlen:
+                self.covered += 1    # deque 自动挤掉最旧的 —— 这里留个证据
+            self.seq += 1
+            t, t_us, hms = _now()
+            self.lines.append({"seq": self.seq, "text": text,
+                               "t": hms[:8], "t_us": t_us})
+
+    def _push_chunk(self, data: bytes, direction: str) -> None:
+        if not data:
+            return
+        t, t_us, hms = _now()
+        with self.dlock:
+            self.chunk_seq += 1
+            rec = {"seq": self.chunk_seq, "dir": direction, "t_us": t_us,
+                   "t": hms, "data": bytes(data)}
+            self.chunks.append(rec)
+            self.bytes_total += len(rec["data"])
+            # 双上限：批次太多或字节总量超限时挤掉最旧的（只报告，不抹平）。
+            while self.chunks and (len(self.chunks) > MAX_CHUNKS
+                                  or self.bytes_total > MAX_BYTES):
+                old = self.chunks.popleft()
+                self.bytes_total -= len(old["data"])
+                self.covered_chunks += 1
+            # 录制在**入环之后**：环会挤出旧批次，录像不会（它的语义是"证据"）。
+            self._cap_emit(rec["seq"], t_us, direction, rec["data"])
+
+    # ── 录制（K5）──────────────────────────────────────────────
+    def _cap_emit(self, seq: int, t_us: int, direction: str,
+                  data: bytes) -> None:
+        """把一条批次写进录制文件。**调用方已持 dlock。**
+
+        只存字节（``bytes_b64``），不存文本投影 —— 行是投影，可随时重建；
+        录进去反而是把一份已经丢失信息的东西当证据。
+        """
+        cap = self.cap
+        if not cap or not cap["active"]:
+            return
+        line = json.dumps({"seq": seq, "t_us": t_us, "dir": direction,
+                           "bytes_b64": base64.b64encode(data).decode("ascii")},
+                          ensure_ascii=False) + "\n"
+        if cap["bytes"] + len(line.encode("utf-8")) > cap["max_bytes"]:
+            # 到顶：停录 + 记 truncated。**不截半条**（半条 JSON 不可回放）。
+            cap["truncated"] = True
+            self._cap_close(cap)
+            return
+        try:
+            cap["fh"].write(line)
+        except Exception:                    # noqa: BLE001
+            # 磁盘写失败（被拔 U 盘、权限）→ 停录并记录原因，绝不拖死读线程
+            cap["error"] = "录制写盘失败"
+            self._cap_close(cap)
+            return
+        cap["bytes"] += len(line.encode("utf-8"))
+        cap["chunks"] += 1
+
+    def _cap_close(self, cap: dict) -> None:
+        """收口（幂等）。调用方已持 dlock。"""
+        cap["active"] = False
+        fh = cap.pop("fh", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:                # noqa: BLE001
+                pass
+
+    def start_capture(self, out_dir: Path, *, max_bytes: int = CAP_MAX_BYTES) -> dict:
+        """开始录制到 ``out_dir``。已在录则拒绝（不静默换文件）。"""
+        with self.dlock:
+            if self.cap and self.cap["active"]:
+                return {"ok": False, "error": "录制已在进行",
+                        "path": self.cap["path"], "bytes": self.cap["bytes"]}
+            if not self.alive:
+                return {"ok": False, "error": "监视已结束（读线程已收摊）"}
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = out_dir / f"serial-capture-e{self.epoch}-{ts}.jsonl"
+            try:
+                fh = path.open("a", encoding="utf-8", buffering=1)
+            except OSError as exc:
+                return {"ok": False, "error": f"无法创建录制文件：{exc}",
+                        "path": str(path)}
+            self.cap = {"active": True, "path": str(path), "fh": fh,
+                        "bytes": 0, "chunks": 0, "max_bytes": int(max_bytes),
+                        "truncated": False, "error": None, "epoch": self.epoch}
+            return {"ok": True, "path": str(path), "epoch": self.epoch,
+                    "max_bytes": int(max_bytes)}
+
+    def stop_capture(self) -> dict:
+        """停止录制并返回统计。没在录也返回 ok（幂等）。"""
+        with self.dlock:
+            cap = self.cap
+            if not cap:
+                return {"ok": True, "note": "没有进行中的录制"}
+            self._cap_close(cap)
+            return {"ok": True, "path": cap["path"], "bytes": cap["bytes"],
+                    "chunks": cap["chunks"], "truncated": cap["truncated"],
+                    "error": cap["error"]}
 
     # ── 对外操作 ────────────────────────────────────────────────
     def write(self, data: bytes) -> int:
         with self.wlock:
             if not self.alive:
                 return 0
-            return self.io.write(data)
+            n = self.io.write(data)
+        if n:
+            # TX 进入数据面：写成功的字节与 RX 同构入环（P1 的关键一条）。
+            self._push_chunk(bytes(data)[:n], "tx")
+        return n
+
+    def clear(self) -> dict:
+        """清空行/批次环，但**保持 seq/epoch 单调**（被清内容计入 covered）。"""
+        with self.dlock:
+            nl, nc = len(self.lines), len(self.chunks)
+            self.covered += nl
+            self.covered_chunks += nc
+            self.lines.clear()
+            self.chunks.clear()
+            self.bytes_total = 0
+        return {"cleared_lines": nl, "cleared_chunks": nc}
+
+    def pause(self) -> None:
+        self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
+
+    def touch_lease(self) -> None:
+        if self.lease_s:
+            self.lease_deadline = time.time() + self.lease_s
 
     def shutdown(self) -> None:
         self.stop.set()
         self.thread.join(timeout=3)
+        with self.dlock:
+            if self.cap and self.cap["active"]:
+                self._cap_close(self.cap)   # 会话收摊 = 录制收摊（不留半截文件句柄）
         with self.wlock:
-            self.io.close()          # 读线程的 with 兜底已关；这里关第二次无害
+            self.io.close()          # 读线程的 finally 已关；这里关第二次无害
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -129,24 +321,41 @@ class _Session:
 # ══════════════════════════════════════════════════════════════════
 _LOCK = threading.Lock()
 _SESS: _Session | None = None
+_EPOCH = 0                          # 连接纪元：每次成功 open 自增
 
 
 def _snapshot(s: _Session | None) -> dict:
     if s is None:
         return {"active": False}
-    return {"active": s.alive, "project": s.project, "port": s.port,
-            "baud": s.baud, "backend": s.backend, "seq": s.seq,
-            "covered": s.covered, "error": s.error}
+    with s.dlock:
+        now = time.time()
+        return {"active": s.alive, "project": s.project, "port": s.port,
+                "baud": s.baud, "backend": s.backend, "seq": s.seq,
+                "covered": s.covered, "error": s.error, "epoch": s.epoch,
+                "chunk_seq": s.chunk_seq, "covered_chunks": s.covered_chunks,
+                "bytes_total": s.bytes_total, "paused": s.paused,
+                "opened_by": s.opened_by,
+                "allow_agent_write": s.allow_agent_write,
+                "lease_s": s.lease_s,
+                "lease_remaining_s": (max(0.0, round(s.lease_deadline - now, 1))
+                                      if s.lease_s else 0.0),
+                "capture": (None if s.cap is None else {
+                    "active": s.cap["active"], "path": s.cap["path"],
+                    "bytes": s.cap["bytes"], "chunks": s.cap["chunks"],
+                    "truncated": s.cap["truncated"],
+                    "error": s.cap["error"], "max_bytes": s.cap["max_bytes"]})}
 
 
 def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
+                 opened_by: str = "human", lease_s: float = 0.0,
+                 allow_agent_write: bool = False,
                  log=print) -> dict:
     """打开（或拒绝重复打开）监视会话。返回值可直接 JSON 化。
 
     端口/波特率解析与 ``serialterm.resolve_target`` **同一份实现** ——
     "预览说 COM10、监视却开了别的口"这种分叉，一个都不许有。
     """
-    global _SESS
+    global _SESS, _EPOCH
     with _LOCK:
         cur = _SESS
         if cur is not None and cur.alive:
@@ -162,7 +371,10 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
             return {"ok": False, "error": t["reason"],
                     "port": "", "baud": t["baud"]}
         io = sp.SerialIO(t["port"], t["baud"], for_write=True)
-        sess = _Session(project, t["port"], t["baud"], io)
+        _EPOCH += 1
+        sess = _Session(project, t["port"], t["baud"], io, epoch=_EPOCH,
+                        opened_by=opened_by, lease_s=lease_s,
+                        allow_agent_write=allow_agent_write)
         try:
             sess.start()
         except OSError as exc:
@@ -170,7 +382,8 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
                     "port": t["port"], "baud": t["baud"]}
         _SESS = sess
     log(f"[serialmon] ▶ {sess.port}@{sess.baud}（project={project or '-'}，"
-        f"backend={sess.backend}）")
+        f"backend={sess.backend}，epoch={sess.epoch}，by={opened_by}"
+        + (f"，lease={sess.lease_s}s" if sess.lease_s else "") + "）")
     return {"ok": True, **_snapshot(sess)}
 
 
@@ -183,9 +396,11 @@ def close_session(*, log=print) -> dict:
     if s is None:
         return {"ok": True, "note": "没有进行中的监视"}
     s.shutdown()
-    log(f"[serialmon] ■ 关闭 {s.port}@{s.baud}（收 {s.seq} 行"
+    log(f"[serialmon] ■ 关闭 {s.port}@{s.baud}（收 {s.seq} 行 / {s.chunk_seq} 批"
         + (f"，error={s.error}" if s.error else "") + "）")
-    return {"ok": True, "closed": {"port": s.port, "baud": s.baud, "lines": s.seq}}
+    return {"ok": True, "closed": {"port": s.port, "baud": s.baud,
+                                   "lines": s.seq, "chunks": s.chunk_seq,
+                                   "epoch": s.epoch, "error": s.error}}
 
 
 def tail(after: int) -> dict:
@@ -198,14 +413,86 @@ def tail(after: int) -> dict:
     s = _SESS
     if s is None:
         return {"active": False, "lines": [], "seq": 0, "gap": 0}
-    lines = [x for x in s.lines if x["seq"] > after]
-    gap = max(0, lines[0]["seq"] - after - 1) if lines else 0
+    s.touch_lease()
+    with s.dlock:
+        lines = [dict(x) for x in s.lines if x["seq"] > after]
+        gap = max(0, lines[0]["seq"] - after - 1) if lines else 0
     return {**_snapshot(s), "lines": lines, "gap": gap}
+
+
+def tail_bytes(after: int, *, direction: str = "all", limit: int = 0) -> dict:
+    """增量读回原始字节批次（``seq > after``）。
+
+    ``direction`` ∈ all / rx / tx。``gap`` 只对 all 有意义（过滤后的序号不连续
+    会让 gap 变成噪声，故过滤时明确置 0 并在 ``filtered`` 里说明）。
+    """
+    s = _SESS
+    if s is None:
+        return {"active": False, "epoch": 0, "chunk_seq": 0, "chunks": [],
+                "gap": 0, "covered": 0}
+    s.touch_lease()
+    direction = direction if direction in ("all", "rx", "tx") else "all"
+    limit = max(0, min(int(limit or 0), MAX_CHUNKS)) if limit else 0
+    with s.dlock:
+        raw = [c for c in s.chunks if c["seq"] > after]
+        if direction != "all":
+            raw = [c for c in raw if c["dir"] == direction]
+        gap = 0
+        if direction == "all" and raw:
+            gap = max(0, raw[0]["seq"] - after - 1)
+        if limit and len(raw) > limit:
+            raw = raw[-limit:]
+        chunks = [{"seq": c["seq"], "dir": c["dir"], "t": c["t"],
+                   "t_us": c["t_us"], "len": len(c["data"]),
+                   "data_b64": base64.b64encode(c["data"]).decode("ascii")}
+                  for c in raw]
+    return {**_snapshot(s), "chunks": chunks, "gap": gap,
+            "filtered": direction != "all",
+            "covered": s.covered_chunks}
 
 
 def status() -> dict:
     """给 capabilities / 初始渲染用的轻量快照。"""
     return _snapshot(_SESS)
+
+
+def clear() -> dict:
+    s = _SESS
+    if s is None:
+        return {"ok": False, "error": "没有进行中的监视"}
+    return {"ok": True, **s.clear()}
+
+
+def set_paused(paused: bool) -> dict:
+    s = _SESS
+    if s is None:
+        return {"ok": False, "error": "没有进行中的监视"}
+    if paused:
+        s.pause()
+    else:
+        s.resume()
+    return {"ok": True, "paused": s.paused}
+
+
+def capture_start(cfg: Config, *, project: str = "",
+                  max_bytes: int = 0) -> dict:
+    """开始显式录制（K5）。文件落在 ``.work/.cockpit/``，**有界**、只存字节。
+
+    与 console 留档的区别（C28）：capture 是"证据"（完整、有界、可回放），
+    console 是"我敲过什么"（会滚动）。
+    """
+    s = _SESS
+    if s is None:
+        return {"ok": False, "error": "没有进行中的监视（先 open 再录制）"}
+    cap_dir: Path = Path(cfg.root) / ".work" / ".cockpit"
+    return s.start_capture(cap_dir, max_bytes=max_bytes or CAP_MAX_BYTES)
+
+
+def capture_stop() -> dict:
+    s = _SESS
+    if s is None:
+        return {"ok": False, "error": "没有进行中的监视"}
+    return s.stop_capture()
 
 
 def write_through(data: bytes) -> int | None:

@@ -58,6 +58,14 @@ jobs:
           cp ci/host.ci.yaml elab.host.yaml
           chmod +x ./elab
 
+      # ★ 骨架不含芯片：门禁工程依赖官方适配包，按需安装（CI 与本地同一协议）。
+      #   index --check 同时守住"包内容改了但 market/index.json 忘了重生成"。
+      - name: 安装芯片适配包（官方源 bootstrap）
+        shell: bash
+        run: |
+          ./elab pkg index --check
+          ./elab pkg bootstrap --no-skill
+
       - name: 环境体检（诊断用，失败不阻断）
         shell: bash
         run: ./elab doctor || true
@@ -183,6 +191,7 @@ jobs:
         run: |
           set +e
           chmod +x ./elab
+          ./elab pkg bootstrap --no-skill
           ./elab ci --onhw --job onhw-gate --json > ci-onhw.json 2> ci-onhw.err
           rc=$?
           cat ci-onhw.json ci-onhw.err

@@ -188,6 +188,34 @@ test('P5 串口互斥预判：onhw 步骤撞监视会话 → 409 serial-busy；�
   assert.equal(after.statusCode, 502)
 })
 
+test('P1 串口字节/解码端点白名单 + 互斥只认 open/close', async () => {
+  const mutex = { active: false, setOpen(v) { this.active = v }, isActive() { return this.active } }
+  const ctx = makeCtx()
+  registerApiRoute(ctx, deps({ serialMutex: mutex }))
+  // 新端点放行（上游不可达 → 502 说明进了转发逻辑）
+  assert.equal((await call(ctx.routes[0], 'GET', '/elab/api/serial/monitor/bytes?after=0')).statusCode, 502)
+  assert.equal((await call(ctx.routes[0], 'POST', '/elab/api/serial/decode', '{"decoder":"justfloat"}')).statusCode, 502)
+
+  // 上游成功才记账：open 占用，clear/pause/resume **不得**释放，close 释放。
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    text: async () => '{"ok":true}',
+  })
+  try {
+    for (const action of ['open', 'clear', 'pause', 'resume']) {
+      await call(ctx.routes[0], 'POST', '/elab/api/serial/monitor', JSON.stringify({ action }))
+    }
+    assert.equal(mutex.isActive(), true, 'clear/pause/resume 不能把互斥标记清掉')
+    await call(ctx.routes[0], 'POST', '/elab/api/serial/monitor', JSON.stringify({ action: 'close' }))
+    assert.equal(mutex.isActive(), false, 'close 应释放')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test('P4 设置页：GET/POST /elab/config 热更新 + 持久化 + 白名单校验', async () => {
   const persistPath = join(tmpdir(), `elab-cfg-${Date.now()}.json`)
   const ctx = makeCtx()

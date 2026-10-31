@@ -54,6 +54,7 @@ class Config:
         self._host = None
         self._chips = None
         self._projects = None
+        self._packs = None
 
     # ── L0 主机层 ────────────────────────────────────────────────
     @property
@@ -69,23 +70,73 @@ class Config:
             self._host["_path"] = to_fwd(self.host_path)
         return self._host
 
-    # ── L1 芯片层 ────────────────────────────────────────────────
+    # ── L1 芯片层：只来自已安装的适配包 ────────────────────────────
+    @property
+    def pack_roots(self) -> list[Path]:
+        """适配包搜索根（见 ``elab.pkg.pack_roots``）。"""
+        from . import pkg
+        return pkg.pack_roots(self)
+
+    @property
+    def packs(self) -> dict[str, dict]:
+        """已发现的适配包 ``{name: record}``（不校验、不安装）。"""
+        if self._packs is None:
+            from . import pkg
+            self._packs = pkg.discover(self)
+        return self._packs
+
     @property
     def chips(self) -> dict:
-        """返回 ``{ref: chip}``，ref 同时支持 ``vendor/id`` 与裸 ``id``。"""
+        """返回 ``{ref: chip}``，ref 同时支持 ``vendor/id`` 与裸 ``id``。
+
+        ★ 骨架仓**不再直读根目录 ``chips/``**：芯片数据只来自
+          ``packs/installed/<vendor>/<platform>/chips/*.yaml``。
+          没有安装任何包时返回空字典 —— 这就是"通用工具链"的形态。
+        """
         if self._chips is None:
             out: dict[str, dict] = {}
-            chips_dir = self.root / "chips"
-            for path in sorted(chips_dir.rglob("*.yaml")):
-                chip = _yaml.load_file(path) or {}
-                if "id" not in chip:
-                    raise ElabError(f"芯片文件缺少 id：{path}")
-                chip["_path"] = to_fwd(path)
-                ref = f"{chip.get('vendor')}/{chip['id']}"
-                out[ref] = chip
-                out.setdefault(chip["id"], chip)
+            by_ref: dict[str, str] = {}
+            by_id: dict[str, str] = {}
+            for rec in self.packs.values():
+                chips_dir = Path(rec["dir"]) / "chips"
+                if not chips_dir.is_dir():
+                    continue
+                for path in sorted(chips_dir.rglob("*.yaml")):
+                    chip = _yaml.load_file(path) or {}
+                    if "id" not in chip:
+                        raise ElabError(f"芯片文件缺少 id：{path}")
+                    path_s = to_fwd(path)
+                    ref = f"{chip.get('vendor')}/{chip['id']}"
+                    if ref in by_ref and by_ref[ref] != path_s:
+                        raise ElabError(
+                            f"芯片 {ref} 在多个适配包中重复：{by_ref[ref]} 与 {path_s}")
+                    if chip["id"] in by_id and by_id[chip["id"]] != path_s:
+                        raise ElabError(
+                            f"芯片 id {chip['id']} 在多个适配包中重复："
+                            f"{by_id[chip['id']]} 与 {path_s}")
+                    by_ref[ref] = path_s
+                    by_id[chip["id"]] = path_s
+                    chip["_path"] = path_s
+                    chip["_pack"] = rec["name"]
+                    out[ref] = chip
+                    out.setdefault(chip["id"], chip)
             self._chips = out
         return self._chips
+
+    @property
+    def vendor_fingerprints(self) -> list[dict]:
+        """已安装包声明的厂商指纹（adapt 探测器的**唯一事实源**）。"""
+        out: list[dict] = []
+        for rec in self.packs.values():
+            man = rec.get("manifest") or {}
+            for fp in man.get("vendor_fingerprints") or []:
+                if not isinstance(fp, dict):
+                    continue
+                item = dict(fp)
+                item["vendor"] = man.get("vendor") or ""
+                item["pack"] = rec.get("name") or ""
+                out.append(item)
+        return out
 
     # ── L4 项目层 ────────────────────────────────────────────────
     @property
@@ -162,7 +213,13 @@ class Config:
     def chip_of(self, proj: dict) -> dict:
         ref = proj.get("chip")
         if ref not in self.chips:
-            raise ElabError(f"项目 {proj.get('name')} 引用了未知芯片：{ref}")
+            if not self.packs:
+                hint = ("—— 尚未安装任何芯片适配包；先 "
+                        "`elab pkg search` 然后 `elab pkg install <vendor>/<platform>`")
+            else:
+                known = ", ".join(sorted(k for k in self.chips if "/" in k)) or "(无)"
+                hint = f"（已安装包中的芯片：{known}）"
+            raise ElabError(f"项目 {proj.get('name')} 引用了未知芯片：{ref}{hint}")
         return self.chips[ref]
 
 

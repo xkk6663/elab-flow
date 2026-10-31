@@ -75,32 +75,58 @@ def resolve_target(cfg: Config, name: str, *, port: str = "",
             "backend": backend, "ports": ports}
 
 
-def build_payload(data: str, *, newline: bool = True, hex_: bool = False
-                  ) -> tuple[bytes, str]:
+#: 发送表示（P1 起）：旧参数 ``hex_``/``newline`` 是这里的别名。
+SEND_FORMATS = ("ascii", "utf8", "gbk", "hex")
+#: 行尾枚举（``eol`` 的新参数；旧 ``newline=True`` 等价于 ``crlf``）。
+EOLS = {"none": b"", "lf": b"\n", "cr": b"\r", "crlf": b"\r\n", "tab": b"\t"}
+
+
+def build_payload(data: str, *, newline: bool = True, hex_: bool = False,
+                  format: str | None = None, eol: str | None = None,
+                  encoding: str | None = None) -> tuple[bytes, str]:
     """把用户输入编成待发字节。返回 ``(payload, error)``；``error`` 非空即失败。
 
     ``hex_`` 模式下按十六进制解析（``"01 A0 FF"`` 与 ``"01A0FF"`` 都收），
     此时**不加**行结束符 —— 发的是二进制帧，多一个 CR 就是多一个字节。
+
+    P1 扩展（全部向后兼容）：
+      - ``format`` ∈ ascii / utf8 / gbk / hex（缺省由 ``hex_`` 推出来）；
+      - ``eol`` ∈ none / lf / cr / crlf / tab（缺省由 ``newline`` 推出来）；
+      - ``encoding`` 显式指定文本编码（缺省由 format 推）。
 
     ★ 空输入**先于**加行结束符判定：否则 ``""`` 会变成 ``b"\\r\\n"`` 被当成有效
       载荷发出去（一个"空回车"照样能打断固件的行解析器）。
     """
     if not (data or "").strip():
         return b"", "内容为空 —— 没有可发送的字节"
-    if hex_:
+    fmt = (format or ("hex" if hex_ else "utf8")).lower()
+    if fmt not in SEND_FORMATS:
+        return b"", f"未知发送格式：{format!r}（可选 {'/'.join(SEND_FORMATS)}）"
+    if fmt == "hex":
         try:
             return bytes.fromhex("".join((data or "").split())), ""
         except ValueError as exc:
             return b"", f"不是合法十六进制（{exc}）：{data!r}"
-    payload = (data or "").encode("utf-8")
-    if newline:
-        payload += DEFAULT_EOL.encode("utf-8")
+    eol_key = eol
+    if eol_key is None:
+        eol_key = "crlf" if newline else "none"
+    eol_key = str(eol_key).lower()
+    if eol_key not in EOLS:
+        return b"", f"未知行尾：{eol!r}（可选 {'/'.join(EOLS)}）"
+    enc = encoding or ("gbk" if fmt == "gbk" else ("ascii" if fmt == "ascii" else "utf-8"))
+    try:
+        payload = (data or "").encode(enc)
+    except (LookupError, UnicodeEncodeError) as exc:
+        return b"", f"编码失败（encoding={enc}）：{exc}"
+    payload += EOLS[eol_key]
     return payload, ""
 
 
 def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
                read_ms: int = DEFAULT_READ_MS, newline: bool = True,
-               hex_: bool = False, log=print) -> dict:
+               hex_: bool = False, format: str | None = None,
+               eol: str | None = None, encoding: str | None = None,
+               log=print) -> dict:
     """写一条出去、读一小段回显、关掉。返回值可直接 JSON 化。
 
     无论成功失败都返回**同一个形状**（``ok`` 区分），因为前端要渲染的字段一样 ——
@@ -111,15 +137,19 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
     except (TypeError, ValueError):
         read_ms = DEFAULT_READ_MS
 
+    fmt = (format or ("hex" if hex_ else "utf8")).lower()
+    eol_key = "none" if fmt == "hex" else (eol or ("crlf" if newline else "none"))
     res: dict = {
         "ok": False, "port": "", "baud": 0, "backend": "", "layer": "",
         "written": 0, "payload_bytes": 0, "echoed": [], "bytes_read": 0,
         "read_ms": read_ms, "elapsed_s": 0.0,
-        "eol": DEFAULT_EOL if (newline and not hex_) else "",
+        "eol": EOLS.get(str(eol_key).lower(), b"").decode("ascii"),
+        "format": fmt,
         "error": None,
     }
 
-    payload, perr = build_payload(data, newline=newline, hex_=hex_)
+    payload, perr = build_payload(data, newline=newline, hex_=hex_,
+                                  format=format, eol=eol, encoding=encoding)
     if perr:
         res["error"] = perr
         return res
@@ -193,7 +223,9 @@ def _drain(s: "sp.SerialIO", read_ms: int) -> tuple[list[str], int, bytes]:
 
 def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
               read_ms: int = DEFAULT_READ_MS, newline: bool = True,
-              hex_: bool = False, journal=None, log=print) -> dict:
+              hex_: bool = False, format: str | None = None,
+              eol: str | None = None, encoding: str | None = None,
+              journal=None, log=print) -> dict:
     """`_roundtrip` + **可选落盘**（M3-b2）。
 
     ``journal(rec)`` 是调用方给的落盘回调 —— 本模块**不认识文件**，落到哪由调用方决定
@@ -201,8 +233,10 @@ def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 
     "日志没写成"不该让"命令已经发出去了"变成失败。
     """
     res = _roundtrip(cfg, name, data=data, port=port, baud=baud, read_ms=read_ms,
-                     newline=newline, hex_=hex_, log=log)
-    _journal(journal, res, data=data, hex_=hex_, newline=newline, log=log)
+                     newline=newline, hex_=hex_, format=format, eol=eol,
+                     encoding=encoding, log=log)
+    _journal(journal, res, data=data, hex_=hex_ or (format or "").lower() == "hex",
+             newline=newline, log=log)
     return res
 
 
