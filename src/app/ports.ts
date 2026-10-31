@@ -85,6 +85,8 @@ export interface IcdPort {
   host(sessionId?: string): Promise<HostInfo>
   capabilities(sessionId?: string): Promise<Record<string, unknown>>
   projects(sessionId?: string): Promise<{ projects?: unknown[]; cards?: unknown[] }>
+  /** run 列表 + 活动 run（agent 在别处起跑时，面板靠它自动跟随工程）。 */
+  runs(sessionId?: string): Promise<{ runs: unknown[]; active: unknown[] }>
   discover(sessionId?: string, refresh?: boolean): Promise<DiscoverResponse>
   adapt(opts: {
     action: 'probe' | 'write'

@@ -116,6 +116,10 @@ export function createCockpitService(deps: {
   let connection: RunEventConnection | null = null
   let visible = true
   let disposed = false
+  // agent 自动跟随：只处理**新出现**的 agent run（记 id），不做持续抢占 ——
+  // 否则人手动切到别的工程看历史时，每 2s 会被拽回去。
+  const followedRuns = new Set<string>()
+  let pollTimer: ReturnType<typeof setInterval> | null = null
 
   function set(p: Partial<CockpitSnapshot>): void {
     snap = { ...snap, ...p }
@@ -200,6 +204,72 @@ export function createCockpitService(deps: {
     // 收尾事件缺失（子进程被硬杀等）→ 显式判失败，不留假装在跑的界面
     const next = markStreamClosed(snap.run, reason)
     set({ run: next, busy: false })
+  }
+
+  // ── agent 自动跟随（面板必须展示 agent 正在跑的那个工程）────────────
+
+  /**
+   * 接管一条**别的入口**（agent 工具）发起的 run：切工程 → 置 running → 挂 SSE。
+   *
+   * ★ 为什么不是"只切工程、等用户点重放"：agent 的进度要**实时**出现在面板上，
+   *   这正是"agent 执行的进展流程与驾驶舱画面同步"的要求。SSE 会从 seq 0 重放，
+   *   所以即便接管时已经跑了一半，前面的步骤/日志也不会缺。
+   */
+  function adoptExternalRun(runId: string, project: string): boolean {
+    if (runId === '' || snap.run.run === runId) return false
+    if (project !== '' && project !== snap.project) {
+      // 只认已加载的工程（未知工程不切，免得界面挂到不存在的卡片上）
+      if (!cards.some((c) => String(c.name ?? '') === project)) return false
+      selectProject(project)
+    }
+    progressRef = makeProgress()
+    set({
+      run: {
+        ...IDLE,
+        run: runId,
+        project,
+        status: 'running',
+        actor: 'agent',
+        startedAt: Date.now() / 1000,
+      },
+      busy: false,
+      error: null,
+      progress: null,
+    })
+    openConnection()
+    return true
+  }
+
+  async function followAgentRuns(): Promise<void> {
+    if (disposed || typeof api.runs !== 'function') return
+    try {
+      const r = await api.runs(sessionId)
+      const active = (r.active ?? []) as Array<Record<string, unknown>>
+      for (const a of active) {
+        const runId = String(a.run ?? '')
+        const project = String(a.project ?? '')
+        if (runId === '' || a.alive === false) continue
+        if (String(a.actor ?? '') !== 'agent') continue
+        if (followedRuns.has(runId)) continue
+        // 工程还没加载完 → 不记 id，下一拍照样会重试
+        if (adoptExternalRun(runId, project)) followedRuns.add(runId)
+      }
+    } catch {
+      /* 轮询失败静默：不能因为看不到列表就打断本地操作 */
+    }
+  }
+
+  function startFollowPoll(): void {
+    if (pollTimer !== null) return
+    pollTimer = setInterval(() => {
+      void followAgentRuns()
+    }, 2000)
+  }
+
+  function stopFollowPoll(): void {
+    if (pollTimer === null) return
+    clearInterval(pollTimer)
+    pollTimer = null
   }
 
   // ── 动作 ────────────────────────────────────────────────────────
@@ -303,6 +373,9 @@ export function createCockpitService(deps: {
     setVisible(v) {
       visible = v
       connection?.setVisible(v)
+      // 跟随轮询只在面板可见时开：隐藏时不打 HTTP，也避免没人看的界面被切换
+      if (v) startFollowPoll()
+      else stopFollowPoll()
     },
 
     onRawEvent(l) {
@@ -378,6 +451,7 @@ export function createCockpitService(deps: {
 
     dispose() {
       disposed = true
+      stopFollowPoll()
       closeConnection()
       listeners.clear()
       rawListeners.clear()

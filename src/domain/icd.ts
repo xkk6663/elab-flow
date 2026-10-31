@@ -408,6 +408,16 @@ export interface SerialMonitorSnapshot {
   lease_s?: number;
   /** 租约剩余秒（无租约 = 0） */
   lease_remaining_s?: number;
+  /** 录制会话（P3）：null = 没在录；path 是服务端证据文件 */
+  capture?: {
+    active: boolean;
+    path: string;
+    bytes: number;
+    chunks: number;
+    truncated: boolean;
+    error: string | null;
+    max_bytes: number;
+  } | null;
 }
 
 export interface SerialMonitorLine {

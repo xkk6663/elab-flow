@@ -61,6 +61,15 @@ const EOLS = [
   { id: 'crlf', label: 'CRLF' },
 ]
 
+/** 常用波特率（非标值会插进来，否则 select 显示不出当前值）。 */
+const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
+
+function baudOptions(current: number): number[] {
+  return COMMON_BAUDS.includes(current)
+    ? COMMON_BAUDS
+    : [...COMMON_BAUDS, current].sort((a, b) => a - b)
+}
+
 /** 本地渲染上限：字节视图最多画这么多批（更早的仍在缓冲里，并非丢失）。 */
 const MAX_BYTE_BLOCKS = 200
 /** 波形最大回看字节（超出只取最近一段）。 */
@@ -69,6 +78,12 @@ const MAX_WAVE_BYTES = 64 * 1024
 export interface SerialDecoder {
   id: string
   label: string
+  desc?: string
+}
+
+export interface SerialPortInfo {
+  name: string
+  kind?: string
   desc?: string
 }
 
@@ -82,6 +97,11 @@ export interface SerialPaneProps {
   running: boolean
   port: string
   baud: number
+  /** capabilities 枚举到的端口（供界面选择；auto = 让内核按 USB 优先解析）。 */
+  ports: SerialPortInfo[]
+  /** 端口/波特率偏好的持久化由上层做（面板只负责发意图）。 */
+  onPort?: (port: string) => void
+  onBaud?: (baud: number) => void
   writable: boolean
   /** 闭环 run 落在 serial 通道的事件行（保持闭环证据可见）。 */
   runLines: TailLine[]
@@ -221,7 +241,7 @@ function termText(line: TermLine): string {
 }
 
 export function SerialPane(props: SerialPaneProps): ReactNode {
-  const { api, stream, decoders, project, running, port, baud, writable } = props
+  const { api, stream, decoders, project, running, port, baud, ports, writable } = props
   const [view, setView] = useState<ViewId>('lines')
   const [dir, setDir] = useState<Dir>('all')
   const [repr, setRepr] = useState<SerialRepr>('hex')
@@ -245,6 +265,16 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   } | null>(null)
 
   const epoch = stream.snap?.epoch ?? 0
+
+  /** 端口选项：auto + 枚举结果；当前值不在列表里（手工配置/刚拔插）也插进来。 */
+  const portOptions = useMemo(() => {
+    const list = ports.map((p) => ({ name: p.name, label: p.kind === 'bluetooth' ? `${p.name}（蓝牙）` : p.name }))
+    if (port !== '' && port !== 'auto' && !list.some((p) => p.name === port)) {
+      list.unshift({ name: port, label: `${port}（当前）` })
+    }
+    return list
+  }, [ports, port])
+  const portLocked = stream.active
 
   const filtered = useMemo(
     () => (dir === 'all' ? stream.chunks : stream.chunks.filter((c) => c.dir === dir)),
@@ -430,6 +460,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const bytesTotal = stream.snap?.bytes_total ?? 0
   const chunkCount = stream.chunks.length
   const lossy = stream.gapLines + stream.gapChunks
+  // 会话归属 + agent 租约倒计时：快照每 500ms 刷新，直接显示服务端剩余秒数即可
+  const openedBy = stream.snap?.opened_by
+  const leaseLeft = Math.max(0, Math.ceil(stream.snap?.lease_remaining_s ?? 0))
   const cap = stream.snap?.capture as { active?: boolean; truncated?: boolean; path?: string; bytes?: number; chunks?: number } | null | undefined
   const capActive = cap?.active === true
 
@@ -470,6 +503,39 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           )
         })}
         <span style={{ flex: '1 1 auto' }} />
+        <select
+          value={port || 'auto'}
+          onChange={(e: any) => props.onPort?.(e.currentTarget.value)}
+          aria-label="串口端口"
+          title={
+            portLocked
+              ? '监视进行中：先关闭监视再换端口（换口会重开串口）'
+              : '选择串口；auto = 内核按 USB 优先自动解析（有歧义时会报错而不是猜）'
+          }
+          style={{ ...selectStyle, maxWidth: '150px', opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
+          disabled={portLocked || props.onPort === undefined}
+        >
+          <option value="auto">{'auto（自动选口）'}</option>
+          {portOptions.map((p) => (
+            <option key={p.name} value={p.name} title={p.label}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={baud}
+          onChange={(e: any) => props.onBaud?.(Number(e.currentTarget.value))}
+          aria-label="串口波特率"
+          title={portLocked ? '监视进行中：先关闭监视再换波特率' : '波特率：下一次打开监视时生效'}
+          style={{ ...selectStyle, opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
+          disabled={portLocked || props.onBaud === undefined}
+        >
+          {baudOptions(baud).map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
         <select
           value={dir}
           onChange={(e: any) => setDir(e.currentTarget.value === 'rx' ? 'rx' : e.currentTarget.value === 'tx' ? 'tx' : 'all')}
@@ -601,6 +667,17 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         <span style={metaStyle} title="当前缓冲：未清空、未被环形挤出的字节 / 批次">
           {`${bytesTotal} B · ${chunkCount} 批`}
         </span>
+        {stream.active && openedBy !== undefined ? (
+          <span
+            style={{
+              ...metaStyle,
+              color: openedBy === 'agent' ? 'var(--elab-accent)' : 'var(--elab-fg-muted)',
+            }}
+            title="串口会话归属与租约：agent 开的会话到期自动关闭并释放给人工"
+          >
+            {`会话 ${openedBy === 'agent' ? 'agent' : '我'}${leaseLeft > 0 ? ` · 租约 ${leaseLeft}s` : ''}`}
+          </span>
+        ) : null}
       </div>
 
       {/* ── 提示条 ── */}
