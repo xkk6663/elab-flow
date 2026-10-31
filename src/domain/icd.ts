@@ -418,6 +418,33 @@ export interface SerialMonitorSnapshot {
     error: string | null;
     max_bytes: number;
   } | null;
+  /**
+   * 会话级共享解码（P3.5）。`decoder` 为空 = 未启用，面板可回退本地无状态解码。
+   * ★ 解码器是**会话属性**：agent 选定后，人在波页看到的是同一份帧。
+   */
+  decode?: SerialDecodeState;
+}
+
+/** 会话级解码状态（快照里的 `decode`，以及 /api/serial/monitor/decoded 的公共字段）。 */
+export interface SerialDecodeState {
+  /** justfloat / firewater；'' = 未启用 */
+  decoder: string;
+  /** 谁最后选定：human / agent */
+  decoder_by: string;
+  /** 已推断的通道数（0 = 还没解出帧） */
+  channels: number;
+  /** 当前解码器已解出的总帧数（累计；clear 后归零） */
+  total_frames: number;
+  /** 被跳过的候选帧/坏行数（累计） */
+  skipped: number;
+  /** 待续解的半帧字节数 */
+  pending_bytes: number;
+  /** 帧环挤掉的总帧数 */
+  covered: number;
+  /** 最近一次解码的时刻（unix 秒） */
+  updated_at: number;
+  /** 解码异常（未知解码器/内部错误）；null = 正常 */
+  error: string | null;
 }
 
 export interface SerialMonitorLine {
@@ -447,7 +474,7 @@ export interface SerialMonitorWriteResult {
 
 // ── 串口监视：字节真值（P1）──────────────────────────────────────
 /** 监视会话动作（POST /api/serial/monitor 的 body.action）。 */
-export type SerialAction = 'open' | 'close' | 'clear' | 'pause' | 'resume'
+export type SerialAction = 'open' | 'close' | 'decoder' | 'clear' | 'pause' | 'resume'
 
 /**
  * 一条原始字节批次。
@@ -491,6 +518,29 @@ export interface SerialDecodeResult {
   pending_b64: string
   input_bytes: number
   error?: string
+}
+
+// ── 串口会话级共享解码（P3.5）────────────────────────────────────
+/** 一帧解码结果（与面板波形同源；t_us 是批次采集时刻）。 */
+export interface SerialDecodedFrame {
+  /** 会话内单调的帧序号（换解码器/clear 也不回退） */
+  seq: number
+  /** 服务端已格式化的 HH:MM:SS.mmm */
+  t: string
+  t_us: number
+  /** 每通道的浮点值（长度 = channels） */
+  values: number[]
+}
+
+/** GET /api/serial/monitor/decoded 的响应（增量帧 + 解码状态）。 */
+export interface SerialDecodedTail extends SerialDecodeState {
+  active: boolean
+  epoch?: number
+  /** 下一游标：把 next_after 当 after 再拉即可 */
+  next_after: number
+  frames: SerialDecodedFrame[]
+  /** 客户端错过的帧数下限（帧环挤掉；只报告不抹平） */
+  gap: number
 }
 
 // ── /api/adapt（一键适配，M5.6）─────────────────────────────────
