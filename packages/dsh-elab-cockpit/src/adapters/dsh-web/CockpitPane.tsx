@@ -38,6 +38,7 @@ import { ManualBar } from './ManualBar.tsx'
 import { EvidenceTail, TAIL_CAPACITY } from './EvidenceTail.tsx'
 import type { TailBuffers, TailLine } from './EvidenceTail.tsx'
 import { SerialPane } from './SerialPane.tsx'
+import type { SerialPortInfo } from './SerialPane.tsx'
 import { useSerialStream } from './serial/useSerialStream.ts'
 
 /** 每个通道的环形缓冲（最多 TAIL_CAPACITY 行）。 */
@@ -59,6 +60,36 @@ function toneOf(text: string): TailLine['tone'] {
   if (low.includes(' error') || low.includes('failed') || low.includes('✗') || low.startsWith('error')) return 'alert'
   if (low.includes('warning') || low.includes('warn') || low.includes('⚠')) return 'warn'
   return 'normal'
+}
+
+/** 串口偏好（端口/波特率）：用户级 UI 偏好，与工程无关，宿主禁写时只在本次会话生效。 */
+const SERIAL_PREF_KEY = 'elab.serial.pref'
+
+interface SerialPref {
+  port?: string
+  baud?: number
+}
+
+function readSerialPref(): SerialPref {
+  try {
+    const raw = window.localStorage.getItem(SERIAL_PREF_KEY)
+    if (raw === null) return {}
+    const o = JSON.parse(raw) as { port?: unknown; baud?: unknown }
+    const out: SerialPref = {}
+    if (typeof o.port === 'string' && o.port !== '') out.port = o.port
+    if (typeof o.baud === 'number' && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeSerialPref(p: SerialPref): void {
+  try {
+    window.localStorage.setItem(SERIAL_PREF_KEY, JSON.stringify(p))
+  } catch {
+    /* 宿主禁写 localStorage：偏好仅本次会话有效 */
+  }
 }
 
 export interface CockpitPaneProps {
@@ -214,11 +245,19 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   const [cleanTarget, setCleanTarget] = useState<string | null>(null)
 
   // ── 串口：端口/波特率来自 capabilities；数据面统一在 useSerialStream ──
-  const [serialMeta, setSerialMeta] = useState<{ port: string; baud: number; writable: boolean }>({
+  const [serialMeta, setSerialMeta] = useState<{
+    port: string
+    baud: number
+    writable: boolean
+    ports: SerialPortInfo[]
+  }>({
     port: 'auto',
     baud: 115200,
     writable: false,
+    ports: [],
   })
+  /** 用户显式选的端口/波特率（localStorage 持久化）；高优先级于工程/宿主默认。 */
+  const [serialPref, setSerialPref] = useState<SerialPref>(readSerialPref)
   /** capabilities 里的监视快照（别处已开的会话能立刻接上）。 */
   const [serialInitial, setSerialInitial] = useState<SerialMonitorSnapshot | null>(null)
   /** 协议解码器（caps.meta.serial.decoders；缺失时用内置两种）。 */
@@ -318,7 +357,7 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             host_default?: string
             host_baud?: number
             write_available?: boolean
-            ports?: Array<{ name?: string }>
+            ports?: Array<{ name?: string; kind?: string; desc?: string }>
             monitor?: SerialMonitorSnapshot
           }
           meta?: { serial?: { decoders?: Array<{ id?: string; label?: string; desc?: string }> } }
@@ -329,6 +368,13 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             port: serial.host_default || serial.ports?.[0]?.name || 'auto',
             baud: serial.host_baud ?? 115200,
             writable: serial.write_available === true,
+            ports: (serial.ports ?? [])
+              .filter((p) => typeof p.name === 'string' && p.name !== '')
+              .map((p) => ({
+                name: String(p.name),
+                ...(typeof p.kind === 'string' ? { kind: p.kind } : {}),
+                ...(typeof p.desc === 'string' ? { desc: p.desc } : {}),
+              })),
           })
           // ★ 已有会话（别处打开/刷新前就在跑）：直接接上（游标由 hook 从 0 追起）。
           if (serial.monitor !== undefined) setSerialInitial(serial.monitor)
@@ -379,12 +425,31 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   }, [snap.project, sessionId])
 
   // ── 串口数据面（行 + 字节批次）：只在串口通道可见时轮询 ──
+  const serialPort = serialPref.port ?? serialMeta.port
+  const serialBaud = serialPref.baud ?? serialMeta.baud
+
+  /** 端口/波特率偏好：本地即时生效（打开监视时按新值解析），并持久化。 */
+  const onSerialPort = useCallback((port: string) => {
+    setSerialPref((prev) => {
+      const next = { ...prev, port }
+      writeSerialPref(next)
+      return next
+    })
+  }, [])
+  const onSerialBaud = useCallback((baud: number) => {
+    setSerialPref((prev) => {
+      const next = { ...prev, baud }
+      writeSerialPref(next)
+      return next
+    })
+  }, [])
+
   const serialStream = useSerialStream({
     api: elabApi,
     initial: serialInitial,
     project: snap.project,
-    port: serialMeta.port,
-    baud: serialMeta.baud,
+    port: serialPort,
+    baud: serialBaud,
     enabled: channel === 'serial' && visible === true,
     sessionId,
   })
@@ -642,8 +707,11 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                   decoders={decoders}
                   project={snap.project}
                   running={running}
-                  port={serialMeta.port}
-                  baud={serialMeta.baud}
+                  port={serialPort}
+                  baud={serialBaud}
+                  ports={serialMeta.ports}
+                  onPort={onSerialPort}
+                  onBaud={onSerialBaud}
                   writable={serialMeta.writable}
                   runLines={buffersRef.current.serial ?? []}
                   runLinesVersion={tailVersion}

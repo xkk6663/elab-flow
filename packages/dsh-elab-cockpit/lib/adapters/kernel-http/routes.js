@@ -38,9 +38,12 @@ const GET_ALLOW = new Set([
     'run-events',
     'serial/console',
     'serial/monitor',
+    // P1 字节真值：与行级 monitor 同步轮询（方向/时间/序号 + base64 原始字节）
+    'serial/monitor/bytes',
 ]);
 /** 允许转发的 POST 端点。 */
-const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'adapt']);
+const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
+    'serial/capture', 'adapt']);
 function json(res, code, body) {
     const text = JSON.stringify(body);
     res.statusCode = code;
@@ -178,7 +181,12 @@ export function registerApiRoute(ctx, deps) {
                 if (rel === 'serial/monitor' && deps.serialMutex !== undefined && upstream.ok && typeof init.body === 'string') {
                     try {
                         const action = JSON.parse(init.body).action;
-                        deps.serialMutex.setOpen(action === 'open');
+                        // ★ 只有 open 占口、close 释放；clear/pause/resume 是会话内操作，
+                        //   绝不能把互斥标记清掉（否则常驻监视开着也能发起烧录 run）。
+                        if (action === 'open')
+                            deps.serialMutex.setOpen(true);
+                        else if (action === 'close')
+                            deps.serialMutex.setOpen(false);
                     }
                     catch {
                         /* 解析失败不影响转发 */

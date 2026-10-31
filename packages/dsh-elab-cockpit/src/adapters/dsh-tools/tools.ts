@@ -223,7 +223,8 @@ export function registerElabTools(
     makeTool({
       name: 'elab_status',
       description:
-        '查看 elab 驾驶舱状态：工程列表（含各步骤可用性与原因）、当前 run 归属与步骤、cockpit 进程健康。只读。写操作前先调它确认工程名。',
+        '查看 elab 驾驶舱状态：工程列表（含各步骤可用性与原因）、当前 run 归属与步骤、cockpit 进程健康，' +
+        '以及串口现状（端口候选 / 当前监视会话 / 租约剩余）。只读。写操作前先调它确认工程名与端口。',
       parameters: {},
       output: jsonOutput,
       presentCall: () => ({ card: 'generic', kind: 'read', title: '查看 elab 驾驶舱状态' }),
@@ -235,14 +236,46 @@ export function registerElabTools(
         )
         const cards = projects.projects ?? projects.cards ?? []
         const current = deps.arbiter.current()
+        const caps = await cockpit<{
+          serial?: {
+            available?: boolean
+            layer?: string
+            hint?: string | null
+            backend?: string
+            write_available?: boolean
+            ports?: Array<{ name?: string; kind?: string; desc?: string }>
+            host_default?: string
+            host_baud?: number
+            monitor?: Record<string, unknown> | null
+          }
+        }>(deps, '/api/capabilities')
+        const serial = caps.serial
         return {
           ok: true,
           projects: cards.map((c) => ({
             name: String(c.name ?? ''),
             ...(typeof c.root === 'string' ? { root: c.root } : {}),
+            tools: Array.isArray(c.tools) ? c.tools : [],
             steps: c.steps ?? {},
           })),
           activeRun: current,
+          // 串口现状：端口候选 + 当前会话（含 opened_by / lease_remaining_s）——
+          // agent 换口前先看这里，不用猜 / 也不用先 open 一次试错。
+          serial: serial === undefined ? null : {
+            available: serial.available === true,
+            layer: serial.layer ?? '',
+            hint: serial.hint ?? null,
+            backend: serial.backend ?? '',
+            write_available: serial.write_available === true,
+            host_default: serial.host_default ?? '',
+            host_baud: serial.host_baud ?? 115200,
+            ports: (serial.ports ?? []).map((p) => ({
+              name: String(p.name ?? ''),
+              kind: String(p.kind ?? ''),
+              desc: String(p.desc ?? ''),
+            })),
+            monitor: serial.monitor ?? null,
+          },
         }
       },
     }),
@@ -293,6 +326,126 @@ export function registerElabTools(
       presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 完整闭环' }),
       async execute(args: { project: string; clean?: boolean }) {
         return runPlanTool(deps, args, 'loop')
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_step',
+      description:
+        '按**显式步骤**执行（与面板里的单步按钮同源）：doctor / build / flash / debug_verify / monitor，' +
+        '以及项目声明的 tool:<name>；steps 用逗号分隔。显式步骤不可用时**直接报错**（不静默剔除）。' +
+        '返回 run id，进度在面板实时可见。',
+      parameters: {
+        project: { type: 'string', required: true, description: '工程名（用 elab_status 查询）' },
+        steps: { type: 'string', required: true, description: '逗号分隔，如 build 或 flash,debug_verify 或 tool:ota' },
+        clean: { type: 'boolean', description: '先删除工作目录（不可逆，谨慎）' },
+        jobs: { type: 'number', description: '并行度 -j（默认由工程决定）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 单步执行' }),
+      async execute(args: { project: string; steps: string; clean?: boolean; jobs?: number }) {
+        const wanted = args.steps.split(',').map((s) => s.trim()).filter(Boolean)
+        if (wanted.length === 0) {
+          return { ok: false, code: 'bad-steps', note: 'steps 不能为空（逗号分隔，如 build 或 flash,debug_verify）' }
+        }
+        const projects = await cockpit<{ projects?: Array<Record<string, unknown>>; cards?: Array<Record<string, unknown>> }>(
+          deps,
+          '/api/projects',
+        )
+        const cards = projects.projects ?? projects.cards ?? []
+        const card = cards.find((c) => String(c.name ?? '') === args.project)
+        if (card === undefined) {
+          const names = cards.map((c) => String(c.name ?? '')).filter(Boolean)
+          throw new Error(`未找到工程「${args.project}」（可用：${names.length > 0 ? names.join('、') : '（无）'}）；可先用 elab_status 查看`)
+        }
+        const availability = (card.steps ?? {}) as StepAvailability
+        const declaredTools = new Set(
+          ((card.tools as Array<{ name?: unknown }> | undefined) ?? []).map((t) => `tool:${String(t.name ?? '')}`),
+        )
+        for (const s of wanted) {
+          if (s.startsWith('tool:')) {
+            if (!declaredTools.has(s)) {
+              return {
+                ok: false,
+                code: 'unknown-step',
+                step: s,
+                note: `工程未声明工具「${s.slice(5)}」（项目 yaml 的 tools: 节里没有它）`,
+              }
+            }
+            continue
+          }
+          const av = availability[s]
+          if (av === undefined) {
+            return {
+              ok: false,
+              code: 'unknown-step',
+              step: s,
+              note: `未知步骤「${s}」；已知步骤：${Object.keys(availability).join('、')}`,
+            }
+          }
+          if (av.ok === false) {
+            return { ok: false, code: 'step-unavailable', step: s, note: av.reason ?? '该步骤当前不可用' }
+          }
+        }
+        const acquire = await deps.arbiter.tryAcquire('tool', 'agent', wanted)
+        if (!acquire.ok) {
+          return {
+            ok: false,
+            code: acquire.code,
+            holder: acquire.holder,
+            ...(acquire.nextAction !== undefined ? { nextAction: acquire.nextAction } : {}),
+          }
+        }
+        try {
+          const r = await cockpit<{ run: string; project: string; steps: string[] }>(deps, '/api/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              project: args.project,
+              steps: wanted,
+              ...(args.clean === true ? { clean: true } : {}),
+              ...(typeof args.jobs === 'number' && args.jobs > 0 ? { jobs: args.jobs } : {}),
+              actor: 'agent',
+            }),
+          })
+          deps.arbiter.attachRun('tool', r.run)
+          return {
+            ok: true,
+            run: r.run,
+            project: args.project,
+            steps: wanted,
+            note: '进度在面板实时可见；需要日志用 elab_log（含 run id）',
+          }
+        } catch (error) {
+          deps.arbiter.releaseIfPending('tool')
+          throw error
+        }
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_preview',
+      description:
+        '只读预览将执行的命令（GET /api/plan：不 spawn、不写盘、不发事件）。' +
+        'steps 缺省 = 工程默认步序；返回每步 argv 与 --clean 的删除目标。',
+      parameters: {
+        project: { type: 'string', required: true, description: '工程名' },
+        steps: { type: 'string', description: '逗号分隔；缺省=默认闭环步序' },
+        clean: { type: 'boolean', description: '按 --clean 预览（会显式列出删除目录）' },
+        jobs: { type: 'number', description: '并行度 -j' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 命令预览' }),
+      async execute(args: { project: string; steps?: string; clean?: boolean; jobs?: number }) {
+        const qs = new URLSearchParams({ project: args.project })
+        if (args.steps !== undefined && args.steps.trim() !== '') qs.set('steps', args.steps.trim())
+        if (args.clean === true) qs.set('clean', '1')
+        if (typeof args.jobs === 'number' && args.jobs > 0) qs.set('jobs', String(args.jobs))
+        return cockpit(deps, `/api/plan?${qs.toString()}`)
       },
     }),
   )

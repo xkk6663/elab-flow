@@ -454,6 +454,18 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
         <span className={s.meta} title="当前缓冲：未清空、未被环形挤出的字节 / 批次">
           {bytes} B · {chunks} 批
         </span>
+        {stream.active && stream.snap?.opened_by ? (
+          <span
+            className={s.meta}
+            style={{ color: stream.snap.opened_by === "agent" ? "var(--elab-accent)" : undefined }}
+            title="串口会话归属与租约：agent 开的会话到期自动关闭并释放给人工"
+          >
+            会话 {stream.snap.opened_by === "agent" ? "agent" : "我"}
+            {Math.ceil(stream.snap.lease_remaining_s ?? 0) > 0
+              ? ` · 租约 ${Math.ceil(stream.snap.lease_remaining_s ?? 0)}s`
+              : ""}
+          </span>
+        ) : null}
       </div>
 
       {stream.error ? (

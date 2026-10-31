@@ -41,6 +41,36 @@ function baudOptions(current: number): number[] {
     : [...COMMON_BAUDS, current].sort((a, b) => a - b);
 }
 
+/** 端口/波特率偏好：用户级 UI 选择，跨刷新保留（localStorage 不可写时只在本次会话生效） */
+const PORT_PREF_KEY = "elab.serial.port";
+const BAUD_PREF_KEY = "elab.serial.baud";
+
+function loadPortPref(): string | null {
+  try {
+    const v = window.localStorage.getItem(PORT_PREF_KEY);
+    return v !== null && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadBaudPref(): number | null {
+  try {
+    const n = Number(window.localStorage.getItem(BAUD_PREF_KEY));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePref(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* 忽略：偏好仅本次会话有效 */
+  }
+}
+
 type Stats = { lines: number; alerts: number; dropped: number };
 
 /**
@@ -61,7 +91,7 @@ export function EvidenceRail({
   running,
   onRunSteps,
   serialProject,
-  serialPort,
+  serialPort: serialPortBase,
   ws,
   onWs,
 }: EvidenceRailProps) {
@@ -70,7 +100,9 @@ export function EvidenceRail({
   // 跟随滚动：纯本工作区 UI 态，不再提升到 App（瘦身）
   const [autoScroll, setAutoScroll] = useState(true);
   // 波特率覆盖：同理本地化。★ 语义不变：改后立即生效（无状态往返，不需要"重开端口"）
-  const [baudOverride, setBaudOverride] = useState<number | null>(null);
+  const [baudOverride, setBaudOverride] = useState<number | null>(loadBaudPref);
+  // 端口覆盖：用户显式选择优先于工程配置/宿主默认；打开监视时按它解析
+  const [portOverride, setPortOverride] = useState<string | null>(loadPortPref);
 
   // 工作区解析：持久化的 id 在当前工程下不存在（如切了工程、yaml 改了 tools:）
   // 时回退到第一个 —— 绝不渲染未注册的工作区。
@@ -81,6 +113,10 @@ export function EvidenceRail({
   // ★ 必须与后端 `serialterm.resolve_target()` 的顺序**一致**，否则会出现
   //   "界面显示 9600、实际按 115200 发"这种最难查的不一致。
   const serialBaud = baudOverride ?? card?.serial.baud ?? caps?.serial.host_baud ?? 115200;
+
+  // 端口优先级：用户显式选的 → 工程配置 → 宿主默认 → auto。
+  // ★ `auto` 把选择权交给内核（USB 优先、排蓝牙、有歧义就报错，不猜）。
+  const serialPort = portOverride ?? serialPortBase;
 
   // 徽标计数：book 级单订阅（任何通道变化都惊动一次，250ms 节流）。
   // 通道是动态的，逐通道订阅会随工具数量膨胀；book 级订阅加通道零改动。
@@ -142,7 +178,7 @@ export function EvidenceRail({
     async (line: string) => {
       logs.local("serial", `TX → ${line}`, "warn");
       try {
-        const r = await api.serial({ project: serialProject, data: line, baud: serialBaud });
+        const r = await api.serial({ project: serialProject, data: line, baud: serialBaud, port: serialPort });
         if (r.via === "monitor") {
           // ★ 监视会话开着：写进了已打开的口，回显会从实时监视流回来 ——
           //   本请求没有 echo 窗口，渲染话术必须分流（字段语义不同）。
@@ -175,7 +211,7 @@ export function EvidenceRail({
         logs.local("serial", `✗ ${e instanceof Error ? e.message : String(e)}`, "alert");
       }
     },
-    [serialProject, serialBaud],
+    [serialProject, serialBaud, serialPort],
   );
 
   // 写通道可用性：既要后端**真的支持写**（M3-b），也要有工程上下文。
@@ -197,6 +233,25 @@ export function EvidenceRail({
 
   const ring = logs.ring(active.channel);
   const st: Stats = counts[active.channel] ?? { lines: 0, alerts: 0, dropped: 0 };
+
+  // ── 串口端口/波特率：监视运行时锁死（换口必须重开串口），展示的是**实际**会话值 ──
+  const portShown = stream.active ? (stream.snap?.port ?? serialPort) : serialPort || "auto";
+  const baudShown = stream.active ? (stream.snap?.baud ?? serialBaud) : serialBaud;
+  const portList = (caps?.serial.ports ?? []).map((p) => ({
+    name: p.name,
+    label: p.kind === "bluetooth" ? `${p.name}（蓝牙）` : p.name,
+  }));
+  if (portShown !== "" && portShown !== "auto" && !portList.some((p) => p.name === portShown)) {
+    portList.unshift({ name: portShown, label: `${portShown}（当前）` });
+  }
+  const onPortChange = (v: string): void => {
+    setPortOverride(v);
+    savePref(PORT_PREF_KEY, v);
+  };
+  const onBaudChange = (v: number): void => {
+    setBaudOverride(v);
+    savePref(BAUD_PREF_KEY, String(v));
+  };
 
   const doExport = useCallback(() => {
     const text = ringToText(ring);
@@ -298,9 +353,41 @@ export function EvidenceRail({
               </Tooltip>
             );
           })}
-        {/* ── 串口工作区：打开/关闭监视（常驻会话，不是闭环判定）── */}
+        {/* ── 串口工作区：端口/波特率选择 + 打开/关闭监视（常驻会话，不是闭环判定）──
+            ★ 监视开着时选择器锁死：换口必须重开串口（会话绑的是某个物理口）。 */}
         {active.id === "serial" ? (
-          stream.active ? (
+          <>
+            <select
+              className={s.baud}
+              style={{ maxWidth: "132px" }}
+              value={portShown}
+              onChange={(e) => onPortChange(e.currentTarget.value)}
+              title={stream.active ? "监视进行中：先关闭监视再换端口" : "选择串口；auto = 内核按 USB 优先自动解析（有歧义会报错而不是猜）"}
+              aria-label="串口端口"
+              disabled={stream.active}
+            >
+              <option value="auto">auto（自动选口）</option>
+              {portList.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <select
+              className={s.baud}
+              value={baudShown}
+              onChange={(e) => onBaudChange(Number(e.currentTarget.value))}
+              title={stream.active ? "监视进行中：先关闭监视再换波特率" : "波特率：下一次打开监视/发送时生效"}
+              aria-label="串口波特率"
+              disabled={stream.active}
+            >
+              {baudOptions(baudShown).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+            {stream.active ? (
             <Tooltip tip={`监视中：${stream.snap?.port ?? "?"}@${stream.snap?.baud ?? "?"} · 已收 ${stream.snap?.seq ?? 0} 行 / ${stream.snap?.chunk_seq ?? 0} 批 —— 点击关闭并释放串口`}>
               <Button size="sm" variant="outline" onClick={() => void toggleMonitor()}>
                 关闭监视
@@ -324,7 +411,8 @@ export function EvidenceRail({
                 打开监视
               </Button>
             </Tooltip>
-          )
+          )}
+          </>
         ) : null}
         <span className={s.meta}>
           {st.lines} 行
@@ -398,23 +486,9 @@ export function EvidenceRail({
             disabled={!writable}
             onChange={(e) => setDraft(e.currentTarget.value)}
           />
-          <span className={s.portTag} title={caps?.serial.hint ?? ""}>
+          <span className={s.portTag} title={`${serialPort || "auto"}@${serialBaud}`}>
             {serialPort || "auto"}
           </span>
-          <select
-            className={s.baud}
-            value={serialBaud}
-            onChange={(e) => setBaudOverride(Number(e.currentTarget.value))}
-            title="波特率：改后立即生效（下一次发送即用新值）"
-            aria-label="串口波特率"
-            disabled={!writable}
-          >
-            {baudOptions(serialBaud).map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
         </form>
       ) : null}
     </div>

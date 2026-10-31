@@ -36,7 +36,7 @@ var __copyProps = (to, from, except, desc) => {
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-// src/adapters/dsh-web/entry.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/entry.ts
 var entry_exports = {};
 __export(entry_exports, {
   CockpitPane: () => CockpitPane,
@@ -59,7 +59,7 @@ var useMemo = globalThis.__ELAB_HOST_REACT__.useMemo;
 var useCallback = globalThis.__ELAB_HOST_REACT__.useCallback;
 var useSyncExternalStore = globalThis.__ELAB_HOST_REACT__.useSyncExternalStore;
 
-// src/domain/run.ts
+// packages/dsh-elab-cockpit/src/domain/run.ts
 var IDLE = {
   run: null,
   project: "",
@@ -195,7 +195,7 @@ function reduce(s, e) {
   }
 }
 
-// src/domain/kernel-meta.ts
+// packages/dsh-elab-cockpit/src/domain/kernel-meta.ts
 var current = null;
 function setKernelMeta(meta) {
   current = meta ?? null;
@@ -210,7 +210,7 @@ function kernelPlanTitle(planId, fallback) {
   return typeof title === "string" && title !== "" ? title : fallback;
 }
 
-// src/domain/pipeline.ts
+// packages/dsh-elab-cockpit/src/domain/pipeline.ts
 var ONHW_STEPS = ["flash", "debug_verify", "monitor"];
 var STEP_LABEL = {
   doctor: "\u4F53\u68C0",
@@ -304,7 +304,7 @@ function foldProgress(state, line, now = Date.now()) {
   };
 }
 
-// src/domain/adapt.ts
+// packages/dsh-elab-cockpit/src/domain/adapt.ts
 function initialAdaptState() {
   return {
     phase: "unbound",
@@ -358,7 +358,7 @@ function reduceAdapt(s, e) {
   }
 }
 
-// src/app/cockpit-service.ts
+// packages/dsh-elab-cockpit/src/app/cockpit-service.ts
 function createCockpitService(deps) {
   const { api, events, sessionId } = deps;
   let snap = {
@@ -384,6 +384,8 @@ function createCockpitService(deps) {
   let connection = null;
   let visible = true;
   let disposed = false;
+  const followedRuns = /* @__PURE__ */ new Set();
+  let pollTimer = null;
   function set(p) {
     snap = { ...snap, ...p };
     for (const l of listeners) l();
@@ -445,6 +447,56 @@ function createCockpitService(deps) {
     connection = null;
     const next = markStreamClosed(snap.run, reason);
     set({ run: next, busy: false });
+  }
+  function adoptExternalRun(runId, project) {
+    if (runId === "" || snap.run.run === runId) return false;
+    if (project !== "" && project !== snap.project) {
+      if (!cards.some((c) => String(c.name ?? "") === project)) return false;
+      selectProject(project);
+    }
+    progressRef = makeProgress();
+    set({
+      run: {
+        ...IDLE,
+        run: runId,
+        project,
+        status: "running",
+        actor: "agent",
+        startedAt: Date.now() / 1e3
+      },
+      busy: false,
+      error: null,
+      progress: null
+    });
+    openConnection();
+    return true;
+  }
+  async function followAgentRuns() {
+    if (disposed || typeof api.runs !== "function") return;
+    try {
+      const r = await api.runs(sessionId);
+      const active = r.active ?? [];
+      for (const a of active) {
+        const runId = String(a.run ?? "");
+        const project = String(a.project ?? "");
+        if (runId === "" || a.alive === false) continue;
+        if (String(a.actor ?? "") !== "agent") continue;
+        if (followedRuns.has(runId)) continue;
+        if (adoptExternalRun(runId, project)) followedRuns.add(runId);
+      }
+    } catch {
+    }
+  }
+  function startFollowPoll() {
+    if (pollTimer !== null) return;
+    pollTimer = setInterval(() => {
+      void followAgentRuns();
+    }, 2e3);
+  }
+  function stopFollowPoll() {
+    if (pollTimer === null) return;
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
   async function reloadProjects() {
     try {
@@ -525,6 +577,8 @@ function createCockpitService(deps) {
     setVisible(v) {
       visible = v;
       connection?.setVisible(v);
+      if (v) startFollowPoll();
+      else stopFollowPoll();
     },
     onRawEvent(l) {
       rawListeners.add(l);
@@ -588,6 +642,7 @@ function createCockpitService(deps) {
     },
     dispose() {
       disposed = true;
+      stopFollowPoll();
       closeConnection();
       listeners.clear();
       rawListeners.clear();
@@ -596,7 +651,7 @@ function createCockpitService(deps) {
   };
 }
 
-// src/domain/channels.ts
+// packages/dsh-elab-cockpit/src/domain/channels.ts
 var LOG_CHANNELS = ["build", "flash", "debug", "serial", "tools"];
 var CHANNEL_LABEL = {
   build: "\u6784\u5EFA",
@@ -622,7 +677,7 @@ function channelOfEvent(e) {
   return channelOfStep(step);
 }
 
-// src/adapters/kernel-http/icd-client.ts
+// packages/dsh-elab-cockpit/src/adapters/kernel-http/icd-client.ts
 var ElabApiError = class extends Error {
   constructor(code, message) {
     super(message);
@@ -727,7 +782,7 @@ var elabApi = {
   saveConfig: (patch2) => post("/elab/config", patch2)
 };
 
-// src/adapters/dsh-web/events/sse.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/events/sse.ts
 var ingestHist = {};
 var EventStream = class {
   constructor(opts, sink) {
@@ -874,7 +929,7 @@ var KNOWN_TOPICS = [
   "serial/closed-loop"
 ];
 
-// src/adapters/dsh-web/events/run-events.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/events/run-events.ts
 function createRunEventsPort() {
   return {
     connect(run, sessionId, sink) {
@@ -893,7 +948,7 @@ function createRunEventsPort() {
   };
 }
 
-// src/adapters/dsh-web/StageLadder.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/StageLadder.tsx
 var STATE_TONE = {
   pending: { dot: "var(--elab-status-idle)", text: "var(--elab-fg-muted)", label: "\u5F85\u8DD1" },
   running: { dot: "var(--elab-accent)", text: "var(--elab-fg-primary)", label: "\u8FD0\u884C\u4E2D" },
@@ -1081,7 +1136,7 @@ function StageLadder(props) {
   )));
 }
 
-// src/adapters/dsh-web/ManualBar.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/ManualBar.tsx
 var chipBase = {
   padding: "4px 10px",
   fontSize: "11px",
@@ -1287,7 +1342,7 @@ function ManualBar(props) {
   ) : null);
 }
 
-// src/adapters/dsh-web/theme/ansi.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/theme/ansi.ts
 var FG = {
   30: "black",
   31: "red",
@@ -1342,7 +1397,7 @@ function parseAnsi(input) {
   return out;
 }
 
-// src/adapters/dsh-web/EvidenceTail.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/EvidenceTail.tsx
 function renderLine(text) {
   if (!text.includes("\x1B")) return text;
   return parseAnsi(text).map(
@@ -1549,7 +1604,7 @@ function EvidenceTail(props) {
   )));
 }
 
-// src/adapters/dsh-web/serial/bytes.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/serial/bytes.ts
 function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -1613,7 +1668,7 @@ function captureText(chunks) {
 `;
 }
 
-// src/adapters/dsh-web/serial/ansiTerminal.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/serial/ansiTerminal.ts
 var ESC2 = "\x1B";
 var FG2 = {
   30: "black",
@@ -1784,7 +1839,7 @@ var StreamTextDecoder = class {
   }
 };
 
-// src/adapters/dsh-web/SerialPane.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/SerialPane.tsx
 var VIEW_TABS = [
   { id: "lines", label: "\u884C" },
   { id: "bytes", label: "\u5B57\u8282" },
@@ -1814,6 +1869,10 @@ var EOLS = [
   { id: "cr", label: "CR" },
   { id: "crlf", label: "CRLF" }
 ];
+var COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+function baudOptions(current2) {
+  return COMMON_BAUDS.includes(current2) ? COMMON_BAUDS : [...COMMON_BAUDS, current2].sort((a, b) => a - b);
+}
 var MAX_BYTE_BLOCKS = 200;
 var MAX_WAVE_BYTES = 64 * 1024;
 var chip = {
@@ -1920,7 +1979,7 @@ function termText(line) {
   return line.map((sp) => sp.text).join("");
 }
 function SerialPane(props) {
-  const { api, stream, decoders, project, running, port, baud, writable } = props;
+  const { api, stream, decoders, project, running, port, baud, ports, writable } = props;
   const [view, setView] = useState("lines");
   const [dir, setDir] = useState("all");
   const [repr, setRepr] = useState("hex");
@@ -1936,6 +1995,14 @@ function SerialPane(props) {
   followRef.current = follow;
   const termRef = useRef(null);
   const epoch = stream.snap?.epoch ?? 0;
+  const portOptions = useMemo(() => {
+    const list = ports.map((p) => ({ name: p.name, label: p.kind === "bluetooth" ? `${p.name}\uFF08\u84DD\u7259\uFF09` : p.name }));
+    if (port !== "" && port !== "auto" && !list.some((p) => p.name === port)) {
+      list.unshift({ name: port, label: `${port}\uFF08\u5F53\u524D\uFF09` });
+    }
+    return list;
+  }, [ports, port]);
+  const portLocked = stream.active;
   const filtered = useMemo(
     () => dir === "all" ? stream.chunks : stream.chunks.filter((c) => c.dir === dir),
     [stream.chunks, dir]
@@ -2092,6 +2159,8 @@ function SerialPane(props) {
   const bytesTotal = stream.snap?.bytes_total ?? 0;
   const chunkCount = stream.chunks.length;
   const lossy = stream.gapLines + stream.gapChunks;
+  const openedBy = stream.snap?.opened_by;
+  const leaseLeft = Math.max(0, Math.ceil(stream.snap?.lease_remaining_s ?? 0));
   const cap = stream.snap?.capture;
   const capActive = cap?.active === true;
   const reachable = stream.active || running;
@@ -2129,6 +2198,31 @@ function SerialPane(props) {
       );
     }),
     /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto" } }),
+    /* @__PURE__ */ react_default.createElement(
+      "select",
+      {
+        value: port || "auto",
+        onChange: (e) => props.onPort?.(e.currentTarget.value),
+        "aria-label": "\u4E32\u53E3\u7AEF\u53E3",
+        title: portLocked ? "\u76D1\u89C6\u8FDB\u884C\u4E2D\uFF1A\u5148\u5173\u95ED\u76D1\u89C6\u518D\u6362\u7AEF\u53E3\uFF08\u6362\u53E3\u4F1A\u91CD\u5F00\u4E32\u53E3\uFF09" : "\u9009\u62E9\u4E32\u53E3\uFF1Bauto = \u5185\u6838\u6309 USB \u4F18\u5148\u81EA\u52A8\u89E3\u6790\uFF08\u6709\u6B67\u4E49\u65F6\u4F1A\u62A5\u9519\u800C\u4E0D\u662F\u731C\uFF09",
+        style: { ...selectStyle, maxWidth: "150px", opacity: portLocked ? 0.5 : 1, cursor: portLocked ? "not-allowed" : "pointer" },
+        disabled: portLocked || props.onPort === void 0
+      },
+      /* @__PURE__ */ react_default.createElement("option", { value: "auto" }, "auto\uFF08\u81EA\u52A8\u9009\u53E3\uFF09"),
+      portOptions.map((p) => /* @__PURE__ */ react_default.createElement("option", { key: p.name, value: p.name, title: p.label }, p.label))
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "select",
+      {
+        value: baud,
+        onChange: (e) => props.onBaud?.(Number(e.currentTarget.value)),
+        "aria-label": "\u4E32\u53E3\u6CE2\u7279\u7387",
+        title: portLocked ? "\u76D1\u89C6\u8FDB\u884C\u4E2D\uFF1A\u5148\u5173\u95ED\u76D1\u89C6\u518D\u6362\u6CE2\u7279\u7387" : "\u6CE2\u7279\u7387\uFF1A\u4E0B\u4E00\u6B21\u6253\u5F00\u76D1\u89C6\u65F6\u751F\u6548",
+        style: { ...selectStyle, opacity: portLocked ? 0.5 : 1, cursor: portLocked ? "not-allowed" : "pointer" },
+        disabled: portLocked || props.onBaud === void 0
+      },
+      baudOptions(baud).map((b) => /* @__PURE__ */ react_default.createElement("option", { key: b, value: b }, b))
+    ),
     /* @__PURE__ */ react_default.createElement(
       "select",
       {
@@ -2253,7 +2347,18 @@ function SerialPane(props) {
       },
       follow ? "\u25BE \u8DDF\u968F" : "\u21BA \u6062\u590D"
     ),
-    /* @__PURE__ */ react_default.createElement("span", { style: metaStyle, title: "\u5F53\u524D\u7F13\u51B2\uFF1A\u672A\u6E05\u7A7A\u3001\u672A\u88AB\u73AF\u5F62\u6324\u51FA\u7684\u5B57\u8282 / \u6279\u6B21" }, `${bytesTotal} B \xB7 ${chunkCount} \u6279`)
+    /* @__PURE__ */ react_default.createElement("span", { style: metaStyle, title: "\u5F53\u524D\u7F13\u51B2\uFF1A\u672A\u6E05\u7A7A\u3001\u672A\u88AB\u73AF\u5F62\u6324\u51FA\u7684\u5B57\u8282 / \u6279\u6B21" }, `${bytesTotal} B \xB7 ${chunkCount} \u6279`),
+    stream.active && openedBy !== void 0 ? /* @__PURE__ */ react_default.createElement(
+      "span",
+      {
+        style: {
+          ...metaStyle,
+          color: openedBy === "agent" ? "var(--elab-accent)" : "var(--elab-fg-muted)"
+        },
+        title: "\u4E32\u53E3\u4F1A\u8BDD\u5F52\u5C5E\u4E0E\u79DF\u7EA6\uFF1Aagent \u5F00\u7684\u4F1A\u8BDD\u5230\u671F\u81EA\u52A8\u5173\u95ED\u5E76\u91CA\u653E\u7ED9\u4EBA\u5DE5"
+      },
+      `\u4F1A\u8BDD ${openedBy === "agent" ? "agent" : "\u6211"}${leaseLeft > 0 ? ` \xB7 \u79DF\u7EA6 ${leaseLeft}s` : ""}`
+    ) : null
   ), stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
     "div",
     {
@@ -2512,7 +2617,7 @@ function WaveChart(props) {
   ), `CH${i}`))));
 }
 
-// src/adapters/dsh-web/serial/useSerialStream.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/serial/useSerialStream.ts
 var SERIAL_POLL_MS = 500;
 var MAX_LOCAL_LINES = 2e3;
 var MAX_LOCAL_CHUNKS = 4096;
@@ -2716,7 +2821,7 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
   };
 }
 
-// src/adapters/dsh-web/CockpitPane.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/CockpitPane.tsx
 function pushLine(buf, line) {
   buf.push(line);
   if (buf.length > TAIL_CAPACITY) buf.splice(0, buf.length - TAIL_CAPACITY);
@@ -2732,6 +2837,26 @@ function toneOf(text) {
   if (low.includes(" error") || low.includes("failed") || low.includes("\u2717") || low.startsWith("error")) return "alert";
   if (low.includes("warning") || low.includes("warn") || low.includes("\u26A0")) return "warn";
   return "normal";
+}
+var SERIAL_PREF_KEY = "elab.serial.pref";
+function readSerialPref() {
+  try {
+    const raw = window.localStorage.getItem(SERIAL_PREF_KEY);
+    if (raw === null) return {};
+    const o = JSON.parse(raw);
+    const out = {};
+    if (typeof o.port === "string" && o.port !== "") out.port = o.port;
+    if (typeof o.baud === "number" && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud;
+    return out;
+  } catch {
+    return {};
+  }
+}
+function writeSerialPref(p) {
+  try {
+    window.localStorage.setItem(SERIAL_PREF_KEY, JSON.stringify(p));
+  } catch {
+  }
 }
 function usePaneWidth(ref) {
   const [width, setWidth] = useState(0);
@@ -2858,8 +2983,10 @@ function CockpitPane(props) {
   const [serialMeta, setSerialMeta] = useState({
     port: "auto",
     baud: 115200,
-    writable: false
+    writable: false,
+    ports: []
   });
+  const [serialPref, setSerialPref] = useState(readSerialPref);
   const [serialInitial, setSerialInitial] = useState(null);
   const [decoders, setDecoders] = useState([
     { id: "justfloat", label: "JustFloat" },
@@ -2942,7 +3069,12 @@ function CockpitPane(props) {
         setSerialMeta({
           port: serial.host_default || serial.ports?.[0]?.name || "auto",
           baud: serial.host_baud ?? 115200,
-          writable: serial.write_available === true
+          writable: serial.write_available === true,
+          ports: (serial.ports ?? []).filter((p) => typeof p.name === "string" && p.name !== "").map((p) => ({
+            name: String(p.name),
+            ...typeof p.kind === "string" ? { kind: p.kind } : {},
+            ...typeof p.desc === "string" ? { desc: p.desc } : {}
+          }))
         });
         if (serial.monitor !== void 0) setSerialInitial(serial.monitor);
       }
@@ -2978,12 +3110,28 @@ function CockpitPane(props) {
       cancelled = true;
     };
   }, [snap.project, sessionId]);
+  const serialPort = serialPref.port ?? serialMeta.port;
+  const serialBaud = serialPref.baud ?? serialMeta.baud;
+  const onSerialPort = useCallback((port) => {
+    setSerialPref((prev) => {
+      const next = { ...prev, port };
+      writeSerialPref(next);
+      return next;
+    });
+  }, []);
+  const onSerialBaud = useCallback((baud) => {
+    setSerialPref((prev) => {
+      const next = { ...prev, baud };
+      writeSerialPref(next);
+      return next;
+    });
+  }, []);
   const serialStream = useSerialStream({
     api: elabApi,
     initial: serialInitial,
     project: snap.project,
-    port: serialMeta.port,
-    baud: serialMeta.baud,
+    port: serialPort,
+    baud: serialBaud,
     enabled: channel === "serial" && visible === true,
     sessionId
   });
@@ -3204,8 +3352,11 @@ function CockpitPane(props) {
               decoders,
               project: snap.project,
               running,
-              port: serialMeta.port,
-              baud: serialMeta.baud,
+              port: serialPort,
+              baud: serialBaud,
+              ports: serialMeta.ports,
+              onPort: onSerialPort,
+              onBaud: onSerialBaud,
               writable: serialMeta.writable,
               runLines: buffersRef.current.serial ?? [],
               runLinesVersion: tailVersion,
@@ -3222,7 +3373,7 @@ function CockpitPane(props) {
   );
 }
 
-// src/adapters/dsh-web/SettingsSection.tsx
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/SettingsSection.tsx
 var inputStyle = {
   flex: "1 1 auto",
   minWidth: 0,
@@ -3356,7 +3507,7 @@ function SettingsSection(_props) {
   ), status === "saved" ? /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-ok)" } }, "\u5DF2\u4FDD\u5B58\u5E76\u70ED\u66F4\u65B0") : null, status === "error" ? /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-fail)" } }, `\u5931\u8D25\uFF1A${error ?? "\u672A\u77E5\u539F\u56E0"}`) : null, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u4FDD\u5B58\u540E\u5199\u5165 ~/.dsh/dsh-elab-cockpit.config.json\uFF0C\u91CD\u542F\u4ECD\u751F\u6548")));
 }
 
-// src/adapters/dsh-web/theme/dsw-map.ts
+// packages/dsh-elab-cockpit/src/adapters/dsh-web/theme/dsw-map.ts
 var ANSI_DARK = [
   ["black", "#4a4842"],
   ["red", "#ef8b8a"],

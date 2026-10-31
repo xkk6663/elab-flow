@@ -84,6 +84,8 @@ export default function App() {
 
   const streamRef = useRef<StreamHandle | null>(null);
   const selectedRef = useRef("");
+  /** 已跟随过的 agent run id：只跟"新出现"的，不每一拍把人手动切走的视图拽回来。 */
+  const followedRunsRef = useRef<Set<string>>(new Set());
 
   const closeStream = useCallback(() => {
     streamRef.current?.close();
@@ -223,6 +225,33 @@ export default function App() {
     void loadAll(true);
     return () => closeStream();
   }, [loadAll, closeStream]);
+
+  /**
+   * agent 自动跟随工程（2s 轮询活动 run）。
+   *
+   * ★ 为什么需要：agent 通过工具在**别的工程**起跑时，本驾驶舱若停在旧工程，
+   *   阶段轨/日志画面与真实现场脱节 —— 用户看到的是"没在跑"。
+   *   只跟随**新出现**的 agent run（记 id），人工发起的 run 本来就在本地接管。
+   *   agent 与人共用同一把仲裁锁，所以同一时刻至多一条活动 run。
+   */
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const { active } = await api.runs();
+          const a = active.find((x) => x.alive !== false && x.actor === "agent");
+          if (!a || followedRunsRef.current.has(a.run)) return;
+          // 工程目录还没加载完 → 不记 id，下一拍照样会重试
+          if (!catalog?.projects.some((p) => p.name === a.project)) return;
+          followedRunsRef.current.add(a.run);
+          await selectProject(a.project);
+        } catch {
+          /* 轮询失败静默：不影响本地操作 */
+        }
+      })();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [catalog, selectProject]);
 
   /**
    * 启动一个 run。steps 不传 = 后端默认两步（仅 loadAll 兜底用）；
