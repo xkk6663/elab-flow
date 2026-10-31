@@ -749,6 +749,100 @@ def _serial_blocker(mgr: "RunManager") -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  适配包操作（安装 / 卸载 / 校验 / 更新 / 启用）
+# ══════════════════════════════════════════════════════════════════
+class PkgJobManager:
+    """包操作任务簿：**同一时间最多一个**包操作（全局一把锁）。
+
+    ★ 为什么必须异步（202 + 轮询）：
+      ``pkg.install()`` 里含 ``git clone``（无超时）/ 整树哈希 / 复制校验，
+      同步塞进一条 HTTP 请求里，工具层代理的 ``fetch`` 没有超时，UI 就会
+      "转圈到天荒地老"。异步 job 把长任务挪到独立线程，HTTP 立刻返回 202，
+      前端 500ms 轮询 ``/api/pkg/job``。
+
+    ★ 为什么"全局一个"：安装/卸载会改 ``packs/installed`` 与 ``active.json``，
+      两个并发操作会让 discover 看到半成品目录。串行是最便宜的正确答案。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._job: dict | None = None
+        self._thread: threading.Thread | None = None
+        self._reload = None
+
+    def bind(self, reload_cb) -> None:
+        """注入"操作完成后重建 Config"的回调（make_server 里接线）。"""
+        self._reload = reload_cb
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._job is not None and self._job.get("state") in ("queued", "running")
+
+    def current(self) -> dict | None:
+        with self._lock:
+            return dict(self._job) if self._job else None
+
+    def snapshot(self, job_id: str = "") -> dict | None:
+        with self._lock:
+            if not self._job:
+                return None
+            if job_id and job_id != self._job["id"]:
+                return None
+            return dict(self._job)
+
+    def start(self, action: str, name: str, work) -> dict:
+        """登记并启动一个包操作；已有在跑 → 抛 ElabError（路由回 409）。"""
+        with self._lock:
+            if self._job is not None and self._job.get("state") in ("queued", "running"):
+                raise ElabError(
+                    f"已有包操作进行中（{self._job['action']} {self._job['name']}）—— 等它完成")
+            job = {
+                "id": time.strftime("%Y%m%d%H%M%S") + f"-{action}",
+                "action": action,
+                "name": name,
+                "state": "queued",
+                "stage": "排队",
+                "log": [],
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "finished_at": None,
+                "result": None,
+                "error": None,
+            }
+            self._job = job
+            t = threading.Thread(target=self._run, args=(job, work), daemon=True,
+                                 name=f"elab-pkg-{action}")
+            t.start()
+            self._thread = t
+            return dict(job)
+
+    def _run(self, job: dict, work) -> None:
+        def log(msg) -> None:
+            with self._lock:
+                lines = job["log"]
+                lines.append(str(msg))
+                if len(lines) > 200:
+                    del lines[: len(lines) - 200]
+
+        def stage(text: str) -> None:
+            with self._lock:
+                job["stage"] = str(text)
+
+        try:
+            with self._lock:
+                job["state"] = "running"
+            result = work(log, stage)
+            with self._lock:
+                job.update(state="ok", stage="完成", result=result,
+                           finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+            if self._reload is not None:
+                self._reload()
+        except Exception as exc:                   # noqa: BLE001
+            with self._lock:
+                job.update(state="failed", stage="失败", error=str(exc),
+                           finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  HTTP
 # ══════════════════════════════════════════════════════════════════
 class CockpitHandler(BaseHTTPRequestHandler):
@@ -758,6 +852,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
     # 由 make_server 注入
     cfg: Config
     mgr: RunManager
+    pkg_jobs: PkgJobManager
     dist: Path
     sse_sem: threading.Semaphore
 
@@ -851,9 +946,18 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 return self._json(project_cards(self.cfg))
             if path == "/api/packs":
                 # 适配包 / 社区市场投影（内核事实源；工具层只渲染）。
-                # ?market=0 可跳过市场索引读取（离线/慢网络）。
+                # ?market=0 可跳过市场索引读取（离线/慢网络）；?q= 只返回命中的市场条目。
                 with_market = (qs.get("market") or ["1"])[0].lower() not in ("0", "false", "no")
-                return self._json(pkg_mod.status(self.cfg, include_market=with_market))
+                q = (qs.get("q") or [""])[0]
+                return self._json(pkg_mod.status(self.cfg, include_market=with_market,
+                                                 query=q))
+            if path == "/api/pkg/job":
+                # 包操作任务快照（202 后前端 500ms 轮询这里）。
+                job_id = (qs.get("job") or [""])[0]
+                snap = self.pkg_jobs.snapshot(job_id)
+                if snap is None:
+                    return self._err(404, "没有这个包操作任务（或已结束很久）")
+                return self._json(snap)
             if path == "/api/runs":
                 return self._json({"runs": ev_mod.list_runs(self.mgr.runs_dir),
                                    "active": self.mgr.list_active()})
@@ -923,6 +1027,14 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 project = body.get("project") or ""
                 if not project:
                     return self._err(400, "缺少 project")
+                # ★ 安装/卸载适配包期间**冻结闭环**：包操作会改芯片数据与启用状态，
+                #   此刻起 run 会读到半成品配置。与包操作里的反向守卫成对出现。
+                busy_job = self.pkg_jobs.current()
+                if busy_job is not None and busy_job.get("state") in ("queued", "running"):
+                    return self._err(409, (
+                        f"适配包操作进行中（{busy_job.get('action')} {busy_job.get('name')}，"
+                        f"阶段：{busy_job.get('stage')}）—— 闭环已冻结，等它完成后重试"
+                        f"（约束：安装期间冻结闭环）"))
                 # ★ 监视会话 ↔ 闭环互斥（N5 的驾驶舱侧守卫）：flash/debug_verify/monitor
                 #   要用串口/SWD，监视会话握着口 → 与手写通道同款 409，指名道姓。
                 want_steps = set(body.get("steps") or run_mod.DEFAULT_STEPS)
@@ -948,6 +1060,13 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     return self._err(400, "缺少 run")
                 res = self.mgr.cancel(run_id, reason=body.get("reason") or "用户取消")
                 return self._json(res, 200 if res.get("ok") else 409)
+            if u.path.startswith("/api/pkg/"):
+                # 适配包写动作：install / remove / verify / update / activate。
+                # ★ 只收**包名**（不收路径/URL/哈希）：来源与 sha256 由内核自己解析。
+                action = u.path[len("/api/pkg/"):]
+                if action not in ("install", "remove", "verify", "update", "activate"):
+                    return self._err(404, f"未知包操作：{action}")
+                return self._pkg(action, self._body())
             if u.path == "/api/serial":
                 # 手写通道（M3-b）：写一条出去、收一小段回显，一次请求内闭环。
                 # ★ 返回 **200 + ok:false**（而不是 5xx）承载"执行了但没成功"：
@@ -1104,6 +1223,87 @@ class CockpitHandler(BaseHTTPRequestHandler):
             return self._err(400, str(exc))
         except Exception as exc:                       # noqa: BLE001
             return self._fail(exc)
+
+    # ── 适配包写动作（安装 / 卸载 / 校验 / 更新 / 启用）──────────────
+    def _pkg(self, action: str, body: dict):
+        """``POST /api/pkg/*`` —— 包操作的唯一入口。
+
+        语义与 CLI ``elab pkg`` 同源（都调 ``elab.pkg`` 的同名函数）：
+
+            install   202 + job（异步：git clone / 哈希 / 复制可能很久）
+            remove    202 + job（卸载 + 清理平台 skill）
+            update    202 + job（按市场索引升级，缺省全部）
+            verify    200（只读、快，同步返回逐包结果）
+            activate  200（启用一套已装包 + 重生成平台 skill + 重载 Config）
+
+        ★ 运行约束：有闭环在跑 → 包操作 409；有包操作在跑 → 新包操作 409。
+          两者与 ``/api/run`` 的冻结守卫成对（"安装期间冻结闭环"）。
+        ★ 只收包名：来源、sha256 都由内核从市场条目解析，前端无从篡改。
+        """
+        name = str(body.get("name") or "").strip()
+        if action == "verify":
+            return self._json({"ok": True,
+                               "results": pkg_mod.verify(self.cfg, name or None)})
+        active_run = self.mgr.list_active()
+        if active_run:
+            return self._err(409, (
+                f"有闭环正在跑（run={active_run[0].get('run')}，"
+                f"步骤 {'/'.join(active_run[0].get('steps') or [])}）—— "
+                f"等它结束再做包操作（安装/卸载会改芯片数据）"))
+        if self.pkg_jobs.busy():
+            return self._err(409, "已有包操作进行中 —— 等它完成")
+        if not name and action != "update":
+            return self._err(400, "缺少 name（适配包名，如 st/stm32）")
+
+        if action == "activate":
+            rec = pkg_mod.set_active(self.cfg, name, log=lambda *a: None)
+            cfg2 = Config(self.cfg.root)
+            type(self).cfg = cfg2          # 与 /api/adapt 写盘后重载同源
+            self.mgr.cfg = cfg2
+            skills = pkg_mod.regenerate_skills(
+                cfg2, (pkg_mod.discover(cfg2).get(name) or {}).get("chips") or [],
+                log=lambda *a: None)
+            return self._json({**rec, "skills": skills,
+                               "packs": pkg_mod.status(cfg2, include_market=False)}, 200)
+
+        if action == "install":
+            official = bool(body.get("official"))
+            force = bool(body.get("force"))
+
+            def work(log, stage):
+                cfg = type(self).cfg
+                stage("安装：校验清单与来源")
+                rec = pkg_mod.install_entry(cfg, name, official=official,
+                                            force=force, log=log)
+                stage("生成平台 skill")
+                skills = pkg_mod.regenerate_skills(cfg, rec.get("chips"), log)
+                return {**rec, "skills": skills}
+            return self._json(self.pkg_jobs.start("install", name, work), 202)
+
+        if action == "remove":
+            def work(log, stage):
+                cfg = type(self).cfg
+                man = (pkg_mod.discover(cfg).get(name) or {}).get("manifest") or {}
+                platforms = {(man.get("vendor"), man.get("platform"))} if man else set()
+                stage("卸载")
+                rec = pkg_mod.remove(cfg, name, log=log)
+                stage("清理平台 skill")
+                pruned = pkg_mod.prune_skills(cfg, platforms, log)
+                return {**rec, "skills_removed": pruned}
+            return self._json(self.pkg_jobs.start("remove", name, work), 202)
+
+        # update（name 可缺省 = 全部已装包）
+        force = bool(body.get("force"))
+
+        def work(log, stage):
+            cfg = type(self).cfg
+            stage("按市场索引更新")
+            recs = pkg_mod.update(cfg, name or None, force=force, log=log)
+            stage("生成平台 skill")
+            skills = pkg_mod.regenerate_skills(
+                cfg, [c for r in recs for c in r.get("chips") or []], log)
+            return {"updated": recs, "skills": skills}
+        return self._json(self.pkg_jobs.start("update", name, work), 202)
 
     # ── 一键适配（M5.6）────────────────────────────────────────
     def _adapt(self, body: dict):
@@ -1437,11 +1637,20 @@ def make_server(cfg: Config, *, host: str = HOST, port: int = DEFAULT_PORT,
                 dist: Path | None = None, verbose: bool = False,
                 log=print) -> CockpitServer:
     mgr = RunManager(cfg, log=log)
+    pkg_jobs = PkgJobManager()
     handler = type("BoundCockpitHandler", (CockpitHandler,), {})
     handler.cfg = cfg
     handler.mgr = mgr
+    handler.pkg_jobs = pkg_jobs
     handler.dist = Path(dist) if dist else DIST_DIR
     handler.sse_sem = threading.Semaphore(MAX_SSE_CONNS)
+    # 包操作完成后**重建 Config**（芯片/工程对运行中的驾驶舱立即生效）。
+    # 与 /api/adapt 写盘后的重载同源：原子替换类属性，在途请求握旧引用跑完。
+    def _reload_pack_cfg():
+        new_cfg = Config(cfg.root)
+        handler.cfg = new_cfg
+        mgr.cfg = new_cfg
+    pkg_jobs.bind(_reload_pack_cfg)
     srv = CockpitServer((host, port), handler)
     srv.verbose = verbose                                # type: ignore[attr-defined]
     srv.run_manager = mgr                                # type: ignore[attr-defined]

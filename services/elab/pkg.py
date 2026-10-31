@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import _yaml
+from . import skillgen
 from .config import ElabError, to_fwd
 
 #: 内核自描述 API 版本（STEP_META/KERNEL_PLANS 的握手版本）。
@@ -48,6 +49,18 @@ PACK_SCHEMA_VERSION = 1
 
 PACK_FILE = "pack.yaml"
 INSTALL_META = ".installed.json"
+#: 当前启用的适配包（安装目录内的用户本地状态，不入库）。
+#: 语义：**一次只启用一套** —— 内核的 ``Config.chips`` / ``vendor_fingerprints``
+#: 只读它；其余已装包仍留在本地，切换只需改这一个文件。
+ACTIVE_FILE = "active.json"
+
+#: 远程市场索引的内存缓存（raw URL → (monotonic_ts, data)）。
+#: ★ 为什么必须缓存：驾驶舱市场页签是**输入即搜**（每敲一个字就一次
+#:   ``GET /api/packs?q=``），而 ``load_market`` 每次都真联网拉 index.json
+#:   （timeout 15s）。不缓存 = 把按键速度绑到网络延迟上。
+#: 只缓存"真拉到"的结果；回退（缓存文件 / 本仓索引）不进缓存。
+_MARKET_CACHE: dict = {}
+_MARKET_TTL_S = 300.0
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 _SEMVER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[+-][0-9A-Za-z.+-]+)?$")
@@ -112,6 +125,64 @@ def install_root(cfg) -> Path:
 def official_root(cfg) -> Path:
     """随仓分发的官方包源目录（**不是**安装目录）。"""
     return Path(cfg.root) / "packs" / "official"
+
+
+# ── 启用状态（一次只启用一套）──────────────────────────────────────
+def active_path(cfg) -> Path:
+    """启用状态文件的位置（安装目录内，随 ``packs/installed`` 一起不入库）。"""
+    return install_root(cfg) / ACTIVE_FILE
+
+
+def read_active(cfg) -> str:
+    """读取当前启用的包名；文件缺失/损坏 → 空串（不抛错）。"""
+    try:
+        data = json.loads(active_path(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str((data or {}).get("name") or "").strip() if isinstance(data, dict) else ""
+
+
+def active_pack(cfg, packs: dict | None = None) -> dict | None:
+    """当前启用的包记录；从未启用时回退到**已装列表的第一个**（排序稳定）。
+
+    ★ 为什么需要回退：``packs/installed`` 可能是"先手工装好、还没有 active.json"
+      的老状态。此时把第一个已装包当作启用，行为与"只有一个已装包"完全一致，
+      也不会因为缺一个元文件就让内核突然无芯片可用。
+    """
+    packs = discover(cfg) if packs is None else packs
+    name = read_active(cfg)
+    rec = packs.get(name)
+    if rec is not None and rec.get("installed"):
+        return rec
+    installed = sorted(n for n, r in packs.items() if r.get("installed"))
+    return packs[installed[0]] if installed else None
+
+
+def set_active(cfg, name: str, *, log=print) -> dict:
+    """启用一套已安装的适配包（其他包保留在本地，随时切回）。"""
+    name = str(name or "").strip()
+    packs = discover(cfg)
+    rec = packs.get(name)
+    if not rec:
+        raise PackError(f"未安装适配包：{name}")
+    if not rec.get("installed"):
+        raise PackError(
+            f"{name} 只在官方源目录（{rec['dir']}），尚未安装；"
+            f"先安装再启用（elab pkg install {name} --from {rec['dir']}）")
+    path = active_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"name": name, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+        ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log(f"[elab] ✓ 已启用适配包 {name}（一次只启用一套）")
+    return {"active": name, "path": to_fwd(path)}
+
+
+def clear_active(cfg) -> None:
+    try:
+        active_path(cfg).unlink()
+    except OSError:
+        pass
 
 
 # ── 清单读取 / 校验 ────────────────────────────────────────────────
@@ -448,6 +519,9 @@ def install(cfg, source=None, *, local=None, git=None, ref=None, archive=None,
             subdir="", sha256: str | None = None, force: bool = False,
             status: str | None = None, log=print) -> dict:
     """安装一个适配包到 ``packs/installed/<name>/``。"""
+    # 安装前先记下"有没有启用包"：没有则装完自动启用（打开即用）。
+    # ★ 必须在复制之前读 —— 安装落盘后再判断，新包自己就成了"可回退的第一个"。
+    had_active = active_pack(cfg) is not None
     with _materialize(source, local=local, git=git, ref=ref, archive=archive,
                        subdir=subdir, sha256=sha256) as (src, origin):
         man = read_manifest(src)
@@ -492,6 +566,9 @@ def install(cfg, source=None, *, local=None, git=None, ref=None, archive=None,
         }
         (dest / INSTALL_META).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if not had_active:
+            # 第一次装包：自动启用（否则"装了但没芯片"会让人以为安装失败）
+            set_active(cfg, name, log=log)
         log(f"[elab] ✓ 已安装适配包 {name}@{meta['version']} → {to_fwd(dest)}")
         return {**meta, "dir": to_fwd(dest), "chips": refs_in_pack(dest)}
 
@@ -526,9 +603,18 @@ def remove(cfg, name: str, *, force=False, log=print) -> dict:
     dest = Path(rec["dir"])
     if not force and not str(dest).startswith(str(install_root(cfg))):
         raise PackError(f"拒绝删除非安装目录：{dest}")
+    was_active = read_active(cfg) == name
     shutil.rmtree(dest)
+    if was_active:
+        # 卸载当前启用包 → 顺延到下一个已装包；没有就直接清空启用状态。
+        rest = sorted(n for n, r in packs.items()
+                      if r.get("installed") and n != name)
+        if rest:
+            set_active(cfg, rest[0], log=log)
+        else:
+            clear_active(cfg)
     log(f"[elab] ✓ 已卸载适配包 {name}（{to_fwd(dest)}）")
-    return {"name": name, "dir": to_fwd(dest)}
+    return {"name": name, "dir": to_fwd(dest), "active": read_active(cfg)}
 
 
 def verify(cfg, name: str | None = None) -> list[dict]:
@@ -549,6 +635,114 @@ def verify(cfg, name: str | None = None) -> list[dict]:
         out.append({"name": n, "ok": not problems, "sha256": actual,
                     "problems": problems, "dir": rec["dir"]})
     return out
+
+
+# ── 安装入口（市场名 / 官方源）+ 平台 skill 重生成 ─────────────────
+def find_official(cfg, name: str) -> Path | None:
+    """在 ``packs/official`` 下按包名找到源目录（离线安装用）。"""
+    base = official_root(cfg)
+    if not base.is_dir():
+        return None
+    for path in sorted(base.rglob(PACK_FILE)):
+        try:
+            man = read_manifest(path.parent)
+        except PackError:
+            continue
+        if str(man.get("name") or "") == name:
+            return path.parent
+    return None
+
+
+def install_entry(cfg, name: str, *, official: bool = False,
+                  force: bool = False, log=print) -> dict:
+    """按**包名**安装：``official=true`` 走本仓官方源，否则走市场索引。
+
+    ★ 只收包名、不收路径/URL/哈希（HTTP 面同款）：来源解析与 sha256 全部由
+      内核自己从市场条目里取，前端即使被篡改也指不到任意磁盘路径。
+    """
+    name = str(name or "").strip()
+    if not name:
+        raise PackError("缺少包名（如 st/stm32）")
+    if official:
+        src = find_official(cfg, name)
+        if src is None:
+            raise PackError(f"官方源里没有适配包：{name}（packs/official）")
+        return install(cfg, local=src, force=force, status="official", log=log)
+    entry = market_entry(cfg, name)
+    if not entry:
+        raise PackError(f"市场索引里没有适配包：{name}（可先 elab pkg search）")
+    kwargs = entry_source(entry, entry.get("_base", ""))
+    return install(cfg, sha256=entry.get("sha256"), force=force,
+                   status=entry.get("status"), log=log, **kwargs)
+
+
+def update(cfg, name: str | None = None, *, force: bool = False,
+           log=print) -> list[dict]:
+    """按市场索引更新已装包（缺省 = 全部）；CLI 与 HTTP 共用这一份实现。"""
+    st = status(cfg, include_market=False)
+    names = [name] if name else [r["name"] for r in st["installed"] if r.get("installed")]
+    if not names:
+        raise PackError("没有可更新的已装包")
+    results: list[dict] = []
+    for n in names:
+        entry = market_entry(cfg, n)
+        if not entry:
+            log(f"[elab] ! {n} 不在市场索引中，跳过")
+            continue
+        cur = next((r for r in st["installed"] if r["name"] == n), {})
+        if cur.get("version") == entry.get("version") and not force:
+            log(f"[elab] — {n} 已是最新 v{entry.get('version')}")
+            continue
+        kwargs = entry_source(entry, entry.get("_base", ""))
+        results.append(install(cfg, sha256=entry.get("sha256"), force=True,
+                               status=entry.get("status"), log=log, **kwargs))
+    return results
+
+
+def regenerate_skills(cfg, chip_refs, log=print) -> list[dict]:
+    """安装/启用后重生成平台 skill（失败只提示，不回滚安装）。
+
+    ★ 只在**当前启用包**的芯片上生成：一次只启用一套，skill 也应只描述这一套。
+    """
+    if not chip_refs:
+        return []
+    cfg2 = Config(cfg.root)          # 重载：新包已落盘
+    written: list[dict] = []
+    seen: set = set()
+    for ref in chip_refs:
+        chip = cfg2.chips.get(ref)
+        if not chip:
+            continue
+        key = (chip.get("vendor"), chip.get("platform") or chip.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            written += skillgen.generate(cfg2, chip_ref=ref, log=log)
+        except ElabError as exc:
+            log(f"[elab] ! 平台 skill 未生成：{exc}")
+            break
+    return written
+
+
+def prune_skills(cfg, platforms, log=print) -> list[dict]:
+    """卸载包后清理不再被任何已装芯片使用的平台 skill（含 DSH 镜像）。"""
+    cfg2 = Config(cfg.root)
+    alive = {(c.get("vendor"), c.get("platform") or c.get("id"))
+             for c in cfg2.chips.values()}
+    removed: list[dict] = []
+    for vendor, platform in platforms:
+        if (vendor, platform) in alive:
+            continue
+        for path in (cfg2.root / "skills" / vendor / platform / "SKILL.md",
+                     cfg2.root / ".agents" / "skills" / platform / "SKILL.md"):
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append({"path": to_fwd(path)})
+            log(f"[elab] — 已清理平台 skill：{to_fwd(path)}")
+    return removed
 
 
 # ── 市场索引 ──────────────────────────────────────────────────────
@@ -579,7 +773,12 @@ def load_market(cfg) -> dict:
                 "packs": [], "error": "未配置市场索引（elab.host.yaml: packs.market）"}
     p = Path(spec)
     warn = ""
+    remote_ok = False
     if spec.startswith(("http://", "https://")):
+        hit = _MARKET_CACHE.get(spec)
+        if hit is not None and time.monotonic() - hit[0] < _MARKET_TTL_S:
+            # 浅拷贝即可：消费方（status/market_entry）只读，不原地改。
+            return dict(hit[1])
         cache = Path(cfg.root) / ".work" / "pkg" / "market.json"
         try:
             with urllib.request.urlopen(spec, timeout=15) as resp:  # noqa: S310
@@ -587,6 +786,7 @@ def load_market(cfg) -> dict:
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_bytes(raw)
             path = spec
+            remote_ok = True
         except Exception as exc:                   # noqa: BLE001
             if cache.exists():
                 raw = cache.read_bytes()
@@ -625,6 +825,8 @@ def load_market(cfg) -> dict:
         data["_base"] = to_fwd(cfg.root)
     else:
         data["_base"] = to_fwd(Path(path).parent)
+    if remote_ok:
+        _MARKET_CACHE[spec] = (time.monotonic(), data)
     return data
 
 
@@ -653,17 +855,24 @@ def market_entry(cfg, name: str) -> dict | None:
     return None
 
 
+def entry_matches(entry: dict, query: str) -> bool:
+    """市场条目是否命中查询（名称 / 厂商 / 平台 / 芯片 / 描述 / license）。"""
+    q = (query or "").lower().strip()
+    if not q:
+        return True
+    blob = " ".join(str(entry.get(k) or "") for k in
+                    ("name", "vendor", "platform", "description", "license"))
+    blob += " " + " ".join(str(x) for x in (entry.get("chips") or []))
+    return q in blob.lower()
+
+
 def search(cfg, query: str = "") -> list[dict]:
     """搜索市场索引（名称 / 厂商 / 平台 / 芯片 / 描述）。"""
     market = load_market(cfg)
     installed = discover(cfg)
-    q = (query or "").lower().strip()
     out = []
     for entry in market.get("packs") or []:
-        blob = " ".join(str(entry.get(k) or "") for k in
-                        ("name", "vendor", "platform", "description", "license"))
-        blob += " " + " ".join(str(x) for x in (entry.get("chips") or []))
-        if q and q not in blob.lower():
+        if not entry_matches(entry, query):
             continue
         e = dict(entry)
         e["installed"] = bool((installed.get(entry.get("name")) or {}).get("installed"))
@@ -751,10 +960,12 @@ def index_problems(root: Path, base: Path, index_path: Path) -> list[str]:
 
 
 # ── 驾驶舱投影 ────────────────────────────────────────────────────
-def status(cfg, *, include_market=True) -> dict:
+def status(cfg, *, include_market=True, query: str = "") -> dict:
     """给 ``/api/packs`` / capabilities 用的只读投影。"""
     packs = discover(cfg)
     roots = pack_roots(cfg)
+    active = active_pack(cfg, packs)
+    active_name = (active or {}).get("name") or ""
     installed = []
     for rec in packs.values():
         man = rec["manifest"]
@@ -768,16 +979,21 @@ def status(cfg, *, include_market=True) -> dict:
             "description": man.get("description") or "",
             "dir": rec["dir"],
             "installed": rec["installed"],
+            # ★ 一次只启用一套：界面据此画「启用中 / 启用」按钮
+            "active": rec["name"] == active_name,
             "sha256": rec["sha256"],
             "chips": rec["chips"],
             "requires": man.get("requires") or {},
+            "compatible": {"ok": not check_requires(man), "reasons": check_requires(man)},
         })
     data = {
         "roots": [to_fwd(p) for p in roots],
         "install_root": to_fwd(install_root(cfg)),
         "official_root": to_fwd(official_root(cfg)),
+        "active": active_name,
         "installed": installed,
-        "chips": sorted({c for r in installed for c in r["chips"]}),
+        # 芯片只来自**当前启用包**（与 Config.chips 同一事实源）
+        "chips": sorted({c for r in installed if r["active"] for c in r["chips"]}),
         "schema_version": PACK_SCHEMA_VERSION,
         "kernel_api": KERNEL_API_VERSION,
     }
@@ -788,7 +1004,9 @@ def status(cfg, *, include_market=True) -> dict:
             "path": market.get("path", ""),
             "error": market.get("error"),
             "warning": market.get("warning"),
-            "packs": [{**e, "installed": e.get("name") in installed_names}
-                      for e in market.get("packs") or []],
+            "packs": [{**e, "installed": e.get("name") in installed_names,
+                       "compatible": {"ok": not check_requires(e), "reasons": check_requires(e)}}
+                      for e in market.get("packs") or []
+                      if entry_matches(e, query)],
         }
     return data

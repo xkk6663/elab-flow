@@ -221,5 +221,80 @@ class TestMarket(PackTestBase):
         self.assertEqual([e["name"] for e in data["packs"]], ["acme/demo"])
 
 
+class TestActivePack(PackTestBase):
+    """一次只启用一套：active.json 的写入 / 回退 / 卸载顺延。"""
+
+    def _install(self, name: str) -> Path:
+        manifest = PACK_YAML.replace("name: acme/demo", f"name: {name}") \
+                             .replace("platform: demo", f"platform: {name.split('/')[1]}")
+        src = self.make_pack(name=name, manifest=manifest)
+        pkg.install(self.cfg, local=src, log=lambda *a, **k: None)
+        return src
+
+    def test_first_install_auto_activates(self):
+        self._install("acme/demo")
+        self.assertEqual(pkg.read_active(self.cfg), "acme/demo")
+        self.assertEqual(pkg.active_pack(self.cfg)["name"], "acme/demo")
+
+    def test_second_install_keeps_first_active(self):
+        self._install("acme/demo")
+        self._install("acme/demo2")
+        self.assertEqual(pkg.read_active(self.cfg), "acme/demo")
+        # 芯片只来自启用的那一套（另一套已装但不生效）
+        self.assertIn("acme/demo1", self.cfg.chips)
+        self.assertEqual(self.cfg.chips["acme/demo1"]["_pack"], "acme/demo")
+
+    def test_set_active_switches_chips(self):
+        self._install("acme/demo")
+        self._install("acme/demo2")
+        pkg.set_active(self.cfg, "acme/demo2", log=lambda *a, **k: None)
+        cfg2 = Config(self.root)
+        self.assertEqual(pkg.read_active(cfg2), "acme/demo2")
+        self.assertIn("acme/demo1", cfg2.chips)
+        self.assertEqual(cfg2.chips["acme/demo1"]["_pack"], "acme/demo2")
+        self.assertEqual(pkg.status(cfg2, include_market=False)["active"], "acme/demo2")
+
+    def test_reject_activating_uninstalled_official_source(self):
+        # 官方源目录不是安装副本 → 不能启用
+        official = self.root / "packs" / "official" / "acme" / "demo"
+        official.mkdir(parents=True)
+        self.make_pack()  # 只在 src 里造，不安装
+        (official / "pack.yaml").write_text(PACK_YAML, encoding="utf-8")
+        (official / "chips").mkdir(parents=True)
+        (official / "chips" / "demo1.yaml").write_text(CHIP_YAML, encoding="utf-8")
+        with self.assertRaises(pkg.PackError):
+            pkg.set_active(self.cfg, "acme/demo", log=lambda *a, **k: None)
+
+    def test_remove_active_falls_back_to_next(self):
+        self._install("acme/demo")
+        self._install("acme/demo2")
+        pkg.remove(self.cfg, "acme/demo", log=lambda *a, **k: None)
+        self.assertEqual(pkg.read_active(self.cfg), "acme/demo2")
+
+    def test_remove_last_active_clears(self):
+        self._install("acme/demo")
+        pkg.remove(self.cfg, "acme/demo", log=lambda *a, **k: None)
+        self.assertEqual(pkg.read_active(self.cfg), "")
+        self.assertEqual(Config(self.root).chips, {})
+
+    def test_status_marks_active_and_official_source(self):
+        self._install("acme/demo")
+        official = self.root / "packs" / "official" / "acme" / "src-demo"
+        official.mkdir(parents=True)
+        (official / "pack.yaml").write_text(
+            PACK_YAML.replace("name: acme/demo", "name: acme/src-demo")
+                     .replace("platform: demo", "platform: src-demo"), encoding="utf-8")
+        (official / "chips").mkdir()
+        (official / "chips" / "demo1.yaml").write_text(CHIP_YAML, encoding="utf-8")
+        st = pkg.status(self.cfg, include_market=False)
+        by = {r["name"]: r for r in st["installed"]}
+        self.assertTrue(by["acme/demo"]["active"])
+        self.assertTrue(by["acme/demo"]["installed"])
+        self.assertFalse(by["acme/src-demo"]["active"])
+        self.assertFalse(by["acme/src-demo"]["installed"])
+        self.assertEqual(st["active"], "acme/demo")
+        self.assertEqual(st["chips"], ["acme/demo1"])
+
+
 if __name__ == "__main__":
     unittest.main()

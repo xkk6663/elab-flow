@@ -86,18 +86,27 @@ class Config:
         return self._packs
 
     @property
+    def active_pack(self) -> dict | None:
+        """当前启用的适配包（``packs/installed/active.json``；一次只启用一套）。"""
+        from . import pkg
+        return pkg.active_pack(self, self.packs)
+
+    @property
     def chips(self) -> dict:
         """返回 ``{ref: chip}``，ref 同时支持 ``vendor/id`` 与裸 ``id``。
 
-        ★ 骨架仓**不再直读根目录 ``chips/``**：芯片数据只来自
-          ``packs/installed/<vendor>/<platform>/chips/*.yaml``。
-          没有安装任何包时返回空字典 —— 这就是"通用工具链"的形态。
+        ★ 骨架仓**不再直读根目录 ``chips/``**：芯片数据只来自**当前启用**的
+          那个适配包（``packs/installed/active.json``）—— 一次只启用一套，其余
+          已装包仍留在本地，切换只需改启用状态。没有启用包时返回空字典，
+          这就是"通用工具链"的形态。
         """
         if self._chips is None:
             out: dict[str, dict] = {}
             by_ref: dict[str, str] = {}
             by_id: dict[str, str] = {}
-            for rec in self.packs.values():
+            active = self.active_pack
+            records = [active] if active else []
+            for rec in records:
                 chips_dir = Path(rec["dir"]) / "chips"
                 if not chips_dir.is_dir():
                     continue
@@ -125,9 +134,10 @@ class Config:
 
     @property
     def vendor_fingerprints(self) -> list[dict]:
-        """已安装包声明的厂商指纹（adapt 探测器的**唯一事实源**）。"""
+        """当前启用包声明的厂商指纹（adapt 探测器的**唯一事实源**）。"""
         out: list[dict] = []
-        for rec in self.packs.values():
+        active = self.active_pack
+        for rec in ([active] if active else []):
             man = rec.get("manifest") or {}
             for fp in man.get("vendor_fingerprints") or []:
                 if not isinstance(fp, dict):

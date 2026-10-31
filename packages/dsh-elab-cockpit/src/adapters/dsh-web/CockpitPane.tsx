@@ -40,6 +40,7 @@ import type { TailBuffers, TailLine } from './EvidenceTail.tsx'
 import { SerialPane } from './SerialPane.tsx'
 import type { SerialPortInfo } from './SerialPane.tsx'
 import { useSerialStream } from './serial/useSerialStream.ts'
+import { PackSettingsView } from './PackSettingsView.tsx'
 
 /** 每个通道的环形缓冲（最多 TAIL_CAPACITY 行）。 */
 function pushLine(buf: TailLine[], line: TailLine): void {
@@ -243,6 +244,13 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   const [focusStep, setFocusStep] = useState<string | null>(null)
   const [tailVersion, setTailVersion] = useState(0)
   const [cleanTarget, setCleanTarget] = useState<string | null>(null)
+  /**
+   * 视图开关：'work' = 闭环面板；'settings' = 芯片插件市场 / 芯片包管理。
+   * ★ 刻意**不做**成 DSH 的新槽位：设置视图在面板内部整幅覆盖（方案 A，
+   *   见 docs/技术分析_侧边栏设置页与芯片插件市场.md）——槽位契约不变，
+   *   `verify-client-contract.mjs` 的 3 槽位断言无需改动。
+   */
+  const [view, setView] = useState<'work' | 'settings'>('work')
 
   // ── 串口：端口/波特率来自 capabilities；数据面统一在 useSerialStream ──
   const [serialMeta, setSerialMeta] = useState<{
@@ -450,7 +458,7 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     project: snap.project,
     port: serialPort,
     baud: serialBaud,
-    enabled: channel === 'serial' && visible === true,
+    enabled: channel === 'serial' && visible === true && view === 'work',
     sessionId,
   })
 
@@ -508,6 +516,19 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   const tier: 'narrow' | 'mid' | 'wide' = paneWidth >= 700 ? 'wide' : paneWidth >= 420 ? 'mid' : 'narrow'
 
   const plans: PlanView[] = snap.plans
+
+  // ── 设置视图：覆盖整个侧边栏（芯片插件市场 / 包管理 / 内核设置）──
+  //   ★ 放在所有 hook 之后（hook 调用顺序必须稳定），且在 work 视图的 return 之前。
+  if (view === 'settings') {
+    return (
+      <PackSettingsView
+        api={elabApi}
+        sessionId={sessionId}
+        runActive={running}
+        onBack={() => setView('work')}
+      />
+    )
+  }
 
   return (
     <div
@@ -608,6 +629,25 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           }}
         >
           {'\u21bb'}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setView('settings')}
+          title="芯片插件市场 / 芯片包管理 / 内核设置"
+          aria-label="打开设置"
+          style={{
+            flex: '0 0 auto',
+            padding: '0 5px',
+            fontSize: '11px',
+            borderRadius: '4px',
+            border: '1px solid var(--elab-border)',
+            background: 'transparent',
+            color: 'var(--elab-fg-secondary)',
+            cursor: 'pointer',
+          }}
+        >
+          {'\u2699'}
         </button>
       </div>
 

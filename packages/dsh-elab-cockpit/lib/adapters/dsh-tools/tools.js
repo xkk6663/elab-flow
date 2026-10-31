@@ -183,6 +183,85 @@ function chunkText(dataB64) {
     };
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * 包写操作：`POST /api/pkg/<action>` → 202 + job → 轮询到终态。
+ *
+ * ★ install **不** gate `allowAgentWrite`（用户明确要求 agent 能自行安装芯片包）：
+ *   安装只写 `packs/installed/`，是"装驱动"级别的操作，不碰硬件、不碰业务工程。
+ * ★ 内核同一时刻只允许一个包操作（有闭环在跑会 409），失败原因原样带回。
+ */
+async function pkgAction(deps, action, body, waitS) {
+    const first = await cockpit(deps, `/api/pkg/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    let snap = first;
+    const deadline = Date.now() + Math.max(5, waitS) * 1000;
+    while ((snap.state === 'queued' || snap.state === 'running') && Date.now() < deadline) {
+        await sleep(500);
+        snap = await cockpit(deps, `/api/pkg/job?job=${encodeURIComponent(first.id)}`);
+    }
+    const stillRunning = snap.state === 'queued' || snap.state === 'running';
+    return {
+        ok: snap.state === 'ok',
+        job: snap.id,
+        action: snap.action,
+        name: snap.name,
+        state: snap.state,
+        stage: snap.stage,
+        ...(snap.error !== null && snap.error !== undefined && snap.error !== '' ? { error: snap.error } : {}),
+        log: (snap.log ?? []).slice(-40),
+        ...(snap.result !== null && snap.result !== undefined ? { result: snap.result } : {}),
+        ...(stillRunning
+            ? { waiting: true, note: '仍在后台进行（git clone / 哈希可能较久）；稍后用 action=status 查看结果' }
+            : {}),
+    };
+}
+/** 适配包投影 → agent 可读的紧凑摘要（不把整份 status JSON 塞进上下文）。 */
+function packsSummary(data) {
+    const installed = Array.isArray(data.installed)
+        ? data.installed.filter((p) => p.installed === true)
+        : [];
+    return {
+        active: String(data.active ?? ''),
+        chips: data.chips ?? [],
+        installed: installed.map((p) => ({
+            name: String(p.name ?? ''),
+            version: p.version ?? null,
+            status: String(p.status ?? ''),
+            active: p.active === true,
+            compatible: p.compatible ?? null,
+        })),
+        official_source: Array.isArray(data.installed)
+            ? data.installed
+                .filter((p) => p.status === 'official' && p.installed !== true)
+                .map((p) => String(p.name ?? ''))
+            : [],
+    };
+}
+/** 搜索结果 → agent 可读的紧凑卡片。 */
+function marketSummary(data, q) {
+    const market = (data.market ?? {});
+    const packs = Array.isArray(market.packs)
+        ? market.packs.map((p) => ({
+            name: String(p.name ?? ''),
+            version: p.version ?? null,
+            vendor: p.vendor ?? null,
+            platform: p.platform ?? null,
+            status: p.status ?? null,
+            chips: p.chips ?? [],
+            installed: p.installed === true,
+            compatible: p.compatible ?? null,
+        }))
+        : [];
+    return {
+        query: q,
+        count: packs.length,
+        packs,
+        ...(market.error !== null && market.error !== undefined ? { market_error: market.error } : {}),
+    };
+}
 /** 注册全部 elab_* 工具（autoExposeTools=true 时由入口调用）。 */
 export function registerElabTools(register, deps) {
     const disposers = [];
@@ -672,6 +751,99 @@ export function registerElabTools(register, deps) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: write ? 'write' : 'probe', path: args.path, ...(args.name !== undefined ? { name: args.name } : {}) }),
             });
+        },
+    }));
+    add(makeTool({
+        name: 'elab_pkg',
+        description: '芯片适配包（一切芯片差异皆包）：status 查看已装/启用、search 搜索社区市场、' +
+            'install 安装（按包名，source/sha256 由内核解析；official=true 装本机官方源内置包）、' +
+            'activate 启用（一次只启用一套，其余保留在本地）、remove/update/verify 卸载/更新/校验。' +
+            '安装期间内核会冻结闭环（有 run 在跑时包操作返回 409）。agent 可自行安装。',
+        parameters: {
+            action: {
+                type: 'string',
+                required: true,
+                description: 'status / search / install / activate / remove / update / verify',
+            },
+            name: { type: 'string', description: '包名（如 st/stm32、artery/at32；install/activate/remove 必填）' },
+            query: { type: 'string', description: 'search 关键词（名称 / 厂商 / 平台，如 stm32、at32）' },
+            official: { type: 'boolean', description: 'install 时 true = 装本机官方源（离线，如 st/stm32）' },
+            force: { type: 'boolean', description: 'install/update 时强制重装同版本' },
+            wait_s: { type: 'number', description: 'install/remove/update 等待秒数（默认 180；超时则返回后台 job 状态）' },
+        },
+        output: jsonOutput,
+        presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 芯片包管理' }),
+        async execute(args) {
+            const action = args.action;
+            const waitS = Math.min(900, Math.max(5, Math.round(args.wait_s ?? 180)));
+            const needName = ['install', 'activate', 'remove'].includes(action);
+            if (needName && (args.name === undefined || args.name === '')) {
+                return { ok: false, code: 'missing-name', note: '该 action 需要 name（如 st/stm32）' };
+            }
+            try {
+                if (action === 'status') {
+                    const data = await cockpit(deps, '/api/packs?market=0');
+                    return { ok: true, ...packsSummary(data), roots: data.roots ?? [], install_root: data.install_root ?? '' };
+                }
+                if (action === 'search') {
+                    const q = args.query ?? '';
+                    const qs = new URLSearchParams({ market: '1' });
+                    if (q !== '')
+                        qs.set('q', q);
+                    const data = await cockpit(deps, `/api/packs?${qs.toString()}`);
+                    return { ok: true, ...marketSummary(data, q) };
+                }
+                if (action === 'install') {
+                    return await pkgAction(deps, 'install', {
+                        name: args.name,
+                        ...(args.official === true ? { official: true } : {}),
+                        ...(args.force === true ? { force: true } : {}),
+                    }, waitS);
+                }
+                if (action === 'remove') {
+                    return await pkgAction(deps, 'remove', { name: args.name }, waitS);
+                }
+                if (action === 'update') {
+                    return await pkgAction(deps, 'update', {
+                        ...(args.name !== undefined && args.name !== '' ? { name: args.name } : {}),
+                        ...(args.force === true ? { force: true } : {}),
+                    }, waitS);
+                }
+                if (action === 'verify') {
+                    return await cockpit(deps, '/api/pkg/verify', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...(args.name !== undefined && args.name !== '' ? { name: args.name } : {}) }),
+                    });
+                }
+                if (action === 'activate') {
+                    const r = await cockpit(deps, '/api/pkg/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: args.name }),
+                    });
+                    const packs = (r.packs ?? {});
+                    return {
+                        ok: true,
+                        active: r.active ?? args.name,
+                        skills: r.skills ?? [],
+                        ...(Object.keys(packs).length > 0 ? { packs: packsSummary(packs) } : {}),
+                    };
+                }
+                return {
+                    ok: false,
+                    code: 'bad-action',
+                    note: `action 必须是 status/search/install/activate/remove/update/verify：${action}`,
+                };
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    code: 'pkg-error',
+                    error: error instanceof Error ? error.message : String(error),
+                    note: '有闭环在跑时包操作会被 409 拦住；等 run 结束后重试',
+                };
+            }
         },
     }));
     add(makeTool({

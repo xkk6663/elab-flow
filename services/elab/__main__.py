@@ -183,6 +183,9 @@ def _parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-skill", action="store_true", help="安装后不自动重生成平台 skill")
 
     sp = _pkg_sub("list", "列出已安装适配包与芯片")
+    sp = _pkg_sub("activate", "启用某套已装适配包（一次只启用一套，其余保留在本地）")
+    sp.add_argument("name", help="包名（如 st/stm32）")
+    sp.add_argument("--no-skill", action="store_true", help="启用后不自动重生成平台 skill")
     sp = _pkg_sub("remove", "卸载适配包（只删安装目录）")
     sp.add_argument("name", help="包名（如 st/stm32）")
     sp.add_argument("--force", action="store_true", help="跳过目录范围保护（谨慎）")
@@ -667,25 +670,7 @@ def cmd_run(cfg: Config, args) -> int:
 # ── pkg：适配包 / 社区市场 ─────────────────────────────────────────
 def _regen_skills(cfg: Config, chip_refs, log) -> list[dict]:
     """安装/更新后重生成平台 skill（失败只提示，不回滚安装）。"""
-    if not chip_refs:
-        return []
-    cfg2 = Config(cfg.root)          # 重载：新包已落盘
-    written: list[dict] = []
-    seen: set = set()
-    for ref in chip_refs:
-        chip = cfg2.chips.get(ref)
-        if not chip:
-            continue
-        key = (chip.get("vendor"), chip.get("platform") or chip.get("id"))
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            written += skillgen.generate(cfg2, chip_ref=ref, log=log)
-        except ElabError as exc:
-            log(f"[elab] ! 平台 skill 未生成：{exc}")
-            break
-    return written
+    return pkg_mod.regenerate_skills(cfg, chip_refs, log)
 
 
 def _install_kwargs(cfg: Config, args) -> tuple[dict, dict | None]:
@@ -707,22 +692,7 @@ def _install_kwargs(cfg: Config, args) -> tuple[dict, dict | None]:
 
 def _prune_skills(cfg: Config, platforms, log) -> list[dict]:
     """卸载包后清理不再被任何已装芯片使用的平台 skill（含 DSH 镜像）。"""
-    cfg2 = Config(cfg.root)
-    alive = {(c.get("vendor"), c.get("platform") or c.get("id"))
-             for c in cfg2.chips.values()}
-    removed: list[dict] = []
-    for vendor, platform in platforms:
-        if (vendor, platform) in alive:
-            continue
-        for path in (cfg2.root / "skills" / vendor / platform / "SKILL.md",
-                     cfg2.root / ".agents" / "skills" / platform / "SKILL.md"):
-            try:
-                path.unlink()
-            except OSError:
-                continue
-            removed.append({"path": to_fwd(path)})
-            log(f"[elab] — 已清理平台 skill：{to_fwd(path)}")
-    return removed
+    return pkg_mod.prune_skills(cfg, platforms, log)
 
 
 def cmd_pkg(cfg: Config, args) -> int:
@@ -791,16 +761,27 @@ def cmd_pkg(cfg: Config, args) -> int:
                   "`elab pkg bootstrap` 装官方包，`elab pkg search` 浏览社区市场）")
         for r in st["installed"]:
             mark = "已装" if r.get("installed") else "源"
-            print(f"  {mark} {r['name']:<18} v{r.get('version'):<7} "
+            on = "启用" if r.get("active") else "　　"
+            print(f"  {mark} {on} {r['name']:<18} v{r.get('version'):<7} "
                   f"[{r.get('status')}] {r.get('dir')}")
             print(f"       chips：{', '.join(r.get('chips') or []) or '(无)'}")
         return 0
 
+    if cmd == "activate":
+        rec = pkg_mod.set_active(cfg, args.name, log=log)
+        written = [] if args.no_skill else _regen_skills(
+            cfg, (pkg_mod.discover(cfg).get(args.name) or {}).get("chips") or [], log)
+        if args.json:
+            print(json.dumps({**rec, "skills": written}, ensure_ascii=False, indent=2))
+        else:
+            print(f"[elab] 已启用：{args.name}（其余已装包保留在本地，随时切回）")
+        return 0
+
     if cmd == "remove":
-        platforms = set()
-        for ref in (pkg_mod.discover(cfg).get(args.name) or {}).get("chips") or []:
-            chip = cfg.chips.get(ref) or {}
-            platforms.add((chip.get("vendor"), chip.get("platform") or chip.get("id")))
+        rec_pack = pkg_mod.discover(cfg).get(args.name) or {}
+        man = rec_pack.get("manifest") or {}
+        # 平台 skill 的归属直接看清单（不能经 cfg.chips —— 它只含当前启用包）
+        platforms = {(man.get("vendor"), man.get("platform"))} if man else set()
         rec = pkg_mod.remove(cfg, args.name, force=args.force, log=log)
         pruned = _prune_skills(cfg, platforms, log)
         if args.json:
@@ -809,25 +790,7 @@ def cmd_pkg(cfg: Config, args) -> int:
         return 0
 
     if cmd == "update":
-        st = pkg_mod.status(cfg, include_market=False)
-        names = [args.name] if args.name else [
-            r["name"] for r in st["installed"] if r.get("installed")]
-        if not names:
-            raise ElabError("没有可更新的已装包")
-        results = []
-        for name in names:
-            entry = pkg_mod.market_entry(cfg, name)
-            if not entry:
-                log(f"[elab] ! {name} 不在市场索引中，跳过")
-                continue
-            cur = next((r for r in st["installed"] if r["name"] == name), {})
-            if cur.get("version") == entry.get("version") and not args.force:
-                log(f"[elab] — {name} 已是最新 v{entry.get('version')}")
-                continue
-            kwargs = pkg_mod.entry_source(entry, entry.get("_base", ""))
-            rec = pkg_mod.install(cfg, sha256=entry.get("sha256"), force=True,
-                                  status=entry.get("status"), log=log, **kwargs)
-            results.append(rec)
+        results = pkg_mod.update(cfg, args.name, force=args.force, log=log)
         refs = [c for r in results for c in r.get("chips") or []]
         written = [] if args.no_skill else _regen_skills(cfg, refs, log)
         if args.json:

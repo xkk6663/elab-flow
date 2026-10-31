@@ -33,6 +33,8 @@ const CROSS_ADAPTER_ALLOWED = [
   // from → to（精确到文件）：CockpitPane 组装客户端半（elabApi 注入 service）
   ['adapters/dsh-web/CockpitPane.tsx', 'adapters/kernel-http/icd-client.ts'],
   ['adapters/dsh-web/SettingsSection.tsx', 'adapters/kernel-http/icd-client.ts'],
+  // 芯片包设置视图：设置叶组件（直接消费 /api/packs 与 /api/pkg/*，同一 ICD 客户端）
+  ['adapters/dsh-web/PackSettingsView.tsx', 'adapters/kernel-http/icd-client.ts'],
 ]
 
 function walk(dir) {

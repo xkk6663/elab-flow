@@ -198,6 +198,11 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 一份 `index.json` + 作者仓库里的包本体），索引不可达时自动回退本仓 `market/index.json`。
 包之间互不依赖；改包后必须 `elab pkg index` 重生成索引，CI 用 `--check` 拦漂移。
 
+- 市场与安装语义：[market/README.md](market/README.md)（零服务器、一次只启用一套、本地可存多套）
+- 贡献一颗新芯片：见 [market/CONTRIBUTING.md](market/CONTRIBUTING.md)（包结构、sha256、上架 PR、评审清单）
+- 驾驶舱面板：工程条右上角 **⚙** → 整幅设置视图（市场搜索安装 / 已安装包启用管理 / 内核设置）；
+  agent 用 `elab_pkg` 工具（可自行安装，安装期间闭环冻结）。
+
 ### 接入一颗新芯片 = 4 步
 
 ```bash
