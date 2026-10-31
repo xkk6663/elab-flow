@@ -81,6 +81,8 @@ const GET_ALLOW = new Set([
   'serial/monitor',
   // P1 字节真值：与行级 monitor 同步轮询（方向/时间/序号 + base64 原始字节）
   'serial/monitor/bytes',
+  // P3.5 会话级共享解码帧：agent 与面板读同一份（?after= 增量游标）
+  'serial/monitor/decoded',
   // 适配包 / 社区市场投影（只读）：?market=0 跳过联网，?q= 搜索市场条目
   'packs',
   // 包操作任务快照（POST /api/pkg/* 返回 202 后轮询它）

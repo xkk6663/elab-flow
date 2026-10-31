@@ -747,8 +747,12 @@ var elabApi = {
     if (opts?.limit !== void 0 && opts.limit > 0) q.set("limit", String(opts.limit));
     return request(withSession(`/elab/api/serial/monitor/bytes?${q.toString()}`, opts?.sessionId));
   },
+  /** 会话级共享解码帧（P3.5）：agent 与面板波页读同一份。 */
+  serialMonitorDecoded: (after = 0, sessionId) => request(
+    withSession(`/elab/api/serial/monitor/decoded?after=${after}`, sessionId)
+  ),
   /**
-   * 监视会话动作（open/close/clear/pause/resume）。
+   * 监视会话动作（open/close/decoder/clear/pause/resume）。
    * ★ action **必须在 body 里**：服务端 POST /api/serial/monitor 读的是 body.action
    *   （此前只放 query → clear/pause/resume 全部落到 400）。
    */
@@ -1940,6 +1944,14 @@ var metaStyle = {
   fontVariantNumeric: "tabular-nums",
   whiteSpace: "nowrap"
 };
+var waveBadge = {
+  padding: "1px 6px",
+  borderRadius: "999px",
+  border: "1px solid var(--elab-border)",
+  color: "var(--elab-fg-secondary)",
+  lineHeight: "14px",
+  whiteSpace: "nowrap"
+};
 var barBase = {
   flex: "0 0 auto",
   padding: "5px 12px",
@@ -2090,8 +2102,14 @@ function SerialPane(props) {
   const [frames, setFrames] = useState([]);
   const [decodeMeta, setDecodeMeta] = useState(null);
   const [waveErr, setWaveErr] = useState(null);
+  const sharedDecoder = stream.snap?.decode?.decoder ?? "";
+  const sharedActive = sharedDecoder !== "";
+  const sharedFrames = useMemo(() => stream.decoded.map((f) => f.values), [stream.decoded]);
+  const sharedState = sharedActive ? stream.decodedSnap ?? stream.snap?.decode ?? null : null;
+  const shownFrames = sharedActive ? sharedFrames : frames;
+  const shownChannels = sharedActive ? stream.decodedSnap?.channels ?? (sharedFrames[0]?.length ?? 0) : decodeMeta?.channels ?? (frames[0]?.length ?? 0);
   useEffect(() => {
-    if (view !== "wave") return;
+    if (view !== "wave" || sharedActive) return;
     if (filtered.length === 0) {
       setFrames([]);
       setDecodeMeta(null);
@@ -2129,11 +2147,11 @@ function SerialPane(props) {
     return () => {
       cancelled = true;
     };
-  }, [view, filtered, decoder, props.sessionId, api]);
+  }, [view, sharedActive, filtered, decoder, props.sessionId, api]);
   useEffect(() => {
     const el = scrollRef.current;
     if (el !== null && followRef.current) el.scrollTop = el.scrollHeight;
-  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, frames.length, props.runLinesVersion]);
+  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, shownFrames.length, props.runLinesVersion]);
   const onScroll = () => {
     const el = scrollRef.current;
     if (el === null) return;
@@ -2285,10 +2303,14 @@ function SerialPane(props) {
     view === "wave" ? /* @__PURE__ */ react_default.createElement(
       "select",
       {
-        value: decoder,
-        onChange: (e) => setDecoder(e.currentTarget.value),
+        value: sharedActive ? sharedDecoder : decoder,
+        onChange: (e) => {
+          const next = e.currentTarget.value;
+          setDecoder(next);
+          if (stream.active) void stream.setDecoder(next);
+        },
         "aria-label": "\u534F\u8BAE\u89E3\u7801\u5668",
-        title: decoders.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
+        title: sharedActive ? `\u5171\u4EAB\u89E3\u7801\uFF08${stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"}\uFF09\uFF1A\u9762\u677F\u4E0E agent \u8BFB\u540C\u4E00\u4EFD\u5E27` : decoders.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
         style: selectStyle
       },
       decoders.map((d) => /* @__PURE__ */ react_default.createElement("option", { key: d.id, value: d.id }, d.label))
@@ -2455,7 +2477,32 @@ function SerialPane(props) {
       )
     ), /* @__PURE__ */ react_default.createElement("pre", { style: { margin: 0, padding: "4px 8px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--elab-fg-primary)" } }, body)))) : null,
     view === "terminal" ? shownTerm.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, "\u5C1A\u65E0\u7EC8\u7AEF\u5185\u5BB9\u3002ANSI \u989C\u8272\u3001`\\r` \u8986\u5199\u4E0E\u9000\u683C\u90FD\u5DF2\u6309\u7EC8\u7AEF\u8BED\u4E49\u5904\u7406\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px 12px", whiteSpace: "pre", minHeight: "100%" } }, shownTerm.map((ln, i) => /* @__PURE__ */ react_default.createElement("div", { key: i, style: { minHeight: "1.55em" } }, ln.length === 0 ? "\xA0" : ln.map((sp, j) => /* @__PURE__ */ react_default.createElement("span", { key: j, className: sp.cls }, sp.text))))) : null,
-    view === "wave" ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px 12px" } }, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && frames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, frames.length > 0 ? /* @__PURE__ */ react_default.createElement(WaveChart, { frames, channels: decodeMeta?.channels ?? frames[0].length }) : null, decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
+    view === "wave" ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px 12px" } }, sharedActive ? /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        style: {
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "6px",
+          marginBottom: "6px",
+          fontSize: "var(--elab-fs-xs)"
+        }
+      },
+      /* @__PURE__ */ react_default.createElement("span", { style: waveBadge }, "\u5171\u4EAB\u89E3\u7801"),
+      /* @__PURE__ */ react_default.createElement(
+        "span",
+        {
+          style: {
+            ...waveBadge,
+            borderColor: stream.snap?.decode?.decoder_by === "agent" ? "var(--elab-accent)" : "var(--elab-border)",
+            color: stream.snap?.decode?.decoder_by === "agent" ? "var(--elab-accent)" : "var(--elab-fg-muted)"
+          }
+        },
+        stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"
+      ),
+      /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, `${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \xB7 \u5185\u6838\u53EA\u89E3 RX\uFF08\u8BBE\u5907\u8F93\u51FA\uFF09`)
+    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 ? /* @__PURE__ */ react_default.createElement(WaveChart, { frames: shownFrames, channels: shownChannels }) : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
   ), /* @__PURE__ */ react_default.createElement(
     "form",
     {
@@ -2657,15 +2704,20 @@ var SERIAL_POLL_MS = 500;
 var MAX_LOCAL_LINES = 2e3;
 var MAX_LOCAL_CHUNKS = 4096;
 var MAX_LOCAL_BYTES = 1 << 20;
+var MAX_LOCAL_DEC_FRAMES = 1024;
 function useSerialStream({ api, initial, project, port, baud, enabled, sessionId }) {
   const [snap, setSnap] = useState(initial);
   const [lines, setLines] = useState([]);
   const [chunks, setChunks] = useState([]);
-  const [gaps, setGaps] = useState({ lines: 0, chunks: 0 });
+  const [decoded, setDecoded] = useState([]);
+  const [decodedSnap, setDecodedSnap] = useState(null);
+  const [gaps, setGaps] = useState({ lines: 0, chunks: 0, decoded: 0 });
   const [error, setError] = useState(null);
   const snapRef = useRef(initial);
   const lineCursor = useRef(0);
   const chunkCursor = useRef(0);
+  const decCursor = useRef(0);
+  const decDecoder = useRef("");
   const epochRef = useRef(-1);
   const bytesRef = useRef(0);
   const genRef = useRef(0);
@@ -2679,16 +2731,21 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
   const resetLocal = useCallback(() => {
     lineCursor.current = 0;
     chunkCursor.current = 0;
+    decCursor.current = 0;
+    decDecoder.current = "";
     bytesRef.current = 0;
     setLines([]);
     setChunks([]);
-    setGaps({ lines: 0, chunks: 0 });
+    setDecoded([]);
+    setDecodedSnap(null);
+    setGaps({ lines: 0, chunks: 0, decoded: 0 });
   }, []);
   const seedFromSnapshot = useCallback((s) => {
     snapRef.current = s;
     epochRef.current = s.epoch ?? 0;
     lineCursor.current = 0;
     chunkCursor.current = 0;
+    decCursor.current = 0;
     bytesRef.current = 0;
     setSnap(s);
   }, []);
@@ -2700,9 +2757,11 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
       busyRef.current = true;
       const gen = genRef.current;
       try {
-        const [lt, bt] = await Promise.all([
+        const wantDecoded = (snapRef.current?.decode?.decoder ?? "") !== "";
+        const [lt, bt, dt] = await Promise.all([
           api.serialMonitor(lineCursor.current, sessionId),
-          api.serialMonitorBytes(chunkCursor.current, { sessionId })
+          api.serialMonitorBytes(chunkCursor.current, { sessionId }),
+          wantDecoded ? api.serialMonitorDecoded(decCursor.current, sessionId) : Promise.resolve(null)
         ]);
         if (disposed || gen !== genRef.current) return;
         const ep = lt.epoch ?? bt.epoch ?? 0;
@@ -2743,6 +2802,25 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
         if (bt.gap > 0 || missedChunks > 0) {
           const lost = Math.max(bt.gap, missedChunks);
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }));
+        }
+        if (dt !== null) {
+          setDecodedSnap(dt);
+          if (dt.decoder !== decDecoder.current) {
+            decDecoder.current = dt.decoder;
+            setDecoded([]);
+          }
+          if (dt.frames.length > 0) {
+            setDecoded((prev) => {
+              const next = prev.concat(dt.frames);
+              return next.length > MAX_LOCAL_DEC_FRAMES ? next.slice(next.length - MAX_LOCAL_DEC_FRAMES) : next;
+            });
+          }
+          const missedFrames = dt.next_after - decCursor.current - dt.frames.length;
+          decCursor.current = dt.next_after;
+          if (dt.gap > 0 || missedFrames > 0) {
+            const lost = Math.max(dt.gap, missedFrames);
+            setGaps((g) => ({ ...g, decoded: g.decoded + lost }));
+          }
         }
         if (!lt.active) {
           if (lt.error !== void 0 && lt.error !== null) setError(lt.error);
@@ -2808,8 +2886,51 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     bytesRef.current = 0;
     setLines([]);
     setChunks([]);
-    setGaps({ lines: 0, chunks: 0 });
+    setDecoded([]);
+    setDecodedSnap(null);
+    setGaps({ lines: 0, chunks: 0, decoded: 0 });
   }, [sessionId, api]);
+  const setDecoder = useCallback(
+    async (decoder) => {
+      try {
+        const r = await api.serialMonitorToggle("decoder", {
+          decoder,
+          actor: "human",
+          sessionId
+        });
+        if (r.ok === false) {
+          setError(r.error ?? "\u8BBE\u7F6E\u89E3\u7801\u5668\u5931\u8D25");
+          return { ok: false, error: r.error ?? "\u8BBE\u7F6E\u89E3\u7801\u5668\u5931\u8D25" };
+        }
+        decDecoder.current = decoder;
+        setDecoded([]);
+        setDecodedSnap(null);
+        if (snapRef.current !== null) {
+          const prevDecode = snapRef.current.decode;
+          remember({
+            ...snapRef.current,
+            decode: {
+              decoder,
+              decoder_by: "human",
+              channels: prevDecode?.channels ?? 0,
+              total_frames: 0,
+              skipped: 0,
+              pending_bytes: 0,
+              covered: prevDecode?.covered ?? 0,
+              updated_at: Date.now() / 1e3,
+              error: null
+            }
+          });
+        }
+        return { ok: true };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+    },
+    [sessionId, remember, api]
+  );
   const setPaused = useCallback(
     async (next) => {
       try {
@@ -2845,13 +2966,17 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     paused,
     lines,
     chunks,
+    decoded,
+    decodedSnap,
     gapLines: gaps.lines,
     gapChunks: gaps.chunks,
+    gapDecoded: gaps.decoded,
     error,
     open,
     close,
     clear,
     setPaused,
+    setDecoder,
     send
   };
 }

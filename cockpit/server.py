@@ -89,7 +89,9 @@ SERIAL_META = {
     "directions": ["all", "rx", "tx"],
     "decoders": list(serialcodec_mod.DECODERS),
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
-                 "capture", "capture_export", "waveform"],
+                 "capture", "capture_export", "waveform",
+                 # 会话级共享解码：agent 选的 decoder 与面板同图（P3.5）
+                 "decoder_share", "decoded_frames"],
 }
 
 COCKPIT_VERSION = "2.1.0"
@@ -1000,6 +1002,15 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     raise ElabError(f"limit 必须是整数：{raw_lim!r}")
                 return self._json(serialmon_mod.tail_bytes(
                     after, direction=direction, limit=limit))
+            if path == "/api/serial/monitor/decoded":
+                # 会话级共享解码帧（P3.5）：agent 与面板波页读**同一份**。
+                # 解码本身在读线程里增量完成（RX 批次入环时），这里只做增量读回。
+                raw = (qs.get("after") or ["0"])[0]
+                try:
+                    after = int(raw)
+                except ValueError:
+                    raise ElabError(f"after 必须是整数：{raw!r}")
+                return self._json(serialmon_mod.tail_decoded(after))
             if path == "/api/serial/monitor":
                 # 常驻监视会话的增量读回（tail）。「after」= 浏览器已收到的最大 seq。
                 raw = (qs.get("after") or ["0"])[0]
@@ -1166,6 +1177,13 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     return self._json(res, 200)
                 if action == "close":
                     return self._json(serialmon_mod.close_session(), 200)
+                if action == "decoder":
+                    # 会话级解码器（P3.5）：agent 选定 → 人面板波页自动同图。
+                    # '' = 关闭共享解码（面板回退到本地无状态解码）。
+                    res = serialmon_mod.set_decoder(
+                        str(body.get("decoder") or ""),
+                        actor=str(body.get("actor") or "human"))
+                    return self._json(res, 200 if res.get("ok") else 400)
                 if action == "clear":
                     return self._json(serialmon_mod.clear(), 200)
                 if action == "pause":
@@ -1173,7 +1191,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 if action == "resume":
                     return self._json(serialmon_mod.set_paused(False), 200)
                 raise ElabError(
-                    f"action 必须是 open/close/clear/pause/resume：{action!r}")
+                    f"action 必须是 open/close/decoder/clear/pause/resume：{action!r}")
             if u.path == "/api/serial/capture":
                 # K5 显式录制：把**字节**录成有界 JSONL（不录文本投影，可回放）。
                 # start/stop 幂等；status 走 capabilities.serial.monitor.capture。

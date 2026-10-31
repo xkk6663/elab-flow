@@ -25,6 +25,7 @@ import type {
   SerialAction,
   SerialBytesTail,
   SerialDecodeResult,
+  SerialDecodedTail,
   SerialMonitorTail,
   SerialWriteResult,
 } from '../../domain/icd.ts'
@@ -149,8 +150,13 @@ export const elabApi = {
     if (opts?.limit !== undefined && opts.limit > 0) q.set('limit', String(opts.limit))
     return request<SerialBytesTail>(withSession(`/elab/api/serial/monitor/bytes?${q.toString()}`, opts?.sessionId))
   },
+  /** 会话级共享解码帧（P3.5）：agent 与面板波页读同一份。 */
+  serialMonitorDecoded: (after = 0, sessionId?: string) =>
+    request<SerialDecodedTail>(
+      withSession(`/elab/api/serial/monitor/decoded?after=${after}`, sessionId),
+    ),
   /**
-   * 监视会话动作（open/close/clear/pause/resume）。
+   * 监视会话动作（open/close/decoder/clear/pause/resume）。
    * ★ action **必须在 body 里**：服务端 POST /api/serial/monitor 读的是 body.action
    *   （此前只放 query → clear/pause/resume 全部落到 400）。
    */
@@ -163,6 +169,8 @@ export const elabApi = {
       actor?: 'human' | 'agent'
       lease_s?: number
       allow_agent_write?: boolean
+      /** action=decoder：justfloat / firewater（'' = 关闭共享解码） */
+      decoder?: string
       sessionId?: string
     },
   ) =>

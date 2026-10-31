@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 import sys
 import tempfile
 import time
@@ -410,6 +411,98 @@ class Capture(Base):
         r = sm.capture_start(self.cfg)
         self.assertFalse(r["ok"])
         self.assertIn("监视", r["error"])
+
+
+class SharedDecode(Base):
+    """P3.5：会话级共享解码 —— decoder 是会话属性，agent 与面板读同一份帧。"""
+
+    @staticmethod
+    def _frame(*vals: float) -> bytes:
+        return struct.pack("<%df" % len(vals), *vals) + b"\x00\x00\x80\x7f"
+
+    def test_rx_bytes_are_decoded_into_session_ring(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.set_decoder("justfloat", actor="agent")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["decoder"], "justfloat")
+        self.assertEqual(r["decoder_by"], "agent")
+        self.io.rx.append(self._frame(1.0, 2.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="一帧")
+        t = sm.tail_decoded(0)
+        self.assertEqual(t["decoder"], "justfloat")
+        self.assertEqual(t["channels"], 2)
+        self.assertEqual(len(t["frames"]), 1)
+        self.assertEqual(t["frames"][0]["seq"], 1)
+        self.assertAlmostEqual(t["frames"][0]["values"][0], 1.0, places=5)
+        self.assertAlmostEqual(t["frames"][0]["values"][1], 2.0, places=5)
+        # 人在面板上看到的摘要就是这份投影
+        self.assertEqual(sm.status()["decode"]["total_frames"], 1)
+
+    def test_half_frame_is_pending_not_lost(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertTrue(sm.set_decoder("justfloat", actor="human")["ok"])
+        self.io.rx.append(struct.pack("<f", 1.0))          # 只有半个帧
+        self.wait_for(lambda: sm.tail_decoded(0)["pending_bytes"] >= 4, what="半帧待续")
+        self.assertEqual(sm.tail_decoded(0)["frames"], [])
+        self.io.rx.append(struct.pack("<f", 2.0) + b"\x00\x00\x80\x7f")
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="拼上后半帧")
+        vals = sm.tail_decoded(0)["frames"][0]["values"]
+        self.assertAlmostEqual(vals[0], 1.0, places=5)
+        self.assertAlmostEqual(vals[1], 2.0, places=5)
+        self.assertEqual(sm.tail_decoded(0)["pending_bytes"], 0)
+
+    def test_tx_is_not_decoded(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertTrue(sm.set_decoder("justfloat", actor="agent")["ok"])
+        self.assertTrue(sm.write_through(self._frame(9.0, 9.0)))   # 我们自己写的
+        self.wait_for(lambda: sm.tail_bytes(0)["chunk_seq"] >= 1, what="TX 批次")
+        self.assertEqual(sm.tail_decoded(0)["frames"], [])           # 只解 RX
+
+    def test_switch_decoder_keeps_seq_monotonic(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertTrue(sm.set_decoder("justfloat", actor="agent")["ok"])
+        self.io.rx.append(self._frame(1.0, 2.0) * 3)
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 3, what="三帧")
+        before = sm.tail_decoded(0)["next_after"]
+        r = sm.set_decoder("firewater", actor="human")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["total_frames"], 0)
+        self.assertGreaterEqual(r["covered"], 3)       # 旧帧被换解码器"挤掉"，如实计数
+        self.assertEqual(sm.tail_decoded(0)["next_after"], before)  # 序号不回退
+        self.io.rx.append(b"5,6\n")
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 4, what="新解码器帧")
+        f = sm.tail_decoded(0)["frames"][-1]
+        self.assertEqual(f["seq"], 4)
+        self.assertEqual(f["values"], [5.0, 6.0])
+        self.assertEqual(sm.status()["decode"]["decoder_by"], "human")
+
+    def test_decoder_can_be_cleared(self):
+        self.assertTrue(self.open()["ok"])
+        self.assertTrue(sm.set_decoder("justfloat", actor="agent")["ok"])
+        self.io.rx.append(self._frame(1.0, 2.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="一帧")
+        self.assertTrue(sm.set_decoder("", actor="human")["ok"])
+        self.assertEqual(sm.tail_decoded(0)["decoder"], "")
+        self.assertEqual(sm.tail_decoded(0)["decoder_by"], "")
+        self.io.rx.append(self._frame(3.0, 4.0))          # 关闭后不再解
+        time.sleep(0.3)
+        self.assertEqual(sm.tail_decoded(0)["next_after"], 1)
+
+    def test_unknown_decoder_refused(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.set_decoder("protobuf", actor="agent")
+        self.assertFalse(r["ok"])
+        self.assertIn("未知解码器", r["error"])
+
+    def test_tail_decoded_without_session(self):
+        r = sm.tail_decoded(0)
+        self.assertFalse(r["active"])
+        self.assertEqual(r["frames"], [])
+
+    def test_set_decoder_without_session_is_refused(self):
+        r = sm.set_decoder("justfloat", actor="agent")
+        self.assertFalse(r["ok"])
+        self.assertIn("没有进行中的监视", r["error"])
 
 
 if __name__ == "__main__":

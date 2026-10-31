@@ -20,6 +20,7 @@ import type {
   SerialAction,
   SerialBytesTail,
   SerialDecodeResult,
+  SerialDecodedTail,
   SerialMonitorSnapshot,
   SerialMonitorTail,
   SerialWriteResult,
@@ -132,6 +133,8 @@ export interface SerialPort {
     after?: number,
     opts?: { dir?: 'all' | 'rx' | 'tx'; limit?: number; sessionId?: string },
   ): Promise<SerialBytesTail>
+  /** 会话级共享解码帧（agent 与面板读同一份；P3.5） */
+  serialMonitorDecoded(after?: number, sessionId?: string): Promise<SerialDecodedTail>
   serialMonitorToggle(
     action: SerialAction,
     opts?: {
@@ -141,6 +144,8 @@ export interface SerialPort {
       actor?: 'human' | 'agent'
       lease_s?: number
       allow_agent_write?: boolean
+      /** action=decoder 时：justfloat / firewater（'' = 关闭共享解码） */
+      decoder?: string
       sessionId?: string
     },
   ): Promise<Record<string, unknown>>

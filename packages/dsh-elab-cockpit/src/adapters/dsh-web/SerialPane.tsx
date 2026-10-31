@@ -143,6 +143,16 @@ const metaStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+/** 波形页的共享解码标记（「共享解码」+「agent 选定」） */
+const waveBadge: React.CSSProperties = {
+  padding: '1px 6px',
+  borderRadius: '999px',
+  border: '1px solid var(--elab-border)',
+  color: 'var(--elab-fg-secondary)',
+  lineHeight: '14px',
+  whiteSpace: 'nowrap',
+}
+
 /** 提示条（融合工程的 warn / info：同色描边 + 10% 底） */
 const barBase: React.CSSProperties = {
   flex: '0 0 auto',
@@ -341,8 +351,19 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [decodeMeta, setDecodeMeta] = useState<{ channels: number; skipped: number; pending: number } | null>(null)
   const [waveErr, setWaveErr] = useState<string | null>(null)
 
+  // ── 会话级共享解码（P3.5）：decoder 非空 = 内核在 RX 入环时增量解码 ──
+  //    面板直接画这份帧 → agent（elab_serial_decoded）与人看到的是同一张图。
+  const sharedDecoder = stream.snap?.decode?.decoder ?? ''
+  const sharedActive = sharedDecoder !== ''
+  const sharedFrames = useMemo(() => stream.decoded.map((f) => f.values), [stream.decoded])
+  const sharedState = sharedActive ? (stream.decodedSnap ?? stream.snap?.decode ?? null) : null
+  const shownFrames = sharedActive ? sharedFrames : frames
+  const shownChannels = sharedActive
+    ? (stream.decodedSnap?.channels ?? (sharedFrames[0]?.length ?? 0))
+    : (decodeMeta?.channels ?? (frames[0]?.length ?? 0))
+
   useEffect(() => {
-    if (view !== 'wave') return
+    if (view !== 'wave' || sharedActive) return
     if (filtered.length === 0) {
       setFrames([])
       setDecodeMeta(null)
@@ -383,13 +404,13 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     return () => {
       cancelled = true
     }
-  }, [view, filtered, decoder, props.sessionId, api])
+  }, [view, sharedActive, filtered, decoder, props.sessionId, api])
 
   // ── 跟随滚动 ────────────────────────────────────────────────
   useEffect(() => {
     const el = scrollRef.current
     if (el !== null && followRef.current) el.scrollTop = el.scrollHeight
-  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, frames.length, props.runLinesVersion])
+  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, shownFrames.length, props.runLinesVersion])
 
   const onScroll = (): void => {
     const el = scrollRef.current
@@ -566,10 +587,19 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         </select>
         {view === 'wave' ? (
           <select
-            value={decoder}
-            onChange={(e: any) => setDecoder(e.currentTarget.value)}
+            value={sharedActive ? sharedDecoder : decoder}
+            onChange={(e: any) => {
+              const next = e.currentTarget.value
+              setDecoder(next) // 无会话时的本地解码兜底
+              // 有会话：decoder 是**会话属性**，写进去才与 agent 同源同图
+              if (stream.active) void stream.setDecoder(next)
+            }}
             aria-label="协议解码器"
-            title={decoders.find((d) => d.id === decoder)?.desc ?? '协议解码器'}
+            title={
+              sharedActive
+                ? `共享解码（${stream.snap?.decode?.decoder_by === 'agent' ? 'agent 选定' : '人选定'}）：面板与 agent 读同一份帧`
+                : (decoders.find((d) => d.id === decoder)?.desc ?? '协议解码器')
+            }
             style={selectStyle}
           >
             {decoders.map((d) => (
@@ -818,11 +848,43 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
 
         {view === 'wave' ? (
           <div style={{ padding: '8px 12px' }}>
+            {sharedActive ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  gap: '6px',
+                  marginBottom: '6px',
+                  fontSize: 'var(--elab-fs-xs)',
+                }}
+              >
+                <span style={waveBadge}>{'共享解码'}</span>
+                <span
+                  style={{
+                    ...waveBadge,
+                    borderColor: stream.snap?.decode?.decoder_by === 'agent'
+                      ? 'var(--elab-accent)'
+                      : 'var(--elab-border)',
+                    color: stream.snap?.decode?.decoder_by === 'agent'
+                      ? 'var(--elab-accent)'
+                      : 'var(--elab-fg-muted)',
+                  }}
+                >
+                  {stream.snap?.decode?.decoder_by === 'agent' ? 'agent 选定' : '人选定'}
+                </span>
+                <span style={{ color: 'var(--elab-fg-faint)' }}>
+                  {`${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} · 内核只解 RX（设备输出）`}
+                </span>
+              </div>
+            ) : null}
             {waveErr !== null ? <div style={barWarn}>{`解码失败：${waveErr}`}</div> : null}
-            {waveErr === null && frames.length === 0 ? (
+            {waveErr === null && shownFrames.length === 0 ? (
               <div style={emptyStyle}>
-                {`尚无波形。设备按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 输出（JustFloat：N×4 小端 float + 尾 00 00 80 7F）时，这里按通道画折线。`}
-                {decodeMeta !== null && decodeMeta.skipped > 0 ? (
+                {sharedActive
+                  ? `尚未解出帧：${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} 解码器已在会话启用，设备开始输出符合该协议的字节后会在这里出现折线（agent 读到的也是这份帧）。`
+                  : `尚无波形。设备按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 输出（JustFloat：N×4 小端 float + 尾 00 00 80 7F）时，这里按通道画折线。`}
+                {sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? (
                   <>
                     <br />
                     {`当前窗口未解出完整帧（跳过 ${decodeMeta.skipped} 段${decodeMeta.pending > 0 ? `、残留 ${decodeMeta.pending} B` : ''}）—— 这段流里混有不属于该协议的字节，可用方向过滤只看设备帧输出。`}
@@ -830,8 +892,17 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                 ) : null}
               </div>
             ) : null}
-            {frames.length > 0 ? <WaveChart frames={frames} channels={decodeMeta?.channels ?? frames[0].length} /> : null}
-            {decodeMeta !== null ? (
+            {shownFrames.length > 0 ? <WaveChart frames={shownFrames} channels={shownChannels} /> : null}
+            {sharedActive && sharedState !== null ? (
+              <div style={{ marginTop: '8px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)' }}>
+                {`${shownFrames.length} 帧（显示）· 共 ${sharedState.total_frames} 帧 · ${sharedState.channels} 通道` +
+                  `${sharedState.skipped > 0 ? ` · 跳过 ${sharedState.skipped}` : ''}` +
+                  `${sharedState.pending_bytes > 0 ? ` · 半帧 ${sharedState.pending_bytes} B（下一批续解）` : ''}` +
+                  `${sharedState.covered > 0 ? ` · 帧环挤出 ${sharedState.covered}` : ''}` +
+                  `${stream.gapDecoded > 0 ? ` · 面板漏拉 ${stream.gapDecoded}` : ''}`}
+              </div>
+            ) : null}
+            {sharedActive === false && decodeMeta !== null ? (
               <div style={{ marginTop: '8px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)' }}>
                 {`${frames.length} 帧 · ${decodeMeta.channels} 通道${decodeMeta.skipped > 0 ? ` · 跳过 ${decodeMeta.skipped}` : ''}${decodeMeta.pending > 0 ? ` · 半帧 ${decodeMeta.pending} B（下一轮续解）` : ''}`}
               </div>

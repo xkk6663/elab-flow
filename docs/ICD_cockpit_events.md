@@ -247,6 +247,14 @@ SSE 层为压掉"一秒上万行"的编译输出，会把**只有进程输出**�
 open 自增** —— 前端发现它变化必须同时重置"行/字节"两个游标（只重置一个就会静默停在
 旧会话的序号上，表现为"重开后一直没有新数据"）。
 
+**共享解码（P3.5）**：`POST /api/serial/monitor {action:"decoder", decoder:"justfloat"|"firewater"|""}`
+把解码器写成**会话属性**（`actor=human|agent` 记录谁最后选定；空串 = 关闭）。内核在 RX
+批次入环时增量解码（半帧留到下一批），帧进有界环（1024），
+`GET /api/serial/monitor/decoded?after=N` 按帧序号增量读回（`frames/next_after/gap`，
+`gap` 只报告不抹平）。—— 面板波形页与 agent 的 `elab_serial_decoded` 读的是**同一份帧**，
+所以 agent 选定解码器后，人看到的波形就是它下结论用的数据；`TX` 不参与解码（那是我们
+自己写的命令）。`decode` 投影也随 `GET /api/serial/monitor` 快照返回。
+
 **显式录制（K5）**：`POST /api/serial/capture {action:"start"|"stop"|"status"}` 把原始
 **字节**写成有界 JSONL（`.work/.cockpit/serial-capture-e<epoch>-<ts>.jsonl`，默认上限
 5 MiB，到顶停录并标 `truncated`）—— 它是"证据"，与 console 留档（§3.5，会滚动）是

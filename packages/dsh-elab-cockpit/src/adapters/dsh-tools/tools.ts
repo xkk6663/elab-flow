@@ -13,7 +13,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { resolveRunSteps, type PlanDef, type PlanId, type StepAvailability } from '../../domain/pipeline.ts'
-import type { SerialBytesTail } from '../../domain/icd.ts'
+import type { SerialBytesTail, SerialDecodedTail } from '../../domain/icd.ts'
 import type { ToolDeps } from '../../app/ports.ts'
 
 /** 批 2 端口化：依赖形状收敛到 app/ports.ts（实现由 main.ts 组装注入）；旧名保留。 */
@@ -191,6 +191,14 @@ async function fetchBytes(
   if (opts.direction !== undefined && opts.direction !== 'all') q.set('dir', opts.direction)
   if (opts.limit !== undefined && opts.limit > 0) q.set('limit', String(opts.limit))
   return cockpit<SerialBytesTail>(deps, `/api/serial/monitor/bytes?${q.toString()}`)
+}
+
+/** 拉一段会话级共享解码帧（P3.5）：与面板波页同源。 */
+async function fetchDecoded(deps: ToolsDeps, after: number): Promise<SerialDecodedTail> {
+  return cockpit<SerialDecodedTail>(
+    deps,
+    `/api/serial/monitor/decoded?after=${Math.max(0, Math.round(after))}`,
+  )
 }
 
 /** 批次 → agent 可读文本（UTF-8 投影 + 原始 hex 兜底）。 */
@@ -624,18 +632,23 @@ export function registerElabTools(
     makeTool({
       name: 'elab_serial_monitor',
       description:
-        '常驻串口监视会话（open/close/clear/pause/resume）。agent 打开时默认带 lease_s 租约，' +
-        '到期自动释放端口（避免把串口一直占死）。读数据用 elab_serial_read / elab_serial_wait。',
+        '常驻串口监视会话（open/close/decoder/clear/pause/resume）。agent 打开时默认带 lease_s 租约，' +
+        '到期自动释放端口（避免把串口一直占死）。读数据用 elab_serial_read / elab_serial_wait；' +
+        'action=decoder 会让**面板波形页与人看到的画面**同步切到同一解码器（同源帧）。',
       parameters: {
         action: {
           type: 'string',
           required: true,
-          description: 'open / close / clear / pause / resume',
+          description: 'open / close / decoder / clear / pause / resume',
         },
         project: { type: 'string', description: '工程名（open 时用于解析端口/波特率）' },
         port: { type: 'string', description: '显式端口（缺省取工程配置）' },
         baud: { type: 'number', description: '显式波特率（缺省取工程配置）' },
         lease_s: { type: 'number', description: '租约秒数（open 时默认 120；0 = 无租约）' },
+        decoder: {
+          type: 'string',
+          description: 'decoder 动作时：justfloat / firewater；传空串 = 关闭共享解码',
+        },
       },
       output: jsonOutput,
       presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 串口监视' }),
@@ -645,10 +658,11 @@ export function registerElabTools(
         port?: string
         baud?: number
         lease_s?: number
+        decoder?: string
       }) {
-        const action = args.action as 'open' | 'close' | 'clear' | 'pause' | 'resume'
-        if (!['open', 'close', 'clear', 'pause', 'resume'].includes(action)) {
-          return { ok: false, code: 'bad-action', note: `action 必须是 open/close/clear/pause/resume：${args.action}` }
+        const action = args.action as 'open' | 'close' | 'decoder' | 'clear' | 'pause' | 'resume'
+        if (!['open', 'close', 'decoder', 'clear', 'pause', 'resume'].includes(action)) {
+          return { ok: false, code: 'bad-action', note: `action 必须是 open/close/decoder/clear/pause/resume：${args.action}` }
         }
         const body: Record<string, unknown> = { action }
         if (action === 'open') {
@@ -659,6 +673,10 @@ export function registerElabTools(
           body.lease_s = args.lease_s !== undefined ? args.lease_s : 120
           // 写权限随用户设置（默认关）；读不受限。
           body.allow_agent_write = deps.allowAgentWrite()
+        }
+        if (action === 'decoder') {
+          body.actor = 'agent'
+          body.decoder = args.decoder ?? ''
         }
         return cockpit(deps, '/api/serial/monitor', {
           method: 'POST',
@@ -792,26 +810,100 @@ export function registerElabTools(
       name: 'elab_serial_decode',
       description:
         '无状态协议解码（justfloat / firewater）。justfloat = N×4 小端 float + 尾 00 00 80 7F；' +
-        'firewater = ASCII 逗号分隔 float + 换行。半帧以 pending_b64 原样带回，拼下一批再解。',
+        'firewater = ASCII 逗号分隔 float + 换行。半帧以 pending_b64 原样带回，拼下一批再解。' +
+        'apply=true 时同一 decoder 会写入会话——面板波形页随之人机同图（人看到的就是这份帧）。',
       parameters: {
         decoder: { type: 'string', required: true, description: 'justfloat / firewater' },
         hex: { type: 'string', description: '十六进制字节串（与 data_b64 二选一）' },
         data_b64: { type: 'string', description: 'base64 字节串（与 hex 二选一）' },
         channels: { type: 'number', description: '显式通道数（缺省自动推断）' },
+        apply: {
+          type: 'boolean',
+          description: '是否把该 decoder 落到会话（面板波形页同步展示；默认 false 仅本次解码）',
+        },
       },
       output: jsonOutput,
       presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 串口解码' }),
-      async execute(args: { decoder: string; hex?: string; data_b64?: string; channels?: number }) {
-        return cockpit(deps, '/api/serial/decode', {
+      async execute(args: {
+        decoder: string
+        hex?: string
+        data_b64?: string
+        channels?: number
+        apply?: boolean
+      }) {
+        const payload = {
+          decoder: args.decoder,
+          ...(args.hex !== undefined ? { hex: args.hex } : {}),
+          ...(args.data_b64 !== undefined ? { data_b64: args.data_b64 } : {}),
+          ...(args.channels !== undefined ? { channels: args.channels } : {}),
+        }
+        const result = await cockpit<Record<string, unknown>>(deps, '/api/serial/decode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            decoder: args.decoder,
-            ...(args.hex !== undefined ? { hex: args.hex } : {}),
-            ...(args.data_b64 !== undefined ? { data_b64: args.data_b64 } : {}),
-            ...(args.channels !== undefined ? { channels: args.channels } : {}),
-          }),
+          body: JSON.stringify(payload),
         })
+        if (args.apply !== true) return result
+        // 落会话：人看到的波形页与本次解码同源（同一 decoder + 同一帧环）
+        try {
+          const applied = await cockpit<Record<string, unknown>>(deps, '/api/serial/monitor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'decoder', actor: 'agent', decoder: args.decoder }),
+          })
+          return { ...result, applied: true, session: applied }
+        } catch (error) {
+          return {
+            ...result,
+            applied: false,
+            note: `解码成功但未能落到会话（没有进行中的监视？）：${error instanceof Error ? error.message : String(error)}`,
+          }
+        }
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_serial_decoded',
+      description:
+        '增量读取**会话级共享解码帧**（与面板波形页同一份数据）：agent 先把 decoder 落到会话' +
+        '（elab_serial_monitor action=decoder 或 elab_serial_decode apply=true），再用本工具拿结构化 ' +
+        'values 数组下结论——人看到的波形就是这些帧。返回 next_after 游标与 gap（环挤掉的帧数）。',
+      parameters: {
+        after: { type: 'number', description: '上次返回的 next_after（缺省 0 = 从帧环起点）' },
+        limit: { type: 'number', description: '最多返回多少帧（默认 200，上限 1024）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 读解码帧' }),
+      async execute(args: { after?: number; limit?: number }) {
+        const after = Math.max(0, Math.round(args.after ?? 0))
+        const limit = Math.min(1024, Math.max(1, Math.round(args.limit ?? 200)))
+        const tail = await fetchDecoded(deps, after)
+        if (tail.active !== true) {
+          return {
+            ok: false,
+            active: false,
+            note: '没有进行中的串口监视；先用 elab_serial_monitor action=open（需要硬件在位）',
+          }
+        }
+        const all = tail.frames ?? []
+        const frames = all.slice(-limit)
+        return {
+          ok: true,
+          active: true,
+          epoch: tail.epoch,
+          decoder: tail.decoder,
+          decoder_by: tail.decoder_by,
+          channels: tail.channels,
+          total_frames: tail.total_frames,
+          skipped: tail.skipped,
+          pending_bytes: tail.pending_bytes,
+          covered: tail.covered,
+          error: tail.error ?? null,
+          next_after: all.length > 0 ? all[all.length - 1].seq : after,
+          gap: tail.gap ?? 0,
+          frames,
+        }
       },
     }),
   )

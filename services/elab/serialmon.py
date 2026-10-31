@@ -58,6 +58,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from . import serialcodec as codec
 from . import serialport as sp
 from . import serialterm as st
 from .config import Config
@@ -74,6 +75,12 @@ PARTIAL_FLUSH_S = 1.0
 #: 录制文件上限（K5）：**有界**是硬要求 —— 不设上限的录制迟早把磁盘写满，
 #: 而串口是设备喋喋不休的心跳。到顶就停录并标 ``truncated``，不静默继续。
 CAP_MAX_BYTES = 5 << 20
+#: 会话级解码帧环上限。波形页只画最近一段；agent 用游标增量读。
+#: 与行/字节环同款：**有界 + gap 如实报告**，不在内存里无限攒帧。
+MAX_DEC_FRAMES = 1024
+#: 半帧上限。正常半帧 = 一帧以内（几十字节）；长时间解不出尾标记说明
+#: 流里混了不属于该解码器的字节 —— 到顶就丢弃并计入 ``skipped``，不让它无限长。
+MAX_DEC_PENDING = 64 << 10
 
 
 def _now() -> tuple[float, int, str]:
@@ -111,6 +118,21 @@ class _Session:
         self.dlock = threading.Lock()   # 行/批次/计数器/录制的互斥
         # 显式录制（K5）：None = 从未录过；active=False 表示已停/已到顶。
         self.cap: dict | None = None
+
+        # ── 会话级解码（共享）──
+        # ★ 解码器是**会话属性**，不是调用方的私有选项：agent 选定后，人在面板
+        #   波页看到的必须是同一套帧（"agent 驱动可视化结论"的落点）。
+        self.decoder = ""               # '' = 未启用解码
+        self.decoder_by = ""            # human / agent（谁最后选定）
+        self.dec_frames: deque[dict] = deque(maxlen=MAX_DEC_FRAMES)
+        self.dec_seq = 0                # 帧序号（单调；clear/换解码器也不回退）
+        self.dec_covered = 0            # 帧环挤掉的总帧数（gap 的证据）
+        self.dec_pending = b""          # 半帧（下一批续解）
+        self.dec_total = 0              # 已解出的总帧数（当前解码器）
+        self.dec_skipped = 0            # 被跳过的候选帧/坏行数
+        self.dec_channels = 0           # 已推断出的通道数
+        self.dec_updated = 0.0
+        self.dec_error: str | None = None
 
         self.stop = threading.Event()
         self.error: str | None = None
@@ -201,6 +223,87 @@ class _Session:
                 self.covered_chunks += 1
             # 录制在**入环之后**：环会挤出旧批次，录像不会（它的语义是"证据"）。
             self._cap_emit(rec["seq"], t_us, direction, rec["data"])
+            # 会话级解码只吃 **RX**（设备输出）。TX 是我们自己写的命令，
+            # 混进波形会把"设备在说什么"变成"我们刚才问了什么"。
+            if direction == "rx" and self.decoder:
+                self._decode_locked(rec["data"], t_us, hms)
+
+    # ── 会话级解码（共享帧环）──────────────────────────────────
+    def _decode_locked(self, data: bytes, t_us: int, hms: str) -> None:
+        """增量解码一批 RX 字节。**调用方已持 dlock**。
+
+        半帧不丢：``dec_pending`` 原样带到下一批（与 ``serialcodec`` 的语义
+        同源）。解码失败不拖死读线程 —— 只记 ``dec_error``，下一批再试。
+        """
+        try:
+            res = codec.decode(self.dec_pending + bytes(data), self.decoder,
+                               channels=self.dec_channels or None)
+        except Exception as exc:                   # noqa: BLE001
+            self.dec_error = f"{type(exc).__name__}: {exc}"
+            return
+        if not res.get("ok"):
+            self.dec_error = str(res.get("error") or "解码失败")
+            return
+        self.dec_error = None
+        self.dec_channels = int(res.get("channels") or self.dec_channels or 0)
+        self.dec_skipped += int(res.get("skipped") or 0)
+        pending_b64 = str(res.get("pending_b64") or "")
+        self.dec_pending = (base64.b64decode(pending_b64) if pending_b64 else b"")
+        if len(self.dec_pending) > MAX_DEC_PENDING:
+            # 混了不属于该解码器的字节：半帧不可能这么长 —— 丢掉并如实计跳过。
+            self.dec_skipped += 1
+            self.dec_pending = b""
+        for vals in res.get("frames") or []:
+            self.dec_seq += 1
+            self.dec_total += 1
+            if len(self.dec_frames) == self.dec_frames.maxlen:
+                self.dec_covered += 1
+            self.dec_frames.append({"seq": self.dec_seq, "t": hms,
+                                    "t_us": t_us, "values": list(vals)})
+        self.dec_updated = time.time()
+
+    def _decode_view_locked(self) -> dict:
+        """解码状态投影（给快照 / 动作返回值用）。**调用方已持 dlock**。"""
+        return {"decoder": self.decoder, "decoder_by": self.decoder_by,
+                "channels": self.dec_channels, "total_frames": self.dec_total,
+                "skipped": self.dec_skipped,
+                "pending_bytes": len(self.dec_pending),
+                "covered": self.dec_covered,
+                "updated_at": round(self.dec_updated, 3),
+                "error": self.dec_error}
+
+    def set_decoder(self, decoder: str, *, actor: str = "human") -> dict:
+        """会话级选定/清除解码器（agent 与人都走这一处）。
+
+        换解码器 = 清空帧环与半帧，但**帧序号保持单调**（clear 也不回退）：
+        前端/agent 手里的游标不会因为"换了个解码器"而突然读到旧帧。
+        """
+        dec = str(decoder or "").strip()
+        if dec not in ("", "justfloat", "firewater"):
+            return {"ok": False, "error": f"未知解码器：{dec!r}"}
+        with self.dlock:
+            self.dec_covered += len(self.dec_frames)
+            self.dec_frames.clear()
+            self.dec_pending = b""
+            self.dec_total = 0
+            self.dec_skipped = 0
+            self.dec_channels = 0
+            self.dec_error = None
+            self.decoder = dec
+            self.decoder_by = actor if dec else ""
+            self.dec_updated = time.time()
+            return {"ok": True, "active": self.alive, "epoch": self.epoch,
+                    **self._decode_view_locked()}
+
+    def tail_decoded(self, after: int = 0) -> dict:
+        """增量读回共享解码帧（``seq > after``）。返回下一游标与 gap。"""
+        with self.dlock:
+            frames = [dict(f) for f in self.dec_frames if f["seq"] > after]
+            gap = max(0, frames[0]["seq"] - after - 1) if frames else 0
+            return {"active": self.alive, "epoch": self.epoch,
+                    "next_after": self.dec_seq, "frames": frames, "gap": gap,
+                    **self._decode_view_locked()}
+
 
     # ── 录制（K5）──────────────────────────────────────────────
     def _cap_emit(self, seq: int, t_us: int, direction: str,
@@ -294,6 +397,13 @@ class _Session:
             self.lines.clear()
             self.chunks.clear()
             self.bytes_total = 0
+            # 解码帧环同样清空（序号仍单调；清掉的帧计入 covered）。
+            self.dec_covered += len(self.dec_frames)
+            self.dec_frames.clear()
+            self.dec_pending = b""
+            self.dec_total = 0
+            self.dec_skipped = 0
+            self.dec_error = None
         return {"cleared_lines": nl, "cleared_chunks": nc}
 
     def pause(self) -> None:
@@ -343,7 +453,9 @@ def _snapshot(s: _Session | None) -> dict:
                     "active": s.cap["active"], "path": s.cap["path"],
                     "bytes": s.cap["bytes"], "chunks": s.cap["chunks"],
                     "truncated": s.cap["truncated"],
-                    "error": s.cap["error"], "max_bytes": s.cap["max_bytes"]})}
+                    "error": s.cap["error"], "max_bytes": s.cap["max_bytes"]}),
+                # 会话级解码投影：agent 与人读的是同一份（'' = 未启用）
+                "decode": s._decode_view_locked()}
 
 
 def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
@@ -454,6 +566,26 @@ def tail_bytes(after: int, *, direction: str = "all", limit: int = 0) -> dict:
 def status() -> dict:
     """给 capabilities / 初始渲染用的轻量快照。"""
     return _snapshot(_SESS)
+
+
+def set_decoder(decoder: str, *, actor: str = "human") -> dict:
+    """会话级选定解码器（POST /api/serial/monitor action=decoder）。"""
+    s = _SESS
+    if s is None:
+        return {"ok": False, "error": "没有进行中的监视"}
+    return s.set_decoder(decoder, actor=actor)
+
+
+def tail_decoded(after: int = 0) -> dict:
+    """增量读回共享解码帧（GET /api/serial/monitor/decoded）。"""
+    s = _SESS
+    if s is None:
+        return {"active": False, "epoch": 0, "decoder": "", "decoder_by": "",
+                "channels": 0, "frames": [], "next_after": 0, "gap": 0,
+                "skipped": 0, "pending_bytes": 0, "covered": 0,
+                "updated_at": 0.0, "error": None}
+    s.touch_lease()
+    return s.tail_decoded(int(after or 0))
 
 
 def clear() -> dict:

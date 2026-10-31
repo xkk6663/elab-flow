@@ -11,12 +11,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { SerialPort } from '../../../app/ports.ts'
-import type { SerialChunk, SerialMonitorLine, SerialMonitorSnapshot } from '../../../domain/icd.ts'
+import type {
+  SerialChunk,
+  SerialDecodedFrame,
+  SerialDecodedTail,
+  SerialMonitorLine,
+  SerialMonitorSnapshot,
+} from '../../../domain/icd.ts'
 
 export const SERIAL_POLL_MS = 500
 const MAX_LOCAL_LINES = 2000
 const MAX_LOCAL_CHUNKS = 4096
 const MAX_LOCAL_BYTES = 1 << 20
+/** 本地波形帧上限；与服务端帧环（1024）同量级，多出的按帧序号挤掉。 */
+const MAX_LOCAL_DEC_FRAMES = 1024
 
 export interface SerialSendOpts {
   format: string
@@ -33,11 +41,20 @@ export interface SerialStream {
   /** 行/批次被环形缓冲挤掉的累计数（只增不减；clear 不重置） */
   gapLines: number
   gapChunks: number
+  gapDecoded: number
+  /**
+   * 会话级共享解码帧（P3.5）：agent 选定 decoder 后，内核在 RX 入环时增量解码，
+   * 这里拉到的就是**人看到的波形**本身 —— agent 与面板同源。
+   */
+  decoded: SerialDecodedFrame[]
+  decodedSnap: SerialDecodedTail | null
   error: string | null
   open(): Promise<{ ok: boolean; error?: string }>
   close(): Promise<void>
   clear(): Promise<void>
   setPaused(next: boolean): Promise<void>
+  /** 选解码器（human 面板操作；agent 用 action=decoder 走同一条会话属性）。 */
+  setDecoder(decoder: string): Promise<{ ok: boolean; error?: string }>
   send(data: string, opts: SerialSendOpts): Promise<{
     ok: boolean
     written: number
@@ -67,12 +84,18 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
   const [snap, setSnap] = useState<SerialMonitorSnapshot | null>(initial)
   const [lines, setLines] = useState<SerialMonitorLine[]>([])
   const [chunks, setChunks] = useState<SerialChunk[]>([])
-  const [gaps, setGaps] = useState({ lines: 0, chunks: 0 })
+  const [decoded, setDecoded] = useState<SerialDecodedFrame[]>([])
+  const [decodedSnap, setDecodedSnap] = useState<SerialDecodedTail | null>(null)
+  const [gaps, setGaps] = useState({ lines: 0, chunks: 0, decoded: 0 })
   const [error, setError] = useState<string | null>(null)
 
   const snapRef = useRef<SerialMonitorSnapshot | null>(initial)
   const lineCursor = useRef(0)
   const chunkCursor = useRef(0)
+  /** 共享解码帧游标（帧序号单调；换 decoder / clear 都不回退） */
+  const decCursor = useRef(0)
+  /** 上一次拉到的 decoder —— 变化即本地帧重新开始（不同解码器的值不可混画） */
+  const decDecoder = useRef('')
   const epochRef = useRef<number>(-1)
   const bytesRef = useRef(0)
   /** 请求代际：clear / 重开之后，忽略在途的旧响应 */
@@ -91,10 +114,14 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
   const resetLocal = useCallback(() => {
     lineCursor.current = 0
     chunkCursor.current = 0
+    decCursor.current = 0
+    decDecoder.current = ''
     bytesRef.current = 0
     setLines([])
     setChunks([])
-    setGaps({ lines: 0, chunks: 0 })
+    setDecoded([])
+    setDecodedSnap(null)
+    setGaps({ lines: 0, chunks: 0, decoded: 0 })
   }, [])
 
   const seedFromSnapshot = useCallback((s: SerialMonitorSnapshot) => {
@@ -102,6 +129,7 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     epochRef.current = s.epoch ?? 0
     lineCursor.current = 0
     chunkCursor.current = 0
+    decCursor.current = 0
     bytesRef.current = 0
     setSnap(s)
   }, [])
@@ -116,9 +144,14 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
       busyRef.current = true
       const gen = genRef.current
       try {
-        const [lt, bt] = await Promise.all([
+        // 快照上 decoder 非空 = 会话已启用共享解码（agent 或人选定），才拉帧。
+        const wantDecoded = (snapRef.current?.decode?.decoder ?? '') !== ''
+        const [lt, bt, dt] = await Promise.all([
           api.serialMonitor(lineCursor.current, sessionId),
           api.serialMonitorBytes(chunkCursor.current, { sessionId }),
+          wantDecoded
+            ? api.serialMonitorDecoded(decCursor.current, sessionId)
+            : Promise.resolve(null),
         ])
         if (disposed || gen !== genRef.current) return
 
@@ -168,7 +201,31 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }))
         }
 
-        // ④ 读线程异常自愈 / 别处关了 → 如实收尾
+        // ④ 共享解码帧（P3.5）：同一份帧就是面板波形页画的（agent 与人同图）
+        if (dt !== null) {
+          setDecodedSnap(dt)
+          if (dt.decoder !== decDecoder.current) {
+            // 换了解码器：旧帧的值来自别一种协议，不能混画；帧序号仍单调，游标不回退。
+            decDecoder.current = dt.decoder
+            setDecoded([])
+          }
+          if (dt.frames.length > 0) {
+            setDecoded((prev) => {
+              const next = prev.concat(dt.frames)
+              return next.length > MAX_LOCAL_DEC_FRAMES
+                ? next.slice(next.length - MAX_LOCAL_DEC_FRAMES)
+                : next
+            })
+          }
+          const missedFrames = dt.next_after - decCursor.current - dt.frames.length
+          decCursor.current = dt.next_after
+          if (dt.gap > 0 || missedFrames > 0) {
+            const lost = Math.max(dt.gap, missedFrames)
+            setGaps((g) => ({ ...g, decoded: g.decoded + lost }))
+          }
+        }
+
+        // ⑤ 读线程异常自愈 / 别处关了 → 如实收尾
         if (!lt.active) {
           if (lt.error !== undefined && lt.error !== null) setError(lt.error)
           remember({ ...lt, active: false })
@@ -241,8 +298,58 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     bytesRef.current = 0
     setLines([])
     setChunks([])
-    setGaps({ lines: 0, chunks: 0 })
+    setDecoded([])
+    setDecodedSnap(null)
+    setGaps({ lines: 0, chunks: 0, decoded: 0 })
   }, [sessionId, api])
+
+  /**
+   * 选解码器（human 选定）—— 写的是**会话属性**，所以 agent 随后用
+   * `elab_serial_decoded` 读到的帧，与这里面板画的帧是同一份。
+   */
+  const setDecoder = useCallback(
+    async (decoder: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const r = (await api.serialMonitorToggle('decoder', {
+          decoder,
+          actor: 'human',
+          sessionId,
+        })) as unknown as { ok?: boolean; error?: string; active?: boolean }
+        if (r.ok === false) {
+          setError(r.error ?? '设置解码器失败')
+          return { ok: false, error: r.error ?? '设置解码器失败' }
+        }
+        // 本地帧从新解码器重新开始；游标保持（服务端帧序号单调，不回退）
+        decDecoder.current = decoder
+        setDecoded([])
+        setDecodedSnap(null)
+        // 快照里的 decode 投影立即跟着变，下一轮 tick 就会开始拉帧（不用等一次往返）
+        if (snapRef.current !== null) {
+          const prevDecode = snapRef.current.decode
+          remember({
+            ...snapRef.current,
+            decode: {
+              decoder,
+              decoder_by: 'human',
+              channels: prevDecode?.channels ?? 0,
+              total_frames: 0,
+              skipped: 0,
+              pending_bytes: 0,
+              covered: prevDecode?.covered ?? 0,
+              updated_at: Date.now() / 1000,
+              error: null,
+            },
+          })
+        }
+        return { ok: true }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(msg)
+        return { ok: false, error: msg }
+      }
+    },
+    [sessionId, remember, api],
+  )
 
   const setPaused = useCallback(
     async (next: boolean): Promise<void> => {
@@ -284,13 +391,17 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     paused,
     lines,
     chunks,
+    decoded,
+    decodedSnap,
     gapLines: gaps.lines,
     gapChunks: gaps.chunks,
+    gapDecoded: gaps.decoded,
     error,
     open,
     close,
     clear,
     setPaused,
+    setDecoder,
     send,
   }
 }
