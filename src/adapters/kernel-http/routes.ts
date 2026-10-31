@@ -81,11 +81,17 @@ const GET_ALLOW = new Set([
   'serial/monitor',
   // P1 字节真值：与行级 monitor 同步轮询（方向/时间/序号 + base64 原始字节）
   'serial/monitor/bytes',
+  // 适配包 / 社区市场投影（只读）：?market=0 跳过联网，?q= 搜索市场条目
+  'packs',
+  // 包操作任务快照（POST /api/pkg/* 返回 202 后轮询它）
+  'pkg/job',
 ])
 
 /** 允许转发的 POST 端点。 */
 const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
-  'serial/capture', 'adapt'])
+  'serial/capture', 'adapt',
+  // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
+  'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate'])
 
 /**
  * 代理路由的依赖端口（原 ProxyDeps；批 2 起形状收敛到 app/ports.ts）。

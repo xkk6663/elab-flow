@@ -18,6 +18,9 @@ import type {
   DiscoverResponse,
   ElabConfig,
   HostInfo,
+  PacksStatus,
+  PkgJob,
+  PkgVerifyResult,
   PlanPreview,
   SerialAction,
   SerialBytesTail,
@@ -26,7 +29,17 @@ import type {
   SerialWriteResult,
 } from '../../domain/icd.ts'
 
-export type { AdaptResponse, DiscoverResponse, ElabConfig, HostInfo } from '../../domain/icd.ts'
+export type {
+  AdaptResponse,
+  DiscoverResponse,
+  ElabConfig,
+  HostInfo,
+  InstalledPack,
+  MarketPack,
+  PacksStatus,
+  PkgJob,
+  PkgVerifyResult,
+} from '../../domain/icd.ts'
 
 export interface ApiError {
   code: string
@@ -197,4 +210,46 @@ export const elabApi = {
   getConfig: () => request<{ ok: boolean; config: ElabConfig }>('/elab/config'),
   saveConfig: (patch: Partial<ElabConfig>) =>
     post<{ ok: boolean; config: ElabConfig }>('/elab/config', patch),
+
+  // ── 适配包 / 社区市场（工具层只渲染内核投影，逻辑全在内核）────────
+  /** GET /api/packs：已装包 + （可选）市场条目。market=false 跳过市场索引读取。 */
+  packs: (opts?: { market?: boolean; q?: string; sessionId?: string }) => {
+    const q = new URLSearchParams()
+    if (opts?.market === false) q.set('market', '0')
+    if (opts?.q !== undefined && opts.q !== '') q.set('q', opts.q)
+    const qs = q.toString()
+    return request<PacksStatus>(withSession(`/elab/api/packs${qs === '' ? '' : `?${qs}`}`, opts?.sessionId))
+  },
+  /** GET /api/pkg/job：包操作任务快照（202 后 500ms 轮询）。 */
+  pkgJob: (jobId: string, sessionId?: string) =>
+    request<PkgJob>(withSession(`/elab/api/pkg/job?job=${encodeURIComponent(jobId)}`, sessionId)),
+  /**
+   * POST /api/pkg/install：**只收包名**（来源与 sha256 由内核从市场索引解析）。
+   * official=true → 装本仓 `packs/official` 里的内置包（离线）。
+   * 返回 202 + job（异步：git clone / 哈希 / 复制可能很久）。
+   */
+  pkgInstall: (opts: { name: string; official?: boolean; force?: boolean; sessionId?: string }) =>
+    post<PkgJob>(withSession('/elab/api/pkg/install', opts.sessionId), {
+      name: opts.name,
+      ...(opts.official === true ? { official: true } : {}),
+      ...(opts.force === true ? { force: true } : {}),
+    }),
+  pkgRemove: (opts: { name: string; sessionId?: string }) =>
+    post<PkgJob>(withSession('/elab/api/pkg/remove', opts.sessionId), { name: opts.name }),
+  pkgUpdate: (opts: { name?: string; force?: boolean; sessionId?: string } = {}) =>
+    post<PkgJob>(withSession('/elab/api/pkg/update', opts.sessionId), {
+      ...(opts.name !== undefined && opts.name !== '' ? { name: opts.name } : {}),
+      ...(opts.force === true ? { force: true } : {}),
+    }),
+  /** verify 是同步 200（只读、快）。name 缺省 = 全部已装包。 */
+  pkgVerify: (opts: { name?: string; sessionId?: string } = {}) =>
+    post<{ ok: boolean; results: PkgVerifyResult[] }>(
+      withSession('/elab/api/pkg/verify', opts.sessionId),
+      { ...(opts.name !== undefined && opts.name !== '' ? { name: opts.name } : {}) },
+    ),
+  /** activate 是同步 200：启用一套已装包 + 重生成平台 skill + 重载 Config。 */
+  pkgActivate: (opts: { name: string; sessionId?: string }) =>
+    post<Record<string, unknown>>(withSession('/elab/api/pkg/activate', opts.sessionId), {
+      name: opts.name,
+    }),
 }
