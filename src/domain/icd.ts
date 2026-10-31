@@ -325,6 +325,8 @@ export interface SerialWriteResult {
   elapsed_s: number;
   /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
   eol: string;
+  /** 实际使用的发送格式（utf8/ascii/gbk/hex） */
+  format?: string;
   error: string | null;
   /** "monitor" = 写通道被路由进了常驻监视会话（不重开口；回显走实时流） */
   via?: "monitor";
@@ -388,6 +390,24 @@ export interface SerialMonitorSnapshot {
   covered?: number;
   /** 读线程异常自愈时留下的原因（拔线/口被抢）；null = 一切正常 */
   error?: string | null;
+  /** 连接纪元：每次 open 自增；前端发现变化必须重置游标 */
+  epoch?: number;
+  /** 会话内已累计的批次数（= 最后一条批次 seq） */
+  chunk_seq?: number;
+  /** 字节环挤掉的总批次数 */
+  covered_chunks?: number;
+  /** 字节环当前总字节数 */
+  bytes_total?: number;
+  /** 暂停入环（仍在读口） */
+  paused?: boolean;
+  /** 会话由谁打开（human / agent） */
+  opened_by?: string;
+  /** 是否允许 agent 经会话写 */
+  allow_agent_write?: boolean;
+  /** Agent 租约总长（秒；0 = 无租约） */
+  lease_s?: number;
+  /** 租约剩余秒（无租约 = 0） */
+  lease_remaining_s?: number;
 }
 
 export interface SerialMonitorLine {
@@ -413,6 +433,54 @@ export interface SerialMonitorWriteResult {
   port: string;
   baud: number;
   error: string | null;
+}
+
+// ── 串口监视：字节真值（P1）──────────────────────────────────────
+/** 监视会话动作（POST /api/serial/monitor 的 body.action）。 */
+export type SerialAction = 'open' | 'close' | 'clear' | 'pause' | 'resume'
+
+/**
+ * 一条原始字节批次。
+ *
+ * ★ 字节是**真值**，行文本只是投影：方向（rx/tx）、采集时刻（t_us）与单调序号
+ *   都在这里，前端据此做方向过滤/波形/导出。
+ */
+export interface SerialChunk {
+  seq: number
+  dir: 'rx' | 'tx'
+  /** 服务端已格式化的 HH:MM:SS.mmm */
+  t: string
+  t_us: number
+  len: number
+  /** 原始字节（base64） */
+  data_b64: string
+}
+
+/** GET /api/serial/monitor/bytes 的响应（增量批次 + 快照）。 */
+export interface SerialBytesTail extends SerialMonitorSnapshot {
+  chunks: SerialChunk[]
+  /** 浏览器错过的批次数下限（仅 dir=all 有意义；过滤时服务端置 0） */
+  gap: number
+  /** 是否做了方向过滤（true 时 gap 恒 0） */
+  filtered?: boolean
+  /** 字节环挤掉的总批次数（快照里的 covered_chunks 同义） */
+  covered?: number
+}
+
+// ── 串口协议解码（P3）───────────────────────────────────────────
+/** POST /api/serial/decode 的响应（无状态：半帧以 pending 原样带回）。 */
+export interface SerialDecodeResult {
+  ok: boolean
+  decoder: string
+  channels: number
+  /** 二维 float 数组（每行一帧） */
+  frames: number[][]
+  total_frames: number
+  skipped: number
+  pending_bytes: number
+  pending_b64: string
+  input_bytes: number
+  error?: string
 }
 
 // ── /api/adapt（一键适配，M5.6）─────────────────────────────────

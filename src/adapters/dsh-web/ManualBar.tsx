@@ -13,8 +13,8 @@ import React from 'react'
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 
-import type { PlanView } from '../../domain/pipeline.ts'
-import { describeSkipped } from '../../domain/pipeline.ts'
+import type { PlanView, StepAvailability } from '../../domain/pipeline.ts'
+import { describeSkipped, stepLabel } from '../../domain/pipeline.ts'
 
 export interface ManualBarProps {
   plans: PlanView[]
@@ -22,7 +22,15 @@ export interface ManualBarProps {
   busy: boolean
   /** `--clean` 的删除目标路径（取自 plan 预览；null = 未知）。 */
   cleanTarget: string | null
+  /** 每步可用性（单步启动按钮的置灰依据）。 */
+  availability: StepAvailability
+  /** 常驻监视是否开着（串口超按钮的状态点）。 */
+  serialActive: boolean
   onRun(planId: string, opts: { clean: boolean; jobs: number | null }): void
+  /** 单步执行（构建/烧录/调试）。 */
+  onRunOne(step: string): void
+  /** 串口通道的「启动」：切到串口页并打开常驻监视。 */
+  onSerial(): void
   onCancel(): void
   onPreview(opts: { clean: boolean; jobs: number | null }): void
 }
@@ -60,6 +68,13 @@ function chipFor(primary: boolean, disabled: boolean): React.CSSProperties {
   return chipBase
 }
 
+/** 单步启动按钮（每个通道自己的启动入口；串口单独处理）。 */
+const STEP_BUTTONS: ReadonlyArray<{ step: string; label: string }> = [
+  { step: 'build', label: '构建' },
+  { step: 'flash', label: '烧录' },
+  { step: 'debug_verify', label: '调试' },
+]
+
 export function ManualBar(props: ManualBarProps): ReactNode {
   const { plans, running, busy, cleanTarget } = props
   const [clean, setClean] = useState(false)
@@ -91,24 +106,26 @@ export function ManualBar(props: ManualBarProps): ReactNode {
 
   return (
     <div style={{ flex: '0 0 auto', borderBottom: '1px solid var(--elab-border)' }}>
-      {/* ── 动作行 ── */}
-      <div style={{ display: 'flex', gap: '6px', padding: '6px 8px', flexWrap: 'wrap' }}>
-        {plans.map((plan) => {
-          const disabled = running || busy || !plan.enabled
-          const tip = plan.enabled ? describeSkipped(plan) || plan.hint : `不可用：${plan.reason ?? '未知原因'}`
-          return (
-            <button
-              key={plan.id}
-              type="button"
-              disabled={disabled}
-              title={tip}
-              onClick={() => request(plan.id)}
-              style={chipFor(plan.id !== 'basic', disabled)}
-            >
-              {plan.label}
-            </button>
-          )
-        })}
+      {/* ── 动作行：三连 / 闭环（单步启动在下一行） ── */}
+      <div style={{ display: 'flex', gap: '6px', padding: '6px 8px 4px', flexWrap: 'wrap' }}>
+        {plans
+          .filter((plan) => plan.id !== 'basic')
+          .map((plan) => {
+            const disabled = running || busy || !plan.enabled
+            const tip = plan.enabled ? describeSkipped(plan) || plan.hint : `不可用：${plan.reason ?? '未知原因'}`
+            return (
+              <button
+                key={plan.id}
+                type="button"
+                disabled={disabled}
+                title={tip}
+                onClick={() => request(plan.id)}
+                style={chipFor(plan.id === 'triple', disabled)}
+              >
+                {plan.label}
+              </button>
+            )
+          })}
 
         <button
           type="button"
@@ -142,6 +159,42 @@ export function ManualBar(props: ManualBarProps): ReactNode {
           style={{ ...chipFor(false, false), marginLeft: 'auto' }}
         >
           {'\u2699'}
+        </button>
+      </div>
+
+      {/* ── 单步启动行：构建 / 烧录 / 调试 / 串口，每个通道各自启动 ── */}
+      <div style={{ display: 'flex', gap: '6px', padding: '0 8px 6px', flexWrap: 'wrap' }}>
+        {STEP_BUTTONS.map((b) => {
+          const av = props.availability[b.step]
+          const disabled = running || busy || (av?.ok === false)
+          const tip = av?.ok === false ? `不可用：${av.reason ?? '未知原因'}` : `只跑这一步：${stepLabel(b.step)}`
+          return (
+            <button
+              key={b.step}
+              type="button"
+              disabled={disabled}
+              title={tip}
+              onClick={() => props.onRunOne(b.step)}
+              style={chipFor(false, disabled)}
+            >
+              {`\u25b6 ${b.label}`}
+            </button>
+          )
+        })}
+
+        <button
+          type="button"
+          disabled={running || busy}
+          title={props.serialActive ? '串口监视已在运行：切到串口通道查看' : '启动串口通道：打开常驻监视并实时收设备输出'}
+          onClick={props.onSerial}
+          style={{
+            ...chipFor(false, running || busy),
+            ...(props.serialActive
+              ? { borderColor: 'var(--elab-status-ok)', color: 'var(--elab-status-ok)' }
+              : {}),
+          }}
+        >
+          {props.serialActive ? '\u25cf 串口' : '\u25b6 串口'}
         </button>
       </div>
 

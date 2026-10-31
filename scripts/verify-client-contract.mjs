@@ -31,7 +31,8 @@ const fakeReactCore = {
   useRef: (v) => ({ current: v }),
   useMemo: (f) => f(),
   useCallback: (f) => f,
-  useSyncExternalStore: () => undefined,
+  // 真实快照：面板组件在 render 体内就消费 snap（如 snap.run.run），undefined 会炸
+  useSyncExternalStore: (_subscribe, getSnapshot) => (typeof getSnapshot === 'function' ? getSnapshot() : undefined),
 }
 // 真实宿主里 require('react') 同时支持命名访问与 default 访问
 const fakeReact = { ...fakeReactCore, default: fakeReactCore }

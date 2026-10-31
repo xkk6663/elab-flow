@@ -17,6 +17,12 @@ import type {
   ElabEvent,
   HostInfo,
   PlanPreview,
+  SerialAction,
+  SerialBytesTail,
+  SerialDecodeResult,
+  SerialMonitorSnapshot,
+  SerialMonitorTail,
+  SerialWriteResult,
 } from '../domain/icd.ts'
 import type { RunArbiter } from '../domain/arbiter.ts'
 
@@ -102,6 +108,53 @@ export interface IcdPort {
     jobs?: number
     sessionId?: string
   }): Promise<PlanPreview>
+}
+
+/**
+ * 串口数据面端口（client 半；实现：kernel-http/icd-client 的 elabApi 串口子集）。
+ * 四视图（行/字节/终端/波形）+ 发送/录制都只经这一处取数，dsh-web 不 import 兄弟适配器。
+ */
+export interface SerialPort {
+  serial(opts: {
+    project: string
+    data: string
+    port?: string
+    baud?: number
+    format?: string
+    eol?: string
+    encoding?: string
+    sessionId?: string
+  }): Promise<SerialWriteResult>
+  serialMonitor(after?: number, sessionId?: string): Promise<SerialMonitorTail>
+  serialMonitorBytes(
+    after?: number,
+    opts?: { dir?: 'all' | 'rx' | 'tx'; limit?: number; sessionId?: string },
+  ): Promise<SerialBytesTail>
+  serialMonitorToggle(
+    action: SerialAction,
+    opts?: {
+      project?: string
+      port?: string
+      baud?: number
+      actor?: 'human' | 'agent'
+      lease_s?: number
+      allow_agent_write?: boolean
+      sessionId?: string
+    },
+  ): Promise<Record<string, unknown>>
+  serialDecode(opts: {
+    decoder: string
+    dataB64?: string
+    hex?: string
+    channels?: number
+    sessionId?: string
+  }): Promise<SerialDecodeResult>
+  serialCapture(opts: {
+    action: 'start' | 'stop' | 'status'
+    project?: string
+    maxBytes?: number
+    sessionId?: string
+  }): Promise<Record<string, unknown>>
 }
 
 /** run 事件流的消费者（dsh-web 的环形缓冲从这里拿原始事件）。 */
