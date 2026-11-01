@@ -62,6 +62,9 @@ ACTIVE_FILE = "active.json"
 _MARKET_CACHE: dict = {}
 _MARKET_TTL_S = 300.0
 
+#: 现场遍历 GitHub 的结果（``refresh_market`` 写，市场页签首屏读）的复用窗口。
+MARKET_LIVE_TTL_S = 900.0
+
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 _SEMVER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[+-][0-9A-Za-z.+-]+)?$")
 
@@ -617,6 +620,55 @@ def bootstrap(cfg, *, root=None, force=False, log=print) -> list[dict]:
     return out
 
 
+def ensure_bootstrap(cfg, *, log=print) -> list[dict]:
+    """开箱即用：安装目录里**一个已装包都没有**时，自动装内置官方包。
+
+    为什么需要它：``packs/official`` 随仓分发（st/stm32），但骨架仓不预装到
+    ``packs/installed``。新用户第一次打开面板时，已安装页不应该空着等用户
+    手动点安装。只在"全新环境"生效：一旦有任何已装包，就不再自动补装
+    （用户显式卸载内置包后不会被悄悄装回来）。
+    """
+    if any(r.get("installed") for r in discover(cfg).values()):
+        return []
+    base = official_root(cfg)
+    if not base.is_dir():
+        return []
+    try:
+        return bootstrap(cfg, log=log)
+    except PackError as exc:
+        log(f"[elab] 内置包自动安装失败：{exc}")
+        return []
+
+
+def market_live_path(cfg) -> Path:
+    """现场遍历 GitHub 的结果文件（本机缓存，不入库，见 ``refresh_market``）。"""
+    return Path(cfg.root) / ".work" / "pkg" / "market-live.json"
+
+
+def refresh_market(cfg, *, token: str | None = None, topic: str = "elab-pack",
+                   limit: int = 100, block=None, log=print) -> dict:
+    """现场遍历 GitHub 上的全部 elab-pack 仓库 → 写本机市场索引缓存。
+
+    ★ 与 ``elab pkg index --remote`` 同一份实现（``market.build_remote_index``），
+      区别只是落点是 ``.work/pkg/market-live.json``：这是"打开面板时看一眼
+      当前有什么"的**本机视图**，不覆盖随仓的市场索引。
+    ★ 结果在 ``MARKET_LIVE_TTL_S`` 内复用（``market_spec`` 优先读它），
+      避免每敲一个字都重新联网遍历。
+    """
+    from . import market as market_mod          # 循环导入：market 依赖本模块
+
+    token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    result = market_mod.build_remote_index(token=token, topic=topic,
+                                           limit=limit, block=block)
+    out = market_live_path(cfg)
+    market_mod.write_index(result["index"], out)
+    report = result["report"]
+    log(market_mod.report_text(report))
+    return {"path": to_fwd(out),
+            "count": len(result["index"].get("packs") or []),
+            "report": report}
+
+
 def remove(cfg, name: str, *, force=False, log=print) -> dict:
     packs = discover(cfg)
     rec = packs.get(name)
@@ -775,6 +827,11 @@ def prune_skills(cfg, platforms, log=print) -> list[dict]:
 def market_spec(cfg) -> str:
     spec = os.environ.get("ELAB_MARKET_INDEX")
     if not spec:
+        # ★ 首次进入市场时内核现场遍历过 GitHub（refresh_market）→ 这份本机
+        #   结果优先，TTL 内不再联网。过期后自动回到配置的市场索引。
+        live = market_live_path(cfg)
+        if live.exists() and time.time() - live.stat().st_mtime < MARKET_LIVE_TTL_S:
+            return to_fwd(live)
         try:
             spec = ((cfg.host or {}).get("packs") or {}).get("market")
         except ElabError:

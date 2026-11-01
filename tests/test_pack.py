@@ -312,5 +312,38 @@ class TestActivePack(PackTestBase):
         self.assertEqual(st["chips"], ["acme/demo1"])
 
 
+class TestBootAndLiveMarket(PackTestBase):
+    """开箱即用（自动装内置包）与"现场遍历市场"的本机缓存优先级。"""
+
+    def _official_pack(self) -> Path:
+        official = self.root / "packs" / "official" / "acme" / "demo"
+        official.mkdir(parents=True)
+        (official / "pack.yaml").write_text(PACK_YAML, encoding="utf-8")
+        (official / "chips").mkdir()
+        (official / "chips" / "demo1.yaml").write_text(CHIP_YAML, encoding="utf-8")
+        return official
+
+    def test_ensure_bootstrap_installs_builtin_when_empty(self):
+        self._official_pack()
+        recs = pkg.ensure_bootstrap(self.cfg, log=lambda *a, **k: None)
+        self.assertEqual([r["name"] for r in recs], ["acme/demo"])
+        self.assertTrue((self.root / "packs" / "installed" / "acme" / "demo"
+                         / ".installed.json").exists())
+        self.assertEqual(pkg.read_active(self.cfg), "acme/demo")
+
+    def test_ensure_bootstrap_is_noop_when_any_pack_installed(self):
+        """已有任何已装包 → 不自动补装（用户卸载内置包后不会被悄悄装回来）。"""
+        src = self.make_pack()
+        pkg.install(self.cfg, local=src, log=lambda *a, **k: None)
+        self._official_pack()
+        self.assertEqual(pkg.ensure_bootstrap(self.cfg, log=lambda *a, **k: None), [])
+
+    def test_live_market_cache_takes_priority(self):
+        live = pkg.market_live_path(self.cfg)
+        live.parent.mkdir(parents=True)
+        live.write_text(json.dumps({"schema_version": 1, "packs": []}), encoding="utf-8")
+        self.assertEqual(pkg.market_spec(self.cfg), pkg.to_fwd(live))
+
+
 if __name__ == "__main__":
     unittest.main()

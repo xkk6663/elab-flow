@@ -1083,7 +1083,10 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 # ★ 安装/卸载适配包期间**冻结闭环**：包操作会改芯片数据与启用状态，
                 #   此刻起 run 会读到半成品配置。与包操作里的反向守卫成对出现。
                 busy_job = self.pkg_jobs.current()
-                if busy_job is not None and busy_job.get("state") in ("queued", "running"):
+                if (busy_job is not None
+                        and busy_job.get("state") in ("queued", "running")
+                        # 市场遍历只写 .work 缓存，不改芯片数据 → 不冻结闭环
+                        and busy_job.get("action") != "market"):
                     return self._err(409, (
                         f"适配包操作进行中（{busy_job.get('action')} {busy_job.get('name')}，"
                         f"阶段：{busy_job.get('stage')}）—— 闭环已冻结，等它完成后重试"
@@ -1117,7 +1120,8 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 # 适配包写动作：install / remove / verify / update / activate。
                 # ★ 只收**包名**（不收路径/URL/哈希）：来源与 sha256 由内核自己解析。
                 action = u.path[len("/api/pkg/"):]
-                if action not in ("install", "remove", "verify", "update", "activate"):
+                if action not in ("install", "remove", "verify", "update",
+                                  "activate", "market"):
                     return self._err(404, f"未知包操作：{action}")
                 return self._pkg(action, self._body())
             if u.path == "/api/serial":
@@ -1296,6 +1300,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
             update    202 + job（按市场索引升级，缺省全部）
             verify    200（只读、快，同步返回逐包结果）
             activate  200（启用一套已装包 + 重生成平台 skill + 重载 Config）
+            market    202 + job（现场遍历 GitHub 上的 elab-pack 仓库，写本机市场缓存）
 
         ★ 运行约束：有闭环在跑 → 包操作 409；有包操作在跑 → 新包操作 409。
           两者与 ``/api/run`` 的冻结守卫成对（"安装期间冻结闭环"）。
@@ -1305,6 +1310,17 @@ class CockpitHandler(BaseHTTPRequestHandler):
         if action == "verify":
             return self._json({"ok": True,
                                "results": pkg_mod.verify(self.cfg, name or None)})
+        if action == "market":
+            # ★ 首屏遍历：把 GitHub 上现有 elab-pack 仓库现场发现一遍（异步 job，
+            #   结果落 .work/pkg/market-live.json，15 分钟内复用）。不改芯片数据，
+            #   所以**不**参与闭环冻结守卫。
+            def work(log, stage):
+                cfg = type(self).cfg
+                stage("遍历 GitHub 上的 elab-pack 仓库")
+                res = pkg_mod.refresh_market(cfg, log=log)
+                stage("生成市场索引")
+                return res
+            return self._json(self.pkg_jobs.start("market", "", work), 202)
         active_run = self.mgr.list_active()
         if active_run:
             return self._err(409, (
@@ -1313,7 +1329,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 f"等它结束再做包操作（安装/卸载会改芯片数据）"))
         if self.pkg_jobs.busy():
             return self._err(409, "已有包操作进行中 —— 等它完成")
-        if not name and action != "update":
+        if not name and action not in ("update", "market"):
             return self._err(400, "缺少 name（适配包名，如 st/stm32）")
 
         if action == "activate":
@@ -1718,6 +1734,17 @@ def make_server(cfg: Config, *, host: str = HOST, port: int = DEFAULT_PORT,
         handler.cfg = new_cfg
         mgr.cfg = new_cfg
     pkg_jobs.bind(_reload_pack_cfg)
+    # ★ 开箱即用：全新环境（packs/installed 为空）时自动装内置官方包（st/stm32），
+    #   让「已安装」页签首屏就有内容。已有任何已装包时不动（不覆盖用户卸载）。
+    try:
+        installed = pkg_mod.ensure_bootstrap(cfg, log=log)
+        if installed:
+            log(f"[cockpit] 已自动安装内置适配包："
+                f"{'、'.join(r['name'] for r in installed)}")
+            handler.cfg = Config(cfg.root)
+            mgr.cfg = handler.cfg
+    except Exception as exc:                       # noqa: BLE001
+        log(f"[cockpit] 内置适配包自动安装失败：{exc}")
     srv = CockpitServer((host, port), handler)
     srv.verbose = verbose                                # type: ignore[attr-defined]
     srv.run_manager = mgr                                # type: ignore[attr-defined]
