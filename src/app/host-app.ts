@@ -14,6 +14,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, normalize } from 'node:path'
 
 import { CockpitHost, looksLikeElabRoot } from '../adapters/kernel-process/host-process.ts'
+import { probeEnv } from '../adapters/env/probe.ts'
+import { cloneKernel, validateBootstrapRequest } from '../adapters/env/bootstrap.ts'
 import { registerOnce } from '../adapters/kernel-http/route-guard.ts'
 import type { RunArbiter } from '../domain/arbiter.ts'
 import {
@@ -35,6 +37,8 @@ export interface ApplyOptions {
   arbiter?: RunArbiter
   /** 串口监视互斥记账（P5 §6.2 规则 2）。 */
   serialMutex?: SerialMutexTracker
+  /** 引导向导写根后调用（由 main.ts 注入：热更新 + 持久化 elabRoot）。 */
+  onRootPersisted?: (dir: string) => void
 }
 
 /** 从起点向上找 elab 仓库根（`cockpit/server.py` + `services/elab`）。 */
@@ -74,6 +78,13 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
     const cwd = options.resolveCwd?.(sessionId)
     if (cwd !== undefined) return findElabRootUpward(cwd)
     return findElabRootUpward(process.cwd())
+  }
+
+  /** 根的来源（UI 如实说明"这是你指定的还是自动找到的"）。 */
+  function rootSource(sessionId?: string): 'user' | 'auto' | null {
+    if (resolveRoot(sessionId) === undefined) return null
+    const explicit = current.elabRoot
+    return explicit !== 'auto' && explicit.trim() !== '' ? 'user' : 'auto'
   }
 
   async function ensureHost(sessionId?: string): Promise<{ baseUrl: string; info: { port: number; job: string; bootMs: number } }> {
@@ -142,6 +153,7 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
           JSON.stringify({
             ok: true,
             elabRoot: root ?? null,
+            rootSource: rootSource(url.searchParams.get('sessionId') ?? undefined),
             running: info === undefined ? false : info.alive(),
             port: info?.port ?? null,
             pid: info?.pid ?? null,
@@ -152,6 +164,89 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
             retention: current.retention,
           }),
         )
+      },
+    }),
+  )
+
+  // ── 引导向导：只读环境探测（GET /elab/env）──────────────────────
+  disposers.push(
+    registerOnce(ctx, {
+      kind: 'exact',
+      path: '/elab/env',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (ctx.connection?.requestRejection(req) !== undefined) {
+          json(res, 403, { ok: false, error: { code: 'forbidden' } })
+          return
+        }
+        if (req.method !== 'GET') {
+          res.setHeader('Allow', 'GET')
+          json(res, 405, { ok: false, error: { code: 'method-not-allowed' } })
+          return
+        }
+        try {
+          const url = new URL(req.url ?? '/', 'http://dsh.internal')
+          const sessionId = url.searchParams.get('sessionId') ?? undefined
+          const env = await probeEnv({ pythonPath: current.pythonPath })
+          json(res, 200, { ok: true, env, elabRoot: resolveRoot(sessionId) ?? null, rootSource: rootSource(sessionId) })
+        } catch (error) {
+          json(res, 500, { ok: false, error: { code: 'probe-failed', message: String(error) } })
+        }
+      },
+    }),
+  )
+
+  // ── 引导向导：写动作（POST /elab/bootstrap）────────────────────
+  //   只允许 set-root（校验 + 写配置）与 clone（浅克隆到空目录 + 写配置）。
+  disposers.push(
+    registerOnce(ctx, {
+      kind: 'exact',
+      path: '/elab/bootstrap',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (ctx.connection?.requestRejection(req) !== undefined) {
+          json(res, 403, { ok: false, error: { code: 'forbidden' } })
+          return
+        }
+        if (req.method !== 'POST') {
+          res.setHeader('Allow', 'POST')
+          json(res, 405, { ok: false, error: { code: 'method-not-allowed' } })
+          return
+        }
+        let body: unknown
+        try {
+          body = JSON.parse(await readBody(req))
+        } catch {
+          json(res, 400, { ok: false, error: { code: 'bad-json', message: '请求体不是合法 JSON' } })
+          return
+        }
+        const check = validateBootstrapRequest(body, looksLikeElabRoot)
+        if (check.ok === false) {
+          json(res, 400, { ok: false, error: { code: check.code, message: check.message } })
+          return
+        }
+        const request = check.request
+        if (request.action === 'clone') {
+          const cloned = await cloneKernel(request.url, request.dir)
+          if (cloned.ok === false) {
+            json(res, 502, { ok: false, error: { code: 'clone-failed', message: cloned.error ?? 'git clone 失败' } })
+            return
+          }
+          if (!looksLikeElabRoot(request.dir)) {
+            json(res, 422, {
+              ok: false,
+              error: {
+                code: 'not-elab-root',
+                message: '克隆完成，但目录不是 elab 仓库根（需同时包含 cockpit/server.py 与 services/elab）',
+              },
+            })
+            return
+          }
+        }
+        // 根已变更 → 丢弃旧进程，下次 ensureHost 按新根起
+        const old = host
+        host = undefined
+        void old?.dispose().catch(() => undefined)
+        options.onRootPersisted?.(request.dir)
+        json(res, 200, { ok: true, action: request.action, elabRoot: request.dir })
       },
     }),
   )
@@ -210,5 +305,32 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
   Object.defineProperty(controller, 'current', { get: () => current })
 
   return controller
+}
+
+function json(res: ServerResponse, code: number, body: unknown): void {
+  const text = JSON.stringify(body)
+  res.statusCode = code
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('Content-Length', String(Buffer.byteLength(text)))
+  res.end(text)
+}
+
+function readBody(req: IncomingMessage, limit = 1 << 20): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error(`请求体超过 ${limit} 字节`))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
 }
 

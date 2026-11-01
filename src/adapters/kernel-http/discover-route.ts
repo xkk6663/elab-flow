@@ -11,6 +11,7 @@
  *   ③ 绝不写盘：写仍走 Python 的 `POST /api/adapt`（六道保护在那里）。
  */
 import { readFile, readdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -45,12 +46,17 @@ export interface HostContext {
 }
 
 export interface DiscoverConfig {
-  /** elab 仓库根（含 projects/ 与 elab.host.yaml）。`auto` = 由会话 cwd 向上找。 */
+  /** elab 仓库根（含 `cockpit/server.py` 与 `services/elab`）。`auto` = 由会话 cwd 向上找。 */
   elabRoot: string
   maxDepth: number
   limit: number
   /** 缓存 TTL（毫秒）；0 表示不缓存。 */
   cacheTtlMs: number
+  /**
+   * 根判据（唯一真源 = kernel-process 的 `looksLikeElabRoot`，由 main.ts 注入）。
+   * 缺省仅供单测使用，判据与宿主完全一致。
+   */
+  isElabRoot?: (dir: string) => boolean
 }
 
 export const DEFAULT_CONFIG: DiscoverConfig = {
@@ -58,6 +64,11 @@ export const DEFAULT_CONFIG: DiscoverConfig = {
   maxDepth: DEFAULT_MAX_DEPTH,
   limit: DEFAULT_LIMIT,
   cacheTtlMs: 30_000,
+}
+
+/** 与宿主半 `looksLikeElabRoot` 同一判据（生产接线由 main.ts 注入宿主实现）。 */
+export function isElabRootDefault(dir: string): boolean {
+  return existsSync(join(dir, 'cockpit', 'server.py')) && existsSync(join(dir, 'services', 'elab'))
 }
 
 /** 扫描起点解析结果：root + 来源（用于 UI 如实说明"在哪儿扫的"）。 */
@@ -92,26 +103,24 @@ function isUsableDir(p: string | undefined): p is string {
   return p !== undefined && p !== '' && isAbsolute(p)
 }
 
-/** 从起点向上找 elab 仓库根：同时存在 `projects/` 与 `elab.host.yaml` 才算。 */
-export async function findElabRoot(from: string, maxUp = 6): Promise<string | undefined> {
+/**
+ * 从起点向上找 elab 仓库根。
+ * ★ 判据与宿主半统一（`cockpit/server.py` + `services/elab`）—— 不再另立
+ *   "projects/ + elab.host.yaml" 的第二套标准（方案 B1）。
+ */
+export async function findElabRoot(
+  from: string,
+  maxUp = 6,
+  isElabRoot: (dir: string) => boolean = isElabRootDefault,
+): Promise<string | undefined> {
   let cur = resolve(from)
   for (let i = 0; i <= maxUp; i += 1) {
-    if (await looksLikeElabRoot(cur)) return normalizePath(cur)
+    if (isElabRoot(cur)) return normalizePath(cur)
     const up = dirname(cur)
     if (up === cur) break
     cur = up
   }
   return undefined
-}
-
-async function looksLikeElabRoot(dir: string): Promise<boolean> {
-  try {
-    const entries = await readdir(dir, { withFileTypes: true })
-    const names = new Set(entries.map((e) => e.name.toLowerCase()))
-    return names.has('projects') && names.has('elab.host.yaml')
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -188,7 +197,7 @@ export function createDiscoverService(ctx: HostContext, cfg: () => DiscoverConfi
     }
     const sessionCwd = resolveSessionCwd(ctx, sessionId)
     if (sessionCwd !== undefined) return { path: normalizePath(sessionCwd), source: 'session' }
-    const found = await findElabRoot(process.cwd())
+    const found = await findElabRoot(process.cwd(), 6, c.isElabRoot)
     if (found !== undefined) return { path: found, source: 'elabRoot' }
     return { path: normalizePath(homedir()), source: 'home' }
   }
@@ -197,7 +206,7 @@ export function createDiscoverService(ctx: HostContext, cfg: () => DiscoverConfi
   async function resolveAdapted(root: ScanRoot): Promise<{ elabRoot?: string; adapted: AdaptedEntry[] }> {
     const c = cfgNow()
     const explicit = c.elabRoot !== 'auto' && c.elabRoot.trim() !== '' ? c.elabRoot.trim() : undefined
-    const elabRoot = explicit !== undefined ? normalizePath(explicit) : await findElabRoot(root.path)
+    const elabRoot = explicit !== undefined ? normalizePath(explicit) : await findElabRoot(root.path, 6, c.isElabRoot)
     if (elabRoot === undefined) return { adapted: [] }
     return { elabRoot, adapted: await readAdaptedProjects(elabRoot) }
   }

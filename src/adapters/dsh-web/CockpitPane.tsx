@@ -33,6 +33,7 @@ import type { AdaptCheck } from '../../domain/adapt.ts'
 import type { SerialMonitorSnapshot } from '../../domain/icd.ts'
 import { elabApi } from '../kernel-http/icd-client.ts'
 import { createRunEventsPort } from './events/run-events.ts'
+import { BootstrapWizard } from './BootstrapWizard.tsx'
 import { StageLadder, stepLabelOf } from './StageLadder.tsx'
 import type { LadderStep } from './StageLadder.tsx'
 import { ManualBar } from './ManualBar.tsx'
@@ -590,14 +591,23 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
 
   // ── 渲染 ──
   if (snap.hostOk === false) {
+    // 首启向导（方案 §3.4）：把"未就绪 + 一行字"换成四步可操作卡片
     return (
-      <div style={{ padding: '12px', fontSize: '12px', lineHeight: 1.6, color: 'var(--elab-fg-primary)' }}>
-        <div style={{ fontWeight: 600, marginBottom: '6px' }}>{'驾驶舱未就绪'}</div>
-        <div style={{ color: 'var(--elab-fg-secondary)' }}>{snap.hostError ?? '未知原因'}</div>
-        <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
-          {'处理：确认 python 在 PATH，且当前会话位于 elab 仓库内（含 elab.host.yaml、cockpit/、services/elab）。'}
-        </div>
-      </div>
+      <BootstrapWizard
+        env={snap.env}
+        envBusy={snap.envBusy}
+        envError={snap.envError}
+        bootstrapBusy={snap.bootstrapBusy}
+        bootstrapError={snap.bootstrapError}
+        bootstrapNotice={snap.bootstrapNotice}
+        elabRoot={snap.adapt.elabRoot}
+        hostOk={snap.hostOk}
+        hostError={snap.hostError}
+        projectCount={snap.projects.length}
+        onRefreshEnv={() => void service.refreshEnv()}
+        onSetRoot={(dir) => void service.setRoot(dir)}
+        onClone={(url, dir) => void service.cloneKernel(url, dir)}
+      />
     )
   }
 

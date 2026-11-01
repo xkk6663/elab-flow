@@ -15,8 +15,11 @@
 
 import type {
   AdaptResponse,
+  BootstrapRequest,
+  BootstrapResponse,
   DiscoverResponse,
   ElabConfig,
+  EnvResponse,
   HostInfo,
   PacksStatus,
   PkgJob,
@@ -97,6 +100,10 @@ function withSession(path: string, sessionId?: string): string {
 /** 后端契约版本；与 `EVENT_SCHEMA_VERSION` 比对，不一致显式报错而非渲染错位界面。 */
 export const elabApi = {
   host: (sessionId?: string) => request<HostInfo>(withSession('/elab/host', sessionId)),
+  /** 引导向导：只读环境探测（宿主半白名单执行，不 spawn 内核）。 */
+  env: (sessionId?: string) => request<EnvResponse>(withSession('/elab/env', sessionId)),
+  /** 引导向导：set-root / clone（写动作，clone 需 confirm:true）。 */
+  bootstrap: (req: BootstrapRequest) => post<BootstrapResponse>('/elab/bootstrap', req),
   capabilities: (sessionId?: string) =>
     request<Record<string, unknown>>(withSession('/elab/api/capabilities', sessionId)),
   projects: (sessionId?: string) =>

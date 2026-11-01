@@ -13,8 +13,11 @@
 
 import type {
   AdaptResponse,
+  BootstrapRequest,
+  BootstrapResponse,
   DiscoverResponse,
   ElabEvent,
+  EnvResponse,
   HostInfo,
   PlanPreview,
   SerialAction,
@@ -85,6 +88,10 @@ export interface ToolDeps extends KernelPort {
 export interface IcdPort {
   host(sessionId?: string): Promise<HostInfo>
   capabilities(sessionId?: string): Promise<Record<string, unknown>>
+  /** 引导向导：只读环境探测（不 spawn 内核）。 */
+  env(sessionId?: string): Promise<EnvResponse>
+  /** 引导向导：set-root / clone（写动作需确认）。 */
+  bootstrap(req: BootstrapRequest): Promise<BootstrapResponse>
   projects(sessionId?: string): Promise<{ projects?: unknown[]; cards?: unknown[] }>
   /** run 列表 + 活动 run（agent 在别处起跑时，面板靠它自动跟随工程）。 */
   runs(sessionId?: string): Promise<{ runs: unknown[]; active: unknown[] }>

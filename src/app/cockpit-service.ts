@@ -19,7 +19,7 @@
  */
 
 import { IDLE, markStreamClosed, reduce, type RunSnapshot } from '../domain/run.ts'
-import type { Actor, DiscoverResponse, ElabEvent, PlanPreview } from '../domain/icd.ts'
+import type { Actor, BootstrapRequest, DiscoverResponse, ElabEvent, EnvProbe, PlanPreview } from '../domain/icd.ts'
 import {
   foldProgress,
   makeProgress,
@@ -59,6 +59,16 @@ export interface CockpitSnapshot {
   adapt: AdaptState
   /** 三档视图（availability 派生，勿手改）。 */
   plans: PlanView[]
+  /** 引导向导：只读环境探测结果（null = 尚未探测）。 */
+  env: EnvProbe | null
+  envBusy: boolean
+  envError: string | null
+  /** 引导向导：写动作在途（set-root / clone 防重复提交）。 */
+  bootstrapBusy: boolean
+  bootstrapError: string | null
+  bootstrapNotice: string | null
+  /** 根的来源（user = 指定；auto = 会话 cwd 向上找）。 */
+  rootSource: 'user' | 'auto' | 'bundled' | null
 }
 
 export interface CockpitService {
@@ -83,6 +93,12 @@ export interface CockpitService {
   adaptProject(path: string): Promise<void>
   /** 适配复探测（只读）：重新探测并比对已写入的 projects/<name>.yaml（drift 判据）。 */
   checkAdapt(name: string, root: string): Promise<void>
+  /** 引导向导：只读环境探测（不 spawn 内核）。 */
+  refreshEnv(): Promise<void>
+  /** 引导向导：指定一个已存在的 elab 仓库根（校验 + 持久化）。 */
+  setRoot(dir: string): Promise<boolean>
+  /** 引导向导：浅克隆到空目录（写盘，调用方需二次确认）。 */
+  cloneKernel(url: string, dir: string): Promise<boolean>
   dispose(): void
 }
 
@@ -107,6 +123,13 @@ export function createCockpitService(deps: {
     progress: null,
     adapt: initialAdaptState(),
     plans: resolveAllPlans({}, false),
+    env: null,
+    envBusy: false,
+    envError: null,
+    bootstrapBusy: false,
+    bootstrapError: null,
+    bootstrapNotice: null,
+    rootSource: null,
   }
 
   const listeners = new Set<() => void>()
@@ -324,6 +347,80 @@ export function createCockpitService(deps: {
     }
   }
 
+  // ── 引导向导（只读探测 + 一次显式写盘）──────────────────────────
+
+  /** 首屏全流程（健康 → meta → 工程 → 发现）；向导写根成功后复跑。 */
+  async function initFlow(): Promise<void> {
+    let root: string | null = null
+    try {
+      const h = await api.host(sessionId)
+      root = h.ok === true ? (h.elabRoot ?? null) : null
+      set({
+        hostOk: h.ok && h.elabRoot !== null,
+        rootSource: h.rootSource ?? null,
+        hostError:
+          h.ok && h.elabRoot !== null
+            ? null
+            : '未找到 elab 仓库根（需含 cockpit/server.py 与 services/elab）',
+      })
+    } catch (e) {
+      set({ hostOk: false, hostError: message(e) })
+    }
+    dispatchAdapt({ type: 'host/resolved', elabRoot: root })
+    if (root === null) {
+      // 未就绪：先跑只读环境探测，向导第一屏就有数据（不 spawn 内核）
+      void refreshEnv()
+      return
+    }
+
+    // §16 内核自描述探测：meta 缺失 = 内核较旧（不挡主流程）
+    try {
+      const caps = (await api.capabilities(sessionId)) as { meta?: unknown }
+      set({ kernelOld: caps.meta === undefined })
+      setKernelMeta((caps.meta ?? null) as never)
+    } catch {
+      /* capabilities 拿不到不挡主流程 */
+    }
+
+    await reloadProjects()
+    try {
+      const r = await api.discover(sessionId)
+      set({ discover: r })
+      dispatchAdapt({ type: 'discover/result', candidates: r.candidates })
+    } catch {
+      /* 发现失败不阻塞主流程 */
+    }
+  }
+
+  async function refreshEnv(): Promise<void> {
+    if (typeof api.env !== 'function') return
+    set({ envBusy: true, envError: null })
+    try {
+      const r = await api.env(sessionId)
+      set({ env: r.env, envBusy: false })
+    } catch (e) {
+      set({ envBusy: false, envError: message(e) })
+    }
+  }
+
+  /**
+   * 写根（set-root / clone）→ 成功后重跑 init。
+   * 失败只回显错误码文案，不自动重试（写盘动作必须由人再点一次）。
+   */
+  async function bootstrapWrite(req: BootstrapRequest): Promise<boolean> {
+    if (typeof api.bootstrap !== 'function') return false
+    set({ bootstrapBusy: true, bootstrapError: null, bootstrapNotice: null })
+    try {
+      const r = await api.bootstrap(req)
+      set({ bootstrapBusy: false, bootstrapNotice: `已切换到 ${r.elabRoot ?? req.dir}` })
+      await initFlow()
+      return true
+    } catch (e) {
+      set({ bootstrapBusy: false, bootstrapError: message(e) })
+      return false
+    }
+  }
+
   // ── 服务对象 ────────────────────────────────────────────────────
 
   return {
@@ -336,40 +433,7 @@ export function createCockpitService(deps: {
     },
 
     async init() {
-      let root: string | null = null
-      try {
-        const h = await api.host(sessionId)
-        root = h.ok === true ? (h.elabRoot ?? null) : null
-        set({
-          hostOk: h.ok && h.elabRoot !== null,
-          hostError:
-            h.ok && h.elabRoot !== null
-              ? null
-              : '未找到 elab 仓库根（需含 cockpit/server.py 与 services/elab）',
-        })
-      } catch (e) {
-        set({ hostOk: false, hostError: message(e) })
-      }
-      dispatchAdapt({ type: 'host/resolved', elabRoot: root })
-      if (root === null) return
-
-      // §16 内核自描述探测：meta 缺失 = 内核较旧（不挡主流程）
-      try {
-        const caps = (await api.capabilities(sessionId)) as { meta?: unknown }
-        set({ kernelOld: caps.meta === undefined })
-        setKernelMeta((caps.meta ?? null) as never)
-      } catch {
-        /* capabilities 拿不到不挡主流程 */
-      }
-
-      await reloadProjects()
-      try {
-        const r = await api.discover(sessionId)
-        set({ discover: r })
-        dispatchAdapt({ type: 'discover/result', candidates: r.candidates })
-      } catch {
-        /* 发现失败不阻塞主流程 */
-      }
+      await initFlow()
     },
 
     setVisible(v) {
@@ -463,6 +527,16 @@ export function createCockpitService(deps: {
       } catch (e) {
         set({ error: message(e) })
       }
+    },
+
+    refreshEnv,
+
+    setRoot(dir) {
+      return bootstrapWrite({ action: 'set-root', dir })
+    },
+
+    cloneKernel(url, dir) {
+      return bootstrapWrite({ action: 'clone', url, dir, confirm: true })
     },
 
     dispose() {

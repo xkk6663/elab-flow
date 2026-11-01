@@ -621,12 +621,55 @@ export interface AdaptResponse {
 export interface HostInfo {
   ok: boolean;
   elabRoot: string | null;
+  /** 根的来源：`user` = 设置页/向导指定；`auto` = 会话 cwd 向上找。 */
+  rootSource?: 'user' | 'auto' | 'bundled' | null;
+  /** 内核自描述版本（`/api/capabilities` 的 cockpit.version；旧内核可能缺）。 */
+  kernelVersion?: string | null;
   running: boolean;
   port: number | null;
   pid: number | null;
   job: string | null;
   bootMs: number | null;
   distReady?: boolean | null;
+}
+
+// ── 安装向导（GET /elab/env、POST /elab/bootstrap）─────────────────
+// 只读探测：只回答"有没有、什么版本"，不下"能不能编译"的结论。
+
+export interface ProbeItem {
+  ok: boolean;
+  version?: string;
+  error?: string;
+}
+
+export interface EnvProbe {
+  ok: boolean;
+  checkedAt: number;
+  python: ProbeItem & { path?: string };
+  git: ProbeItem;
+  cmake: ProbeItem;
+  ninja: ProbeItem;
+  armGcc: ProbeItem;
+  openocd: ProbeItem;
+  pyserial: ProbeItem;
+}
+
+export interface EnvResponse {
+  ok: boolean;
+  env: EnvProbe;
+  elabRoot: string | null;
+  rootSource?: 'user' | 'auto' | 'bundled' | null;
+}
+
+export type BootstrapRequest =
+  | { action: 'set-root'; dir: string }
+  | { action: 'clone'; url: string; dir: string; confirm: true };
+
+export interface BootstrapResponse {
+  ok: boolean;
+  action?: 'set-root' | 'clone';
+  elabRoot?: string;
+  error?: { code: string; message: string };
 }
 
 /** /elab/api/discover 的单个候选工程。 */
