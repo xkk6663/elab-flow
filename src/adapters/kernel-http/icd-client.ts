@@ -206,7 +206,7 @@ export const elabApi = {
     }),
   serialConsole: (limit = 60, sessionId?: string) =>
     request<Record<string, unknown>>(withSession(`/elab/api/serial/console?limit=${limit}`, sessionId)),
-  adapt: (opts: { action: 'probe' | 'write'; path: string; name?: string; force?: boolean; sessionId?: string }) =>
+  adapt: (opts: { action: 'probe' | 'write' | 'check'; path: string; name?: string; force?: boolean; sessionId?: string }) =>
     post<AdaptResponse>(withSession('/elab/api/adapt', opts.sessionId), opts),
   discover: (sessionId?: string, refresh = false) => {
     const q = new URLSearchParams()

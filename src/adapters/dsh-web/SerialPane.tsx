@@ -17,8 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SerialPort } from '../../app/ports.ts'
 import type { SerialChunk } from '../../domain/icd.ts'
 import { parseAnsi } from './theme/ansi.ts'
-import { b64ToBytes, bytesToB64, captureText, hexDump, textOf } from './serial/bytes.ts'
-import type { SerialRepr } from './serial/bytes.ts'
+import { b64ToBytes, bytesToB64, captureText, hexDump, hexDumpRows, textOf } from './serial/bytes.ts'
+import type { HexRow, SerialRepr } from './serial/bytes.ts'
 import { AnsiTerminal, StreamTextDecoder } from './serial/ansiTerminal.ts'
 import type { TermLine } from './serial/ansiTerminal.ts'
 import type { SerialStream } from './serial/useSerialStream.ts'
@@ -59,6 +59,7 @@ const EOLS = [
   { id: 'lf', label: 'LF' },
   { id: 'cr', label: 'CR' },
   { id: 'crlf', label: 'CRLF' },
+  { id: 'tab', label: 'TAB' },
 ]
 
 /** 常用波特率（非标值会插进来，否则 select 显示不出当前值）。 */
@@ -74,6 +75,119 @@ function baudOptions(current: number): number[] {
 const MAX_BYTE_BLOCKS = 200
 /** 波形最大回看字节（超出只取最近一段）。 */
 const MAX_WAVE_BYTES = 64 * 1024
+
+/** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆。 */
+const HISTORY_KEY = 'elab.serial.send.history'
+const HISTORY_MAX = 50
+/** 文件按行发送的行数上限（按行逐条发，太多行会把发送面板占住很久）。 */
+const MAX_FILE_LINES = 2000
+
+function loadHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    if (raw === null) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string').slice(-HISTORY_MAX) : []
+  } catch {
+    return []
+  }
+}
+
+function saveHistory(items: string[]): void {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)))
+  } catch {
+    // 隐私模式/配额满：历史只是便利，不写也不影响发送
+  }
+}
+
+/** HEX 分类色：控制字节 / DEL / 可打印 / 高位，全部引用主题令牌（不写字面色值）。 */
+const BYTE_COLORS: Record<HexRow['cells'][number]['cls'], string> = {
+  ctl: 'var(--elab-ansi-bright-yellow)',
+  del: 'var(--elab-ansi-bright-red)',
+  print: 'var(--elab-fg-primary)',
+  high: 'var(--elab-ansi-bright-cyan)',
+  pad: 'var(--elab-fg-faint)',
+}
+
+/** 回放的行上限（与实时本地上限同量级；更早的只影响行视图，字节/波形仍按窗口取）。 */
+const MAX_REPLAY_LINES = 5000
+
+interface ReplayData {
+  name: string
+  chunks: SerialChunk[]
+  lines: Array<{ seq: number; text: string; t: string }>
+  bytes: number
+  skipped: number
+}
+
+function hmsOf(us: number): string {
+  const d = new Date(Math.floor(us / 1000))
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
+}
+
+/**
+ * 解析录制 JSONL（`{"seq","t_us","dir","bytes_b64"}` 每行一条）。
+ *
+ * 回放是**纯前端只读**：不打开串口、不写内核会话；行视图按服务端同一规则
+ * （RX 字节 + `\n` 切行 + 静默残留冲刷不参与）在本地重建。
+ */
+function parseReplay(name: string, text: string): { data: ReplayData | null; error: string } {
+  const chunks: SerialChunk[] = []
+  let skipped = 0
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    try {
+      const rec = JSON.parse(line) as { seq?: unknown; t_us?: unknown; dir?: unknown; bytes_b64?: unknown }
+      if (typeof rec.bytes_b64 !== 'string' || typeof rec.seq !== 'number' || typeof rec.t_us !== 'number') {
+        skipped += 1
+        continue
+      }
+      const bytes = b64ToBytes(rec.bytes_b64)
+      chunks.push({
+        seq: rec.seq,
+        dir: rec.dir === 'tx' ? 'tx' : 'rx',
+        t: hmsOf(rec.t_us),
+        t_us: rec.t_us,
+        len: bytes.length,
+        data_b64: rec.bytes_b64,
+      })
+    } catch {
+      skipped += 1
+    }
+  }
+  if (chunks.length === 0) {
+    return { data: null, error: `没有可回放的批次（跳过 ${skipped} 行）` }
+  }
+  chunks.sort((a, b) => a.seq - b.seq)
+
+  const lines: Array<{ seq: number; text: string; t: string }> = []
+  const dec = new TextDecoder('utf-8', { fatal: false })
+  let pending = ''
+  let seq = 0
+  for (const c of chunks) {
+    if (c.dir !== 'rx') continue
+    pending += dec.decode(b64ToBytes(c.data_b64), { stream: true })
+    let idx = pending.indexOf('\n')
+    while (idx >= 0) {
+      const raw = pending.slice(0, idx)
+      pending = pending.slice(idx + 1)
+      seq += 1
+      lines.push({ seq, text: raw.replace(/\r$/, ''), t: c.t.slice(0, 8) })
+      idx = pending.indexOf('\n')
+    }
+  }
+  const rest = pending + dec.decode()
+  if (rest !== '') {
+    seq += 1
+    lines.push({ seq, text: rest.replace(/\r$/, ''), t: chunks[chunks.length - 1].t.slice(0, 8) })
+  }
+  const kept = lines.length > MAX_REPLAY_LINES ? lines.slice(-MAX_REPLAY_LINES) : lines
+  const bytes = chunks.reduce((n, c) => n + c.len, 0)
+  return { data: { name, chunks, lines: kept, bytes, skipped }, error: '' }
+}
 
 export interface SerialDecoder {
   id: string
@@ -265,6 +379,14 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [sendFormat, setSendFormat] = useState('utf8')
   const [eol, setEol] = useState('crlf')
   const [notice, setNotice] = useState<string | null>(null)
+  /** 发送历史（↑/↓ 调取；只留最近 HISTORY_MAX 条，跨会话记忆）。 */
+  const [history, setHistory] = useState<string[]>(loadHistory)
+  const [histIdx, setHistIdx] = useState(-1)
+  const [fileBusy, setFileBusy] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const [replay, setReplay] = useState<ReplayData | null>(null)
+  const [replayErr, setReplayErr] = useState<string | null>(null)
+  const replayRef = useRef<HTMLInputElement | null>(null)
   // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
 
@@ -290,26 +412,31 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     return list
   }, [ports, port])
   const portLocked = stream.active
+  /** 回放是纯前端只读数据源：不占串口、不动内核会话。 */
+  const replayMode = replay !== null
+  const sourceChunks = replayMode ? replay.chunks : stream.chunks
 
   const filtered = useMemo(
-    () => (dir === 'all' ? stream.chunks : stream.chunks.filter((c) => c.dir === dir)),
-    [stream.chunks, dir],
+    () => (dir === 'all' ? sourceChunks : sourceChunks.filter((c) => c.dir === dir)),
+    [sourceChunks, dir],
   )
 
   const q = query.trim().toLowerCase()
 
   // ── 行视图（闭环事件行 + 监视行；监视未开时只有闭环证据）────────
   const monitorLines = useMemo(() => {
-    if (q === '') return stream.lines
-    return stream.lines.filter((l) => l.text.toLowerCase().includes(q))
-  }, [stream.lines, q])
+    const base = replayMode && replay !== null ? replay.lines : stream.lines
+    if (q === '') return base
+    return base.filter((l) => l.text.toLowerCase().includes(q))
+  }, [stream.lines, replay, replayMode, q])
 
   const runLines = useMemo(() => {
+    if (replayMode) return [] // 回放只重放录制内容，不混入当前 run 的事件行
     const all = props.runLines
     if (q === '') return all
     return all.filter((l) => l.text.toLowerCase().includes(q))
     // runLinesVersion 是命令式缓冲的重绘信号
-  }, [props.runLines, props.runLinesVersion, q])
+  }, [props.runLines, props.runLinesVersion, q, replayMode])
 
   // ── 字节视图（逐批投影；只渲染最近 MAX_BYTE_BLOCKS 批）──────────
   const byteBlocks = useMemo(() => {
@@ -322,7 +449,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       else body = textOf(bytes, repr)
       const header = `#${c.seq} ${c.dir.toUpperCase()} ${c.t} · ${c.len} B`
       if (q !== '' && !header.toLowerCase().includes(q) && !body.toLowerCase().includes(q)) return []
-      return [{ c, header, body }]
+      return [{ c, header, body, rows: repr === 'hex' ? hexDumpRows(bytes) : null }]
     })
   }, [filtered, repr, q])
 
@@ -359,7 +486,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   // ── 会话级共享解码（P3.5）：decoder 非空 = 内核在 RX 入环时增量解码 ──
   //    面板直接画这份帧 → agent（elab_serial_decoded）与人看到的是同一张图。
   const sharedDecoder = stream.snap?.decode?.decoder ?? ''
-  const sharedActive = sharedDecoder !== ''
+  const sharedActive = replayMode ? false : sharedDecoder !== ''
   const sharedFrames = useMemo(() => stream.decoded.map((f) => f.values), [stream.decoded])
   const sharedState = sharedActive ? (stream.decodedSnap ?? stream.snap?.decode ?? null) : null
   const shownFrames = sharedActive ? sharedFrames : frames
@@ -396,7 +523,11 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     }
     let cancelled = false
     api
-      .serialDecode({ decoder, dataB64: bytesToB64(bytes), sessionId: props.sessionId })
+      .serialDecode({
+        decoder,
+        dataB64: bytesToB64(bytes),
+        ...(replayMode ? {} : { sessionId: props.sessionId }),
+      })
       .then((r) => {
         if (cancelled) return
         if (!r.ok) {
@@ -415,7 +546,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     return () => {
       cancelled = true
     }
-  }, [view, sharedActive, filtered, decoder, props.sessionId, api])
+  }, [view, sharedActive, filtered, decoder, props.sessionId, api, replayMode])
 
   // ── 跟随滚动 ────────────────────────────────────────────────
   useEffect(() => {
@@ -464,6 +595,16 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4000)
   }, [filtered, stream.snap, project])
 
+  const remember = useCallback((text: string): void => {
+    setHistory((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1] === text) return prev
+      const next = [...prev, text].slice(-HISTORY_MAX)
+      saveHistory(next)
+      return next
+    })
+    setHistIdx(-1)
+  }, [])
+
   const doSend = useCallback(
     async (e: { preventDefault(): void }): Promise<void> => {
       e.preventDefault()
@@ -481,17 +622,127 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         setNotice(
           `✓ 已发送 ${r.written} B → ${r.port}@${r.baud}` + (r.via === 'monitor' ? '（经监视会话，回显见实时流）' : ''),
         )
+        remember(draft)
         setDraft('')
       } catch (err) {
         setNotice(`✗ ${err instanceof Error ? err.message : String(err)}`)
       }
     },
-    [draft, running, sendFormat, eol, stream],
+    [draft, running, sendFormat, eol, stream, remember],
   )
+
+  /** ↑/↓ 调取发送历史（多行输入时只在首/末行触发，避免抢掉光标移动）。 */
+  const onDraftKey = useCallback(
+    (e: any): void => {
+      const key: string = e.key
+      if (key !== 'ArrowUp' && key !== 'ArrowDown') return
+      if (history.length === 0) return
+      e.preventDefault()
+      if (key === 'ArrowUp') {
+        const next = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1)
+        setHistIdx(next)
+        setDraft(history[next])
+        return
+      }
+      if (histIdx === -1) return
+      const next = histIdx + 1
+      if (next >= history.length) {
+        setHistIdx(-1)
+        setDraft('')
+      } else {
+        setHistIdx(next)
+        setDraft(history[next])
+      }
+    },
+    [history, histIdx],
+  )
+
+  /** 文件按行发送：逐行 await（同一口写穿），有界行数，失败即停并报第几行。 */
+  const doSendFile = useCallback(
+    async (e: any): Promise<void> => {
+      const file: File | undefined = e.currentTarget.files?.[0]
+      e.currentTarget.value = '' // 允许重复选同一个文件
+      if (file === undefined || running || !writable) return
+      setNotice(null)
+      let text = ''
+      try {
+        text = await file.text()
+      } catch (err) {
+        setNotice(`✗ 读取文件失败：${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+      let lines = text.split(/\r\n|\r|\n/)
+      while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+      if (lines.length === 0) {
+        setNotice('✗ 文件里没有可发送的行')
+        return
+      }
+      let clipped = false
+      if (lines.length > MAX_FILE_LINES) {
+        lines = lines.slice(0, MAX_FILE_LINES)
+        clipped = true
+      }
+      setFileBusy(true)
+      let sent = 0
+      let fail = ''
+      for (const line of lines) {
+        if (line === '') continue
+        try {
+          const r = await stream.send(line, {
+            format: sendFormat,
+            eol: sendFormat === 'hex' ? 'none' : eol,
+          })
+          if (!r.ok) {
+            fail = r.error ?? '未知原因'
+            break
+          }
+          sent += 1
+        } catch (err) {
+          fail = err instanceof Error ? err.message : String(err)
+          break
+        }
+      }
+      setFileBusy(false)
+      if (fail !== '') {
+        setNotice(`✗ 文件发送中断：第 ${sent + 1}/${lines.length} 行失败（${fail}）`)
+        return
+      }
+      setNotice(`✓ 文件已按行发送 ${sent} 行 → ${file.name}${clipped ? `（只发前 ${MAX_FILE_LINES} 行）` : ''}`)
+    },
+    [running, writable, sendFormat, eol, stream],
+  )
+
+  /** 选一个录制 JSONL 在本地回放（纯前端只读，不打开串口）。 */
+  const doReplay = useCallback(async (e: any): Promise<void> => {
+    const file: File | undefined = e.currentTarget.files?.[0]
+    e.currentTarget.value = '' // 允许重复选同一个文件
+    if (file === undefined) return
+    setReplayErr(null)
+    try {
+      const text = await file.text()
+      const r = parseReplay(file.name, text)
+      if (r.data === null) {
+        setReplay(null)
+        setReplayErr(r.error)
+        return
+      }
+      setReplay(r.data)
+      setView('wave')
+      setNotice(
+        `● 回放 ${file.name}：${r.data.chunks.length} 批 / ${r.data.bytes} B` +
+          `${r.data.skipped > 0 ? `（跳过 ${r.data.skipped} 行）` : ''}`,
+      )
+    } catch (err) {
+      setReplay(null)
+      setReplayErr(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
 
   const bytesTotal = stream.snap?.bytes_total ?? 0
   const chunkCount = stream.chunks.length
-  const lossy = stream.gapLines + stream.gapChunks
+  const lossy = replayMode ? 0 : stream.gapLines + stream.gapChunks
+  const bytesShown = replayMode && replay !== null ? replay.bytes : bytesTotal
+  const chunksShown = replayMode && replay !== null ? replay.chunks.length : chunkCount
   // 会话归属 + agent 租约倒计时：快照每 500ms 刷新，直接显示服务端剩余秒数即可
   const openedBy = stream.snap?.opened_by
   const leaseLeft = Math.max(0, Math.ceil(stream.snap?.lease_remaining_s ?? 0))
@@ -604,7 +855,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
               setDecoder(next) // 无会话时的本地解码兜底
               props.onDecoder?.(next) // 记住偏好（'' = 关闭共享解码）
               // 有会话：decoder 是**会话属性**，写进去才与 agent 同源同图
-              if (stream.active) void stream.setDecoder(next)
+              if (!replayMode && stream.active) void stream.setDecoder(next)
             }}
             aria-label="协议解码器"
             title={
@@ -658,6 +909,34 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         <button type="button" onClick={doExport} title="导出当前过滤结果的原始字节（HEX + 元数据）" style={chip}>
           {'导出'}
         </button>
+        <input
+          ref={replayRef}
+          type="file"
+          accept=".jsonl,.json,.txt,text/plain"
+          onChange={(e: any) => void doReplay(e)}
+          style={{ display: 'none' }}
+        />
+        <button
+          type="button"
+          onClick={() => replayRef.current?.click()}
+          title="选一个录制 JSONL 在本地回放波形/行视图（纯前端只读，不占串口）"
+          style={chip}
+        >
+          {'回放'}
+        </button>
+        {replayMode ? (
+          <button
+            type="button"
+            onClick={() => {
+              setReplay(null)
+              setReplayErr(null)
+            }}
+            title="退出回放，回到实时数据面"
+            style={{ ...chip, borderColor: 'var(--elab-accent)', color: 'var(--elab-accent)' }}
+          >
+            {'退出回放'}
+          </button>
+        ) : null}
       </div>
 
       {/* ── 搜索 / 跟随 / 计数（与融合工程的 subbar 同构） ── */}
@@ -707,8 +986,8 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         >
           {follow ? '\u25be 跟随' : '\u21ba 恢复'}
         </button>
-        <span style={metaStyle} title="当前缓冲：未清空、未被环形挤出的字节 / 批次">
-          {`${bytesTotal} B · ${chunkCount} 批`}
+        <span style={metaStyle} title={replayMode ? '回放文件：批次数 / 原始字节数' : '当前缓冲：未清空、未被环形挤出的字节 / 批次'}>
+          {`${bytesShown} B · ${chunksShown} 批`}
         </span>
         {stream.active && openedBy !== undefined ? (
           <span
@@ -724,6 +1003,18 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       </div>
 
       {/* ── 提示条 ── */}
+      {replayErr !== null ? (
+        <div role="alert" style={barWarn}>
+          {`回放失败：${replayErr}`}
+        </div>
+      ) : null}
+      {replayMode && replay !== null ? (
+        <div style={barInfo}>
+          {`回放中：${replay.name} —— ${replay.chunks.length} 批 / ${replay.bytes} B · ${replay.lines.length} 行` +
+            `（本地只读，不占串口）` +
+            `${replay.skipped > 0 ? ` · 跳过 ${replay.skipped} 行` : ''}`}
+        </div>
+      ) : null}
       {stream.error !== null ? (
         <div role="alert" style={barWarn}>
           {`监视已中断：${stream.error}（服务端已释放串口）`}
@@ -760,7 +1051,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         {view === 'lines' ? (
           runLines.length === 0 && monitorLines.length === 0 ? (
             <div style={emptyStyle}>
-              {'尚无行输出。点上方「▶ 串口」启动常驻监视后，设备输出会实时流进来。'}
+              {replayMode
+                ? `回放文件里没有 RX 行（共 ${replay?.chunks.length ?? 0} 批，可能是纯 TX 录制）—— 可切到「字节」看原始内容。`
+                : '尚无行输出。点上方「▶ 串口」启动常驻监视后，设备输出会实时流进来。'}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0' }}>
@@ -801,7 +1094,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '8px 12px' }}>
-              {byteBlocks.map(({ c, header, body }) => (
+              {byteBlocks.map(({ c, header, body, rows }) => (
                 <div key={c.seq} style={{ border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', overflow: 'hidden', background: 'var(--elab-bg-surface)' }}>
                   <div
                     style={{
@@ -830,9 +1123,31 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                       {`${header} · ${c.t_us}μs`}
                     </span>
                   </div>
-                  <pre style={{ margin: 0, padding: '4px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--elab-fg-primary)' }}>
-                    {body}
-                  </pre>
+                  {rows === null ? (
+                    <pre style={{ margin: 0, padding: '4px 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--elab-fg-primary)' }}>
+                      {body}
+                    </pre>
+                  ) : (
+                    <div style={{ padding: '4px 8px', whiteSpace: 'pre', overflowX: 'auto', color: 'var(--elab-fg-primary)' }}>
+                      {rows.map((row, ri) => (
+                        <div key={ri}>
+                          <span style={{ color: 'var(--elab-fg-faint)' }}>{row.offset}</span>
+                          {'  '}
+                          {row.cells.map((cell, ci) => (
+                            <span key={ci} style={{ color: BYTE_COLORS[cell.cls] }}>
+                              {cell.text}
+                              {ci === 7 ? '  ' : ci === row.cells.length - 1 ? '' : ' '}
+                            </span>
+                          ))}
+                          {'  |'}
+                          {row.ascii.map((cell, ci) => (
+                            <span key={ci} style={{ color: BYTE_COLORS[cell.cls] }}>{cell.text}</span>
+                          ))}
+                          {'|'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -894,7 +1209,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             {waveErr !== null ? <div style={barWarn}>{`解码失败：${waveErr}`}</div> : null}
             {waveErr === null && shownFrames.length === 0 ? (
               <div style={emptyStyle}>
-                {sharedActive
+                {replayMode
+                  ? `回放文件里没有解出完整帧：按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 解码 ${replay?.chunks.length ?? 0} 批 —— 录制里可能混有不属于该协议的字节，可切方向只看 RX 或换解码器。`
+                  : sharedActive
                   ? `尚未解出帧：${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} 解码器已在会话启用，设备开始输出符合该协议的字节后会在这里出现折线（agent 读到的也是这份帧）。`
                   : `尚无波形。设备按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 输出（JustFloat：N×4 小端 float + 尾 00 00 80 7F）时，这里按通道画折线。`}
                 {sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? (
@@ -983,7 +1300,11 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         </select>
         <input
           value={draft}
-          onChange={(e: any) => setDraft(e.currentTarget.value)}
+          onChange={(e: any) => {
+            setDraft(e.currentTarget.value)
+            setHistIdx(-1)
+          }}
+          onKeyDown={onDraftKey}
           disabled={sendDisabled}
           placeholder={
             running
@@ -1021,6 +1342,26 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         >
           {'发送'}
         </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".txt,.csv,.log,.json,.hex,text/plain"
+          onChange={(e: any) => void doSendFile(e)}
+          style={{ display: 'none' }}
+        />
+        <button
+          type="button"
+          disabled={sendDisabled || fileBusy}
+          onClick={() => fileRef.current?.click()}
+          title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
+          style={{
+            ...chip,
+            opacity: sendDisabled || fileBusy ? 0.5 : 1,
+            cursor: sendDisabled || fileBusy ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {fileBusy ? '发送中…' : '文件'}
+        </button>
       </form>
 
       {notice !== null ? (
@@ -1031,7 +1372,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       {project === '' ? (
         <div style={barInfo}>{'未选择工程：端口/波特率无法解析（先在顶部选一个工程）。'}</div>
       ) : null}
-      {stream.active !== true && running !== true ? (
+      {stream.active !== true && running !== true && !replayMode ? (
         <div
           style={{
             flex: '0 0 auto',

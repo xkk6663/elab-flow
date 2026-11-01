@@ -20,6 +20,20 @@ export interface AdaptCandidate {
   adaptedAs?: string
 }
 
+/**
+ * 最近一次适配复探测（`action=check` 的结果）。
+ *
+ * 语义与内核 `elab adapt --check` 同源：重新探测 → 与已写入的
+ * `projects/<name>.yaml` 逐字节比对。`drift` = 工程已被手工改动，
+ * 需要人重新适配（不自动覆盖 —— 人工接管保护 A7）。
+ */
+export interface AdaptCheck {
+  name: string
+  status: 'missing' | 'identical' | 'drift'
+  /** 复探测时刻（unix ms；由调用方传入，保持归约纯函数）。 */
+  at: number
+}
+
 export interface AdaptState {
   phase: AdaptPhase
   /** 会话解析出的 elab 仓库根（null = unbound）。 */
@@ -34,6 +48,8 @@ export interface AdaptState {
   error: string | null
   /** 最近一次成功接入的工程名（UI 呈现"已接入 <name>"）。 */
   lastAdapted: string | null
+  /** 最近一次复探测结果（null = 还没探测过）。 */
+  check: AdaptCheck | null
 }
 
 export type AdaptEvent =
@@ -41,6 +57,7 @@ export type AdaptEvent =
   | { type: 'discover/result'; candidates: AdaptCandidate[] }
   | { type: 'adapt/start'; path: string }
   | { type: 'adapt/done'; ok: boolean; name?: string; error?: string }
+  | { type: 'adapt/checked'; name: string; status: AdaptCheck['status']; at: number }
   | { type: 'reset' }
 
 export function initialAdaptState(): AdaptState {
@@ -52,6 +69,7 @@ export function initialAdaptState(): AdaptState {
     target: null,
     error: null,
     lastAdapted: null,
+    check: null,
   }
 }
 
@@ -89,7 +107,10 @@ export function reduceAdapt(s: AdaptState, e: AdaptEvent): AdaptState {
       return { ...s, candidates: e.candidates, scanned: true, phase }
     }
     case 'adapt/start': {
-      return { ...s, phase: 'adapting', target: e.path, error: null }
+      return { ...s, phase: 'adapting', target: e.path, error: null, check: null }
+    }
+    case 'adapt/checked': {
+      return { ...s, check: { name: e.name, status: e.status, at: e.at } }
     }
     case 'adapt/done': {
       if (e.ok) {
@@ -101,6 +122,7 @@ export function reduceAdapt(s: AdaptState, e: AdaptEvent): AdaptState {
           target: null,
           lastAdapted: e.name ?? s.lastAdapted,
           error: null,
+          check: null,
         }
       }
       // 失败 → 回到 discovered（banner 继续可点），原因显式呈现。
