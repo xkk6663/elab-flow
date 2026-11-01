@@ -38,7 +38,7 @@ from pathlib import Path
 
 from . import _yaml
 from . import skillgen
-from .config import ElabError, to_fwd
+from .config import Config, ElabError, to_fwd
 
 #: 内核自描述 API 版本（STEP_META/KERNEL_PLANS 的握手版本）。
 #: 包的 ``requires.kernel_api`` 与此比对；不匹配时安装阶段 fail-fast。
