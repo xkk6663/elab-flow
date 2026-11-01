@@ -24,7 +24,7 @@ export function kernelsRoot() {
  * 下载 `v<version>` 并解到 `~/.dsh/elab/kernels/v<version>/`。
  * 已存在则直接复用（幂等），不重复下载。
  */
-export async function downloadKernelTag(version, repo = ELAB_REPO) {
+export async function downloadKernelTag(version, repo = ELAB_REPO, onPhase) {
     const v = version.trim().replace(/^v/i, '');
     if (!isValidKernelVersion(v)) {
         return { ok: false, code: 'bad-version', message: `版本号形状不对：${version}（需 x.y 或 x.y.z）` };
@@ -36,11 +36,13 @@ export async function downloadKernelTag(version, repo = ELAB_REPO) {
     }
     mkdirSync(base, { recursive: true });
     const zip = join(base, 'kernel.zip');
+    onPhase?.('download');
     const dl = await downloadToFile(kernelArchiveUrl(repo, v), zip);
     if (dl.ok === false) {
         rmSync(base, { recursive: true, force: true });
         return { ok: false, code: 'download-failed', message: `内核 v${v} 下载失败：${dl.error ?? '未知原因'}` };
     }
+    onPhase?.('extract');
     try {
         new AdmZip(zip).extractAllTo(base, true);
     }

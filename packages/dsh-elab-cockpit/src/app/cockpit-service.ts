@@ -19,7 +19,16 @@
  */
 
 import { IDLE, markStreamClosed, reduce, type RunSnapshot } from '../domain/run.ts'
-import type { Actor, BootstrapRequest, DiscoverResponse, ElabEvent, EnvProbe, PlanPreview } from '../domain/icd.ts'
+import type {
+  Actor,
+  AutoProvisionStatus,
+  BootstrapRequest,
+  DiscoverResponse,
+  ElabEvent,
+  EnvProbe,
+  PlanPreview,
+} from '../domain/icd.ts'
+import { DEFAULT_KERNEL_VERSION } from '../domain/envpack.ts'
 import {
   foldProgress,
   makeProgress,
@@ -67,6 +76,8 @@ export interface CockpitSnapshot {
   bootstrapBusy: boolean
   bootstrapError: string | null
   bootstrapNotice: string | null
+  /** 零前置自动准备：宿主半维护的状态快照（面板只轮询渲染）。 */
+  auto: AutoProvisionStatus
   /** 根的来源（user = 指定；auto = 会话 cwd 向上找）。 */
   rootSource: 'user' | 'auto' | 'bundled' | null
 }
@@ -101,6 +112,8 @@ export interface CockpitService {
   cloneKernel(url: string, dir: string): Promise<boolean>
   /** 引导向导：一键安装当前平台工具链环境包（下载类动作，需二次确认）。 */
   installToolchain(): Promise<boolean>
+  /** 自动准备失败/卡住后重跑（同一份宿主流程，不另造一套）。 */
+  retryAutoProvision(): void
   dispose(): void
 }
 
@@ -131,6 +144,15 @@ export function createCockpitService(deps: {
     bootstrapBusy: false,
     bootstrapError: null,
     bootstrapNotice: null,
+    auto: {
+      phase: 'idle',
+      step: null,
+      stage: '',
+      error: null,
+      blocked: null,
+      kernelVersion: DEFAULT_KERNEL_VERSION,
+      updatedAt: Date.now(),
+    },
     rootSource: null,
   }
 
@@ -436,6 +458,121 @@ export function createCockpitService(deps: {
     }
   }
 
+  // ── 零前置自动准备（宿主半跑流程，这里只触发 + 轮询 + 终态重跑首屏）──
+  //
+  // 纪律：
+  //   - 触发一次后不重复 POST：宿主单飞且幂等，面板重启只续上轮询；
+  //   - `autoProvision=false` → 只显示 disabled，不发任何自动请求；
+  //   - 终态（done/failed/blocked）各处理一次，避免重复刷新把界面刷成抖动；
+  //   - 仍保留手动入口（指定路径 / 浅克隆 / 环境包）作为兜底。
+
+  const AUTO_POLL_MS = 1200
+  let autoTimer: ReturnType<typeof setTimeout> | null = null
+  /** 已处理过的终态（同一服务实例内只刷新一次首屏）。 */
+  let autoSettled: AutoProvisionStatus['phase'] | null = null
+
+  function stopAutoPoll(): void {
+    if (autoTimer === null) return
+    clearTimeout(autoTimer)
+    autoTimer = null
+  }
+
+  function scheduleAutoPoll(): void {
+    stopAutoPoll()
+    if (disposed) return
+    autoTimer = setTimeout(() => {
+      autoTimer = null
+      void pollAuto()
+    }, AUTO_POLL_MS)
+  }
+
+  async function pollAuto(): Promise<void> {
+    if (disposed || typeof api.bootstrapStatus !== 'function') return
+    try {
+      const r = await api.bootstrapStatus(sessionId)
+      adoptAuto(r.auto)
+    } catch {
+      // 轮询失败（宿主暂时不可达）：稍后再试，终态自然停止
+      scheduleAutoPoll()
+    }
+  }
+
+  /** 采纳宿主状态：running → 续轮询；终态 → 重跑首屏（内核/环境变了）。 */
+  function adoptAuto(status: AutoProvisionStatus): void {
+    set({ auto: status })
+    if (status.phase === 'running') {
+      autoSettled = null
+      scheduleAutoPoll()
+      return
+    }
+    stopAutoPoll()
+    if (status.phase === 'disabled' || status.phase === 'idle') return
+    if (autoSettled === status.phase) return
+    autoSettled = status.phase
+    void (async () => {
+      if (disposed) return
+      await initFlow()
+      await refreshEnv()
+    })()
+  }
+
+  /**
+   * 触发自动准备（面板首次打开 / 用户点重试）。
+   * 只在**未 ready** 时自动跑；`force=true` 用于重试失败/卡住的步骤。
+   */
+  async function startAutoProvision(force: boolean): Promise<void> {
+    if (disposed || typeof api.bootstrap !== 'function') return
+
+    // ① 配置开关：关闭就只显示 disabled（宿主侧也会拒绝，双重防护）
+    if (typeof api.getConfig === 'function') {
+      try {
+        const cfg = await api.getConfig()
+        if (cfg.config.autoProvision === false) {
+          autoSettled = 'disabled'
+          set({
+            auto: {
+              ...snap.auto,
+              phase: 'disabled',
+              step: null,
+              stage: '自动准备已在设置页关闭（autoProvision=false）',
+              error: null,
+              blocked: null,
+              updatedAt: Date.now(),
+            },
+          })
+          return
+        }
+      } catch {
+        /* 读不到配置按默认 true */
+      }
+    }
+
+    // ② 已 ready（内核就绪且已接入工程）→ 不打扰
+    if (!force && snap.hostOk === true && snap.projects.length > 0) return
+
+    // ③ 先问宿主：已在跑就续上轮询；非强制时终态不重跑（幂等）
+    if (typeof api.bootstrapStatus === 'function') {
+      try {
+        const r = await api.bootstrapStatus(sessionId)
+        const p = r.auto.phase
+        if (p === 'running' || (!force && (p === 'done' || p === 'failed' || p === 'blocked' || p === 'disabled'))) {
+          adoptAuto(r.auto)
+          return
+        }
+      } catch {
+        /* 旧宿主没有该端点：直接走 POST */
+      }
+    }
+
+    // ④ 触发宿主流程（首次打开 = 下载内核 → 回落浅克隆 → 装工具链）
+    try {
+      const r = await api.bootstrap({ action: 'auto-provision' }, sessionId)
+      if (r.auto !== undefined) adoptAuto(r.auto)
+    } catch {
+      /* 旧宿主不认识该动作：静默降级，向导的手动入口仍可用 */
+    }
+  }
+
   // ── 服务对象 ────────────────────────────────────────────────────
 
   return {
@@ -449,6 +586,8 @@ export function createCockpitService(deps: {
 
     async init() {
       await initFlow()
+      // 零前置：内核/工具链没备好就自动跑（宿主幂等；已 ready 直接跳过）
+      await startAutoProvision(false)
     },
 
     setVisible(v) {
@@ -558,8 +697,13 @@ export function createCockpitService(deps: {
       return bootstrapWrite({ action: 'install-toolchain', confirm: true })
     },
 
+    retryAutoProvision() {
+      void startAutoProvision(true)
+    },
+
     dispose() {
       disposed = true
+      stopAutoPoll()
       stopFollowPoll()
       closeConnection()
       listeners.clear()

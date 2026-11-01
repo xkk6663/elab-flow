@@ -1,0 +1,72 @@
+/**
+ * 安装向导状态机（纯函数，零 I/O / 零 React）。
+ *
+ * 方案 §3.1：
+ *   unbound → env-ok → root-set → kernel-ok → ready
+ *   （工具链体检结果只作 warn/ok 标注，**不阻断**任何状态转移）
+ *
+ * 状态本身每次由事实重算，不持久化 —— 避免"上次的绿勾骗了这次"；
+ * 只持久化配置（elabRoot / pythonPath / 引导条已关闭时间）。
+ */
+export function deriveBootstrapPhase(f) {
+    if (f.hostOk === true)
+        return f.projectCount > 0 ? 'ready' : 'kernel-ok';
+    if (f.elabRoot !== null)
+        return 'root-set';
+    if (f.pythonOk === true)
+        return 'env-ok';
+    return 'unbound';
+}
+/** 每步的呈现状态：done 绿、warn 黄（不阻断）、blocked 红（需要动作）。 */
+export function stepStates(phase) {
+    switch (phase) {
+        case 'unbound':
+            // 环境还没过：内核/工程都谈不上，工具链只作提示
+            return { env: 'blocked', kernel: 'blocked', toolchain: 'warn', project: 'blocked' };
+        case 'env-ok':
+            return { env: 'done', kernel: 'blocked', toolchain: 'warn', project: 'blocked' };
+        case 'root-set':
+            return { env: 'done', kernel: 'warn', toolchain: 'warn', project: 'blocked' };
+        case 'kernel-ok':
+            return { env: 'done', kernel: 'done', toolchain: 'warn', project: 'blocked' };
+        case 'ready':
+            return { env: 'done', kernel: 'done', toolchain: 'warn', project: 'done' };
+    }
+}
+/** 插件要求的内核最低版本（仅提示：版本旧不阻断功能，方案 §3.5）。 */
+export const MIN_KERNEL_VERSION = '2.1.0';
+/** 编译 / 烧录所需的环境包工具（缺任意一项就值得自动装一次环境包）。 */
+export const REQUIRED_TOOLCHAIN = [
+    { key: 'armGcc', label: 'arm-none-eabi-gcc' },
+    { key: 'cmake', label: 'cmake' },
+    { key: 'ninja', label: 'ninja' },
+    { key: 'openocd', label: 'openocd' },
+];
+/**
+ * 当前探测结果里缺哪些工具（纯函数）。
+ * ★ 只用于"要不要自动装环境包"的判断；真正的编译可行性仍由内核 doctor 判。
+ */
+export function missingToolchain(env) {
+    return REQUIRED_TOOLCHAIN.filter((t) => env[t.key].ok !== true).map((t) => ({
+        key: t.key,
+        label: t.label,
+    }));
+}
+/** 语义版本比较（只处理数字段；非数字按 0）。a<b → -1，相等 → 0，a>b → 1。 */
+export function compareVersion(a, b) {
+    const pa = a.split('.').map((x) => Number.parseInt(x, 10) || 0);
+    const pb = b.split('.').map((x) => Number.parseInt(x, 10) || 0);
+    for (let i = 0; i < 3; i += 1) {
+        const va = pa[i] ?? 0;
+        const vb = pb[i] ?? 0;
+        if (va !== vb)
+            return va < vb ? -1 : 1;
+    }
+    return 0;
+}
+/** 内核是否比期望旧（版本未知 = 不判定，交给 existing kernelOld 提示）。 */
+export function isKernelOld(version, min = MIN_KERNEL_VERSION) {
+    if (version === null || version === undefined || version === '')
+        return false;
+    return compareVersion(version, min) < 0;
+}

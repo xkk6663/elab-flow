@@ -61,6 +61,8 @@ export interface HostRouteConfig {
   pythonPath: string
   idleKillSec: number
   retention: RetentionConfig
+  /** 首次打开面板时自动准备内核与工具链（默认 true）。 */
+  autoProvision: boolean
 }
 
 export const DEFAULT_HOST_ROUTE_CONFIG: HostRouteConfig = {
@@ -68,6 +70,7 @@ export const DEFAULT_HOST_ROUTE_CONFIG: HostRouteConfig = {
   pythonPath: 'auto',
   idleKillSec: 1800,
   retention: { keepCount: 200, keepDays: 14, maxTotalBytes: 50 * 1024 * 1024, dryRun: false },
+  autoProvision: true,
 }
 
 /** 允许转发的 GET 端点（路径 → 是否允许）。 */

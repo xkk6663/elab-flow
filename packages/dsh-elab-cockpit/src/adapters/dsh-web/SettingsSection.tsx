@@ -180,6 +180,19 @@ export function SettingsSection(_props: Record<string, unknown>): ReactNode {
         />
       </div>
       <div style={rowStyle}>
+        <span style={labelStyle}>自动准备</span>
+        <input
+          type="checkbox"
+          checked={draft.autoProvision ?? cfg.autoProvision}
+          onChange={(e: any) => set({ autoProvision: Boolean(e.currentTarget.checked) })}
+          aria-label="首次打开自动准备内核与工具链"
+          style={{ accentColor: 'var(--elab-accent)', cursor: 'pointer' }}
+        />
+        <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+          {'首次打开面板自动下载内核 / 浅克隆回落 / 安装工具链（只写 ~/.dsh/elab；主机 Python 不会被自动安装）'}
+        </span>
+      </div>
+      <div style={rowStyle}>
         <span style={labelStyle}>空闲回收(秒)</span>
         <input
           type="number"

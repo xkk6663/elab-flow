@@ -12,10 +12,12 @@
 import { dirname, normalize } from 'node:path';
 import { CockpitHost, looksLikeElabRoot } from "../adapters/kernel-process/host-process.js";
 import { probeEnv } from "../adapters/env/probe.js";
-import { cloneKernel, validateBootstrapRequest } from "../adapters/env/bootstrap.js";
+import { cloneKernel, cloneKernelDefault, validateBootstrapRequest } from "../adapters/env/bootstrap.js";
 import { envPackStatus, installEnvPack, installedPackEnv } from "../adapters/env/envpack.js";
-import { downloadKernelTag } from "../adapters/env/kernel-download.js";
+import { downloadKernelTag, ELAB_REPO } from "../adapters/env/kernel-download.js";
 import { registerOnce } from "../adapters/kernel-http/route-guard.js";
+import { DEFAULT_KERNEL_VERSION } from "../domain/envpack.js";
+import { createAutoProvisioner } from "./auto-provision.js";
 import { DEFAULT_HOST_ROUTE_CONFIG, registerApiRoute, registerEventsRoute, } from "../adapters/kernel-http/routes.js";
 import { runRetention } from "../adapters/fs-store/run-retention.js";
 /** 从起点向上找 elab 仓库根（`cockpit/server.py` + `services/elab`）。 */
@@ -92,6 +94,41 @@ export function apply(ctx, options = {}) {
             starting = undefined;
         }
     }
+    /** 丢弃当前内核进程（换根 / 装完工具链后下次按需按新环境重启）。 */
+    function dropHost() {
+        const old = host;
+        host = undefined;
+        void old?.dispose().catch(() => undefined);
+    }
+    // 零前置自动准备（首次打开面板时宿主半自动跑；UI 只轮询状态）。
+    const autoProvisioner = createAutoProvisioner({
+        probe: () => probeEnv({ pythonPath: current.pythonPath }),
+        resolveRoot: (sessionId) => resolveRoot(sessionId) ?? null,
+        toolchainInstalled: () => installedPackEnv() !== null,
+        downloadKernel: async (version, onStage) => {
+            const dl = await downloadKernelTag(version, ELAB_REPO, (phase) => {
+                onStage(phase === 'extract' ? `解压内核 v${version}…` : `下载内核 v${version}…`);
+            });
+            if (dl.ok === false)
+                return dl;
+            if (!looksLikeElabRoot(dl.dir)) {
+                return { ok: false, code: 'not-elab-root', message: '下载完成但归档不是 elab 仓库根' };
+            }
+            return dl;
+        },
+        cloneKernel: () => cloneKernelDefault(looksLikeElabRoot),
+        installToolchain: async (onProgress) => {
+            const installed = await installEnvPack(undefined, onProgress);
+            if (installed.ok === false)
+                return installed;
+            return { ok: true, packId: installed.packId, tools: Object.keys(installed.state.tools).length };
+        },
+        onRootReady: (dir) => {
+            dropHost();
+            options.onRootPersisted?.(dir);
+        },
+        onToolchainInstalled: () => dropHost(),
+    }, { kernelVersion: DEFAULT_KERNEL_VERSION, enabled: () => current.autoProvision });
     const deps = {
         ensureHost,
         config: () => current,
@@ -177,9 +214,11 @@ export function apply(ctx, options = {}) {
             json(res, 200, { ok: true, status: envPackStatus() });
         },
     }));
-    // ── 引导向导：写动作（POST /elab/bootstrap）────────────────────
+    // ── 引导向导：写动作（POST /elab/bootstrap）+ 自动准备状态（GET）────────
     //   set-root（校验 + 写配置）/ clone（浅克隆到空目录 + 写配置）/
-    //   install-toolchain（官方环境包）/ download-kernel（按 tag 下内核）。
+    //   install-toolchain（官方环境包）/ download-kernel（按 tag 下内核）/
+    //   auto-provision（零前置自动准备：内核 → 工具链；由 autoProvision 配置门控）。
+    //   GET 返回自动流程快照（面板轮询用；不触发任何动作）。
     disposers.push(registerOnce(ctx, {
         kind: 'exact',
         path: '/elab/bootstrap',
@@ -188,8 +227,14 @@ export function apply(ctx, options = {}) {
                 json(res, 403, { ok: false, error: { code: 'forbidden' } });
                 return;
             }
+            const url = new URL(req.url ?? '/', 'http://dsh.internal');
+            const sessionId = url.searchParams.get('sessionId') ?? undefined;
+            if (req.method === 'GET') {
+                json(res, 200, { ok: true, auto: autoProvisioner.status() });
+                return;
+            }
             if (req.method !== 'POST') {
-                res.setHeader('Allow', 'POST');
+                res.setHeader('Allow', 'GET, POST');
                 json(res, 405, { ok: false, error: { code: 'method-not-allowed' } });
                 return;
             }
@@ -207,6 +252,20 @@ export function apply(ctx, options = {}) {
                 return;
             }
             const request = check.request;
+            // 自动准备：立即返回 202 + 当前状态（长任务在宿主半单飞跑，面板轮询 GET）。
+            if (request.action === 'auto-provision') {
+                const started = autoProvisioner.start(sessionId);
+                const disabled = started.status.phase === 'disabled';
+                json(res, disabled ? 409 : 202, {
+                    ok: !disabled,
+                    action: request.action,
+                    auto: started.status,
+                    ...(disabled
+                        ? { error: { code: 'auto-provision-disabled', message: '设置页已关闭自动准备（autoProvision=false）' } }
+                        : {}),
+                });
+                return;
+            }
             if (request.action === 'clone') {
                 const cloned = await cloneKernel(request.url, request.dir);
                 if (cloned.ok === false) {
@@ -235,9 +294,7 @@ export function apply(ctx, options = {}) {
                     return;
                 }
                 // 新工具要用在**重启后**的 spawn 环境里：丢弃旧进程，下次按需重启
-                const oldPack = host;
-                host = undefined;
-                void oldPack?.dispose().catch(() => undefined);
+                dropHost();
                 json(res, 200, {
                     ok: true,
                     action: request.action,
@@ -265,17 +322,13 @@ export function apply(ctx, options = {}) {
                     });
                     return;
                 }
-                const old = host;
-                host = undefined;
-                void old?.dispose().catch(() => undefined);
+                dropHost();
                 options.onRootPersisted?.(dl.dir);
                 json(res, 200, { ok: true, action: request.action, elabRoot: dl.dir });
                 return;
             }
             // 根已变更 → 丢弃旧进程，下次 ensureHost 按新根起
-            const old = host;
-            host = undefined;
-            void old?.dispose().catch(() => undefined);
+            dropHost();
             options.onRootPersisted?.(request.dir);
             json(res, 200, { ok: true, action: request.action, elabRoot: request.dir });
         },

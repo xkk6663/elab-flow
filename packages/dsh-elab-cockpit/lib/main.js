@@ -35,12 +35,15 @@ export function resolveConfig(config) {
         maxTotalBytes: (config?.runsMaxTotalMB ?? 50) * 1024 * 1024,
         dryRun: config?.runsCleanupDryRun ?? false,
     };
+    const autoProvision = config?.autoProvision ?? true;
     return {
+        autoProvision,
         host: {
             elabRoot: config?.elabRoot ?? 'auto',
             pythonPath: config?.pythonPath ?? 'auto',
             idleKillSec: config?.idleKillSec ?? 1800,
             retention,
+            autoProvision,
         },
         discover: {
             elabRoot: config?.elabRoot ?? 'auto',
@@ -125,6 +128,7 @@ export function apply(ctx, config, env) {
                 idleKillSec: hostController.current.idleKillSec,
                 discoverMaxDepth: discoverCurrent.maxDepth,
                 discoverLimit: discoverCurrent.limit,
+                autoProvision: hostController.current.autoProvision,
             };
         },
         apply(patch) {
@@ -135,6 +139,8 @@ export function apply(ctx, config, env) {
                 hostNext.pythonPath = patch.pythonPath;
             if (patch.idleKillSec !== undefined)
                 hostNext.idleKillSec = patch.idleKillSec;
+            if (patch.autoProvision !== undefined)
+                hostNext.autoProvision = patch.autoProvision;
             if (Object.keys(hostNext).length > 0)
                 hostController.update(hostNext);
             const discoverNext = {};
@@ -197,6 +203,8 @@ export function sanitizeConfigPatch(body) {
     if (typeof b.discoverLimit === 'number' && Number.isFinite(b.discoverLimit)) {
         out.discoverLimit = Math.min(500, Math.max(1, Math.round(b.discoverLimit)));
     }
+    if (typeof b.autoProvision === 'boolean')
+        out.autoProvision = b.autoProvision;
     return Object.keys(out).length > 0 ? out : undefined;
 }
 function isAbsoluteLike(p) {

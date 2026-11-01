@@ -38,6 +38,14 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'kernel', label: '内核设置' },
 ]
 
+/** 包操作 job 的中文动作名（market = 首屏遍历 GitHub）。 */
+const ACTION_LABEL: Record<string, string> = {
+  install: '安装',
+  remove: '卸载',
+  update: '更新',
+  market: '市场遍历',
+}
+
 const btn = (primary = false): React.CSSProperties => ({
   padding: '2px 8px',
   fontSize: 'var(--elab-fs-xs)',
@@ -129,7 +137,9 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
   const [pending, setPending] = useState<string | null>(null)
 
   const jobActive = job !== null && (job.state === 'queued' || job.state === 'running')
-  const frozen = runActive || jobActive
+  /** 市场遍历只读 GitHub、不改芯片数据 → 不冻结闭环（内核 `/api/run` 侧同样不拦）。 */
+  const marketJobActive = jobActive && job !== null && job.action === 'market'
+  const frozen = runActive || (jobActive && !marketJobActive)
 
   const load = useCallback(
     async (q: string, withMarket: boolean) => {
@@ -166,6 +176,19 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
   /** 轮询结束时要按**当前**页签刷新（effect 里不直接依赖 query/tab，免得多余重跑）。 */
   const refreshArgs = useRef<{ tab: Tab; query: string }>({ tab, query })
   refreshArgs.current = { tab, query }
+
+  // ★ 首次打开市场页签：现场遍历一遍 GitHub 上现有的 elab-pack 仓库（异步 job）。
+  //   没有 GITHUB_TOKEN 时可能被限流 → 失败只提示，不阻断：界面继续显示已有索引。
+  const crawled = useRef(false)
+  useEffect(() => {
+    if (tab !== 'market' || crawled.current) return
+    crawled.current = true
+    void api
+      .marketRefresh({ sessionId })
+      .then(watchJob)
+      .catch((e: unknown) => setError(
+        `未能现场遍历 GitHub（${e instanceof Error ? e.message : String(e)}）—— 仍显示最近一次市场索引`))
+  }, [tab, api, sessionId, watchJob])
 
   useEffect(() => {
     if (job === null) return
@@ -515,7 +538,7 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
                       : 'var(--elab-accent)',
               }}
             >
-              {`${job.action} ${job.name || '（全部）'}：${job.stage}`}
+              {`${ACTION_LABEL[job.action] ?? job.action}${job.name ? ` ${job.name}` : ''}：${job.stage}`}
             </span>
             <span style={{ flex: '1 1 auto' }} />
             {job.state === 'ok' || job.state === 'failed' ? (
@@ -615,16 +638,35 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
 
             {query.trim() === '' ? (
               <>
-                <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-muted)', marginBottom: '8px', lineHeight: 1.6 }}>
-                  {'输入名称即可搜索并安装芯片适配包；内容留在作者仓库，一次只启用一套。'}
-                </div>
-                {officialLocal.length > 0 ? (
+                {/* 首屏：直接把市场里的**全部**可用包列出来（无需输入） */}
+                {marketPacks.length > 0 ? (
                   <>
                     <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)', margin: '4px 0 6px' }}>
+                      {`市场（GitHub 发现 ${marketPacks.length} 个）`}
+                    </div>
+                    {marketPacks.map((p) => renderInstallRow(p, false))}
+                  </>
+                ) : marketJobActive ? (
+                  <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-muted)', marginBottom: '8px' }}>
+                    {'正在遍历 GitHub 上的芯片适配包…'}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-muted)', marginBottom: '8px', lineHeight: 1.6 }}>
+                    {'市场里暂时没有可用包：可在上方输入名称过滤，或装本机官方源里的内置包。'}
+                  </div>
+                )}
+                {officialLocal.length > 0 ? (
+                  <>
+                    <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)', margin: '8px 0 6px' }}>
                       {'本机官方源（离线可装）'}
                     </div>
                     {officialLocal.map((p) => renderInstallRow(p, true))}
                   </>
+                ) : null}
+                {marketPacks.length > 0 ? (
+                  <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)', marginTop: '8px', lineHeight: 1.6 }}>
+                    {'以上为市场里的全部适配包；输入名称可过滤。内容留在作者仓库，一次只启用一套。'}
+                  </div>
                 ) : null}
               </>
             ) : marketPacks.length === 0 && !loading ? (

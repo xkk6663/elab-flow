@@ -1,19 +1,21 @@
 /**
- * 安装向导（面板空态）—— 四步：环境自检 → 内核来源 → 工具链体检 → 工程接入。
+ * 安装向导（面板空态）—— 四步：环境自检 → 内核来源 → 工具链体检 → 工程接入，
+ * 顶部另有「自动准备」进度卡（零前置：首次打开自动下载内核 / 回落浅克隆 / 装工具链）。
  *
  * 设计（方案 §3.4）：
  *   - 只读优先：环境探测来自 `GET /elab/env`，本组件不发任何写请求；
  *   - 写动作都要一次显式确认：`clone` 走"点击 → 再点确认"两段式；
- *   - 工具链缺件只标 warn，不阻断（真正结论由内核 doctor 在工程接入后跑）。
+ *   - 工具链缺件只标 warn，不阻断（真正结论由内核 doctor 在工程接入后跑）；
+ *   - 自动准备的状态/文案全部来自宿主半（props.auto），本组件只渲染 + 给重试入口。
  *
  * 组件是叶子：只收 props（不 import 编排服务），接线在 CockpitPane。
  */
 
 import React from 'react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import type { EnvProbe, ProbeItem } from '../../domain/icd.ts'
+import type { AutoProvisionStatus, AutoProvisionStep, EnvProbe, ProbeItem } from '../../domain/icd.ts'
 import { deriveBootstrapPhase, stepStates } from '../../domain/bootstrap.ts'
 import type { BootstrapStepId } from '../../domain/bootstrap.ts'
 
@@ -31,11 +33,15 @@ export interface BootstrapWizardProps {
   hostOk: boolean | null
   hostError: string | null
   projectCount: number
+  /** 零前置自动准备：宿主半维护的实时状态（本组件只渲染）。 */
+  auto: AutoProvisionStatus
   onRefreshEnv(): void
   onSetRoot(dir: string): void
   onClone(url: string, dir: string): void
   /** 一键环境包：下载官方 GCC / CMake / Ninja / OpenOCD 并注入 ELAB_*（需用户点击）。 */
   onInstallToolchain(): void
+  /** 自动准备失败/卡住后重跑（同一个宿主流程）。 */
+  onRetryAuto(): void
 }
 
 const cardStyle: React.CSSProperties = {
@@ -114,6 +120,34 @@ function stepHeader(index: number, title: string, state: 'done' | 'warn' | 'bloc
   )
 }
 
+/** 自动准备的步骤名（stage 文案由宿主给，这里只补"当前在哪一步"）。 */
+const AUTO_STEP_LABEL: Record<AutoProvisionStep, string> = {
+  probe: '环境自检',
+  kernel: '准备内核',
+  toolchain: '安装工具链',
+  done: '完成',
+}
+
+/** 进度条段数（无 CSS keyframes：靠 active 段位移制造"在跑"的进度感）。 */
+const AUTO_SEGMENTS = 12
+
+/** 运行中每 320ms 前进一段；停下时不动（组件仍可渲染静态态）。 */
+function useAutoPulse(active: boolean): number {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => setTick((t) => (t + 1) % AUTO_SEGMENTS), 320)
+    return () => clearInterval(id)
+  }, [active])
+  return tick
+}
+
+function autoTone(phase: AutoProvisionStatus['phase']): 'done' | 'warn' | 'blocked' {
+  if (phase === 'done') return 'done'
+  if (phase === 'blocked' || phase === 'failed') return 'blocked'
+  return 'warn'
+}
+
 export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
   const {
     env,
@@ -126,10 +160,12 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
     hostOk,
     hostError,
     projectCount,
+    auto,
     onRefreshEnv,
     onSetRoot,
     onClone,
     onInstallToolchain,
+    onRetryAuto,
   } = props
 
   const [dismissed, setDismissed] = useState<boolean>(() => {
@@ -151,6 +187,12 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
     projectCount,
   })
   const states = stepStates(phase)
+
+  const autoRunning = auto.phase === 'running'
+  const autoTick = useAutoPulse(autoRunning)
+  /** 自动流程在跑时，手动写动作一并禁用（同一个宿主，避免抢同一份下载）。 */
+  const writeBusy = bootstrapBusy || autoRunning
+  const autoStepText = auto.step === null ? '' : AUTO_STEP_LABEL[auto.step]
 
   const header = (state: BootstrapStepId, index: number, title: string): ReactNode =>
     stepHeader(index, title, states[state])
@@ -174,7 +216,9 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
           >
             {'打开安装向导'}
           </button>
-          <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{'引导不会自动安装任何东西'}</span>
+          <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+            {auto.phase === 'running' ? `正在自动准备：${auto.stage}` : '首次打开会自动准备内核与工具链（只写 ~/.dsh/elab）'}
+          </span>
         </div>
       </div>
     )
@@ -187,7 +231,73 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
         <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{`当前阶段：${phase}`}</span>
       </div>
       <div style={{ fontSize: '11px', color: 'var(--elab-fg-secondary)', marginBottom: '10px' }}>
-        {'插件不内置内核与工具链：内核需本机检出或按版本下载；工具链可一键装入 ~/.dsh/elab/env。所有写盘动作都要你显式点击。'}
+        {`零前置：首次打开会自动准备内核 v${auto.kernelVersion} 与工具链（只写 ~/.dsh/elab，不写你的工作区）。唯一需要你自己装的是主机 Python。`}
+      </div>
+
+      {/* 0 自动准备（零前置流程） */}
+      <div style={cardStyle} aria-live="polite" aria-busy={autoRunning}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '6px' }}>
+          {dot(autoTone(auto.phase))}
+          <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--elab-fg-primary)' }}>{'自动准备'}</span>
+          <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+            {auto.phase === 'disabled' ? '已关闭' : auto.phase === 'idle' ? '待启动' : auto.phase === 'running' ? '进行中' : auto.phase === 'done' ? '完成' : auto.phase === 'blocked' ? '需要你处理' : '失败'}
+          </span>
+        </div>
+
+        {autoRunning ? (
+          <div>
+            <div style={{ fontSize: '11px', color: 'var(--elab-fg-primary)', marginBottom: '4px', wordBreak: 'break-word' }}>
+              {autoStepText === '' ? auto.stage : `${autoStepText} · ${auto.stage}`}
+            </div>
+            <div aria-hidden="true" style={{ display: 'flex', gap: '2px' }}>
+              {Array.from({ length: AUTO_SEGMENTS }, (_, i) => (
+                <span
+                  key={i}
+                  style={{
+                    flex: '1 1 auto',
+                    height: '3px',
+                    borderRadius: '2px',
+                    background: (i + autoTick) % AUTO_SEGMENTS < 4 ? 'var(--elab-accent)' : 'var(--elab-bg-raised)',
+                  }}
+                />
+              ))}
+            </div>
+            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+              {'可以关掉面板，下次打开会自动续上进度；下载与解压都走环境包的 sha256 校验。'}
+            </div>
+          </div>
+        ) : auto.phase === 'blocked' ? (
+          <div>
+            <div style={{ fontSize: '11px', color: 'var(--elab-status-fail)', marginBottom: '4px' }}>
+              {auto.blocked?.message ?? auto.stage}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--elab-fg-secondary)', marginBottom: '6px' }}>
+              {auto.blocked?.hint ?? ''}
+            </div>
+            <button style={buttonStyle} onClick={onRetryAuto}>{'重试'}</button>
+          </div>
+        ) : auto.phase === 'failed' ? (
+          <div>
+            <div style={{ fontSize: '11px', color: 'var(--elab-status-fail)', marginBottom: '6px' }}>
+              {auto.error?.message ?? '自动准备失败'}
+            </div>
+            {auto.error?.retryable === false ? (
+              <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{'该错误重试无法解决，请用下方手动入口。'}</span>
+            ) : (
+              <button style={buttonStyle} onClick={onRetryAuto}>{'重试'}</button>
+            )}
+          </div>
+        ) : auto.phase === 'done' ? (
+          <div style={{ fontSize: '11px', color: 'var(--elab-status-ok)' }}>{auto.stage}</div>
+        ) : auto.phase === 'disabled' ? (
+          <div style={{ fontSize: '11px', color: 'var(--elab-fg-secondary)' }}>
+            {`自动准备已在设置页关闭${auto.stage === '' ? '' : `（${auto.stage}）`}：下面是手动入口。`}
+          </div>
+        ) : (
+          <div style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+            {'首次打开面板会自动准备内核与工具链；也可以用下面的手动入口。'}
+          </div>
+        )}
       </div>
 
       {/* 1 环境 */}
@@ -242,7 +352,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
           />
           <button
             style={buttonStyle}
-            disabled={bootstrapBusy || rootDraft.trim() === ''}
+            disabled={writeBusy || rootDraft.trim() === ''}
             onClick={() => onSetRoot(rootDraft.trim())}
           >
             {'使用此目录'}
@@ -266,7 +376,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
           />
           <button
             style={buttonStyle}
-            disabled={bootstrapBusy || cloneDir.trim() === ''}
+            disabled={writeBusy || cloneDir.trim() === ''}
             onClick={() => setConfirmClone(true)}
           >
             {'浅克隆'}
@@ -287,7 +397,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
             <div style={{ marginTop: '6px', display: 'flex', gap: '8px' }}>
               <button
                 style={buttonStyle}
-                disabled={bootstrapBusy}
+                disabled={writeBusy}
                 onClick={() => {
                   setConfirmClone(false)
                   onClone(cloneUrl.trim(), cloneDir.trim())
@@ -326,7 +436,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
           </div>
         )}
         <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <button style={buttonStyle} onClick={onInstallToolchain} disabled={bootstrapBusy}>
+          <button style={buttonStyle} onClick={onInstallToolchain} disabled={writeBusy}>
             {bootstrapBusy ? '安装中…' : '一键安装工具链'}
           </button>
           <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>

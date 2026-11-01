@@ -13,9 +13,11 @@
 
 import type {
   AdaptResponse,
+  AutoProvisionStatus,
   BootstrapRequest,
   BootstrapResponse,
   DiscoverResponse,
+  ElabConfig,
   ElabEvent,
   EnvResponse,
   HostInfo,
@@ -90,8 +92,15 @@ export interface IcdPort {
   capabilities(sessionId?: string): Promise<Record<string, unknown>>
   /** 引导向导：只读环境探测（不 spawn 内核）。 */
   env(sessionId?: string): Promise<EnvResponse>
-  /** 引导向导：set-root / clone（写动作需确认）。 */
-  bootstrap(req: BootstrapRequest): Promise<BootstrapResponse>
+  /** 引导向导：set-root / clone / install-toolchain / download-kernel（写动作需确认）。 */
+  bootstrap(req: BootstrapRequest, sessionId?: string): Promise<BootstrapResponse>
+  /**
+   * 零前置自动准备的状态快照（宿主半单飞；面板轮询渲染）。
+   * 旧宿主可能没有这个端点 → 调用方必须容忍缺省。
+   */
+  bootstrapStatus?(sessionId?: string): Promise<{ ok: boolean; auto: AutoProvisionStatus }>
+  /** 插件配置（autoProvision 开关在这里读；旧宿主缺省按 true）。 */
+  getConfig?(): Promise<{ ok: boolean; config: ElabConfig }>
   projects(sessionId?: string): Promise<{ projects?: unknown[]; cards?: unknown[] }>
   /** run 列表 + 活动 run（agent 在别处起跑时，面板靠它自动跟随工程）。 */
   runs(sessionId?: string): Promise<{ runs: unknown[]; active: unknown[] }>

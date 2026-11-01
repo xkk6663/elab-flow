@@ -37,6 +37,7 @@ export type KernelDownloadResult =
 export async function downloadKernelTag(
   version: string,
   repo: string = ELAB_REPO,
+  onPhase?: (phase: 'download' | 'extract') => void,
 ): Promise<KernelDownloadResult> {
   const v = version.trim().replace(/^v/i, '')
   if (!isValidKernelVersion(v)) {
@@ -50,11 +51,13 @@ export async function downloadKernelTag(
 
   mkdirSync(base, { recursive: true })
   const zip = join(base, 'kernel.zip')
+  onPhase?.('download')
   const dl = await downloadToFile(kernelArchiveUrl(repo, v), zip)
   if (dl.ok === false) {
     rmSync(base, { recursive: true, force: true })
     return { ok: false, code: 'download-failed', message: `内核 v${v} 下载失败：${dl.error ?? '未知原因'}` }
   }
+  onPhase?.('extract')
   try {
     new AdmZip(zip).extractAllTo(base, true)
   } catch (e) {

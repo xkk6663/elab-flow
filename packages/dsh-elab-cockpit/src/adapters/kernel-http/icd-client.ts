@@ -15,6 +15,7 @@
 
 import type {
   AdaptResponse,
+  AutoProvisionStatus,
   BootstrapRequest,
   BootstrapResponse,
   DiscoverResponse,
@@ -102,8 +103,12 @@ export const elabApi = {
   host: (sessionId?: string) => request<HostInfo>(withSession('/elab/host', sessionId)),
   /** 引导向导：只读环境探测（宿主半白名单执行，不 spawn 内核）。 */
   env: (sessionId?: string) => request<EnvResponse>(withSession('/elab/env', sessionId)),
-  /** 引导向导：set-root / clone（写动作，clone 需 confirm:true）。 */
-  bootstrap: (req: BootstrapRequest) => post<BootstrapResponse>('/elab/bootstrap', req),
+  /** 引导向导：set-root / clone / install-toolchain / download-kernel（写动作，需 confirm:true）。 */
+  bootstrap: (req: BootstrapRequest, sessionId?: string) =>
+    post<BootstrapResponse>(withSession('/elab/bootstrap', sessionId), req),
+  /** 零前置自动准备：主机侧状态快照（只读轮询，不触发动作）。 */
+  bootstrapStatus: (sessionId?: string) =>
+    request<{ ok: boolean; auto: AutoProvisionStatus }>(withSession('/elab/bootstrap', sessionId)),
   capabilities: (sessionId?: string) =>
     request<Record<string, unknown>>(withSession('/elab/api/capabilities', sessionId)),
   projects: (sessionId?: string) =>
@@ -262,6 +267,12 @@ export const elabApi = {
       withSession('/elab/api/pkg/verify', opts.sessionId),
       { ...(opts.name !== undefined && opts.name !== '' ? { name: opts.name } : {}) },
     ),
+  /**
+   * 首次进入市场：现场遍历 GitHub 上现有 elab-pack 仓库（202 + job）。
+   * 结果落本机 `.work/pkg/market-live.json`，15 分钟内 `GET /api/packs` 直接复用。
+   */
+  marketRefresh: (opts?: { sessionId?: string }) =>
+    post<PkgJob>(withSession('/elab/api/pkg/market', opts?.sessionId), {}),
   /** activate 是同步 200：启用一套已装包 + 重生成平台 skill + 重载 Config。 */
   pkgActivate: (opts: { name: string; sessionId?: string }) =>
     post<Record<string, unknown>>(withSession('/elab/api/pkg/activate', opts.sessionId), {

@@ -665,15 +665,55 @@ export type BootstrapRequest =
   | { action: 'set-root'; dir: string }
   | { action: 'clone'; url: string; dir: string; confirm: true }
   | { action: 'install-toolchain'; pack?: string; confirm: true }
-  | { action: 'download-kernel'; version: string; confirm: true };
+  | { action: 'download-kernel'; version: string; confirm: true }
+  /** 零前置自动准备（宿主半按 autoProvision 配置决定跑不跑；不需要 confirm）。 */
+  | { action: 'auto-provision' };
 
 export interface BootstrapResponse {
   ok: boolean;
-  action?: 'set-root' | 'clone' | 'install-toolchain' | 'download-kernel';
+  action?: 'set-root' | 'clone' | 'install-toolchain' | 'download-kernel' | 'auto-provision';
   elabRoot?: string;
   /** install-toolchain：安装结果摘要（工具数 / 告警）。 */
   envPack?: { packId: string; tools: number; warnings: string[] };
+  /** auto-provision：自动流程快照（GET /elab/bootstrap 同形）。 */
+  auto?: AutoProvisionStatus;
   error?: { code: string; message: string };
+}
+
+// ── 零前置自动准备（GET/POST /elab/bootstrap）────────────────────────
+// ★ 状态由宿主半维护（单飞、幂等），面板只轮询渲染，不在前端另造一套状态机。
+
+export type AutoProvisionPhase = 'idle' | 'running' | 'done' | 'blocked' | 'failed' | 'disabled'
+
+export type AutoProvisionStep = 'probe' | 'kernel' | 'toolchain' | 'done'
+
+/** 面向用户的失败信息：`message` 是人话（不回显原始异常串）。 */
+export interface AutoProvisionError {
+  code: string;
+  message: string;
+  /** false = 重试也没用（当前没有这种情形，保留给后续）。 */
+  retryable: boolean;
+}
+
+/** 自动流程卡住的原因（只能由用户处理；当前唯一来源 = 主机缺 Python）。 */
+export interface AutoProvisionBlocked {
+  code: 'python-missing';
+  message: string;
+  /** 具体指引（装哪个版本、在哪填路径）。 */
+  hint: string;
+}
+
+export interface AutoProvisionStatus {
+  phase: AutoProvisionPhase;
+  /** 当前步骤（null = idle/disabled）。 */
+  step: AutoProvisionStep | null;
+  /** 当前阶段文案（"下载内核 v2.1.0…" / "校验 CMake…"）。 */
+  stage: string;
+  error: AutoProvisionError | null;
+  blocked: AutoProvisionBlocked | null;
+  /** 自动流程使用的固定内核版本。 */
+  kernelVersion: string;
+  updatedAt: number;
 }
 
 /** /elab/api/discover 的单个候选工程。 */
@@ -707,6 +747,8 @@ export interface ElabConfig {
   idleKillSec: number;
   discoverMaxDepth: number;
   discoverLimit: number;
+  /** 首次打开面板时自动准备内核与工具链（默认 true；唯一不自动的是主机 Python）。 */
+  autoProvision: boolean;
 }
 
 // ── 适配包 / 社区市场（GET /api/packs、POST /api/pkg/*、GET /api/pkg/job）──
@@ -789,7 +831,7 @@ export interface PacksStatus {
 }
 
 /** 包写动作（POST /api/pkg/<action>）。 */
-export type PkgAction = 'install' | 'remove' | 'update' | 'verify' | 'activate';
+export type PkgAction = 'install' | 'remove' | 'update' | 'verify' | 'activate' | 'market';
 
 /** 包操作任务状态（异步 job：install/remove/update 走 202 + 轮询）。 */
 export type PkgJobState = 'queued' | 'running' | 'ok' | 'failed';

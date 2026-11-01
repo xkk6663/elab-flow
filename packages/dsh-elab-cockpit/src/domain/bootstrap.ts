@@ -9,6 +9,8 @@
  * 只持久化配置（elabRoot / pythonPath / 引导条已关闭时间）。
  */
 
+import type { EnvProbe } from './icd.ts'
+
 export type BootstrapPhase = 'unbound' | 'env-ok' | 'root-set' | 'kernel-ok' | 'ready'
 
 /** 推导状态所需的最小事实（全部来自 /elab/host 与 /elab/env）。 */
@@ -54,6 +56,27 @@ export function stepStates(phase: BootstrapPhase): Record<BootstrapStepId, StepS
 
 /** 插件要求的内核最低版本（仅提示：版本旧不阻断功能，方案 §3.5）。 */
 export const MIN_KERNEL_VERSION = '2.1.0'
+
+/** 编译 / 烧录所需的环境包工具（缺任意一项就值得自动装一次环境包）。 */
+export const REQUIRED_TOOLCHAIN = [
+  { key: 'armGcc', label: 'arm-none-eabi-gcc' },
+  { key: 'cmake', label: 'cmake' },
+  { key: 'ninja', label: 'ninja' },
+  { key: 'openocd', label: 'openocd' },
+] as const
+
+export type ToolchainKey = (typeof REQUIRED_TOOLCHAIN)[number]['key']
+
+/**
+ * 当前探测结果里缺哪些工具（纯函数）。
+ * ★ 只用于"要不要自动装环境包"的判断；真正的编译可行性仍由内核 doctor 判。
+ */
+export function missingToolchain(env: EnvProbe): Array<{ key: ToolchainKey; label: string }> {
+  return REQUIRED_TOOLCHAIN.filter((t) => env[t.key].ok !== true).map((t) => ({
+    key: t.key,
+    label: t.label,
+  }))
+}
 
 /** 语义版本比较（只处理数字段；非数字按 0）。a<b → -1，相等 → 0，a>b → 1。 */
 export function compareVersion(a: string, b: string): number {

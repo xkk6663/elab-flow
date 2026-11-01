@@ -13,10 +13,11 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
-import { isAbsolute, normalize } from 'node:path'
+import { existsSync, readdirSync, rmSync } from 'node:fs'
+import { isAbsolute, join, normalize } from 'node:path'
 
 import { isValidKernelVersion } from '../../domain/envpack.ts'
+import { ELAB_REPO, kernelsRoot } from './kernel-download.ts'
 
 /** 根判据由组装点注入（唯一真源 = kernel-process 的 `looksLikeElabRoot`）。 */
 export type RootPredicate = (dir: string) => boolean
@@ -26,6 +27,8 @@ export type BootstrapRequest =
   | { action: 'clone'; url: string; dir: string }
   | { action: 'install-toolchain'; pack?: string }
   | { action: 'download-kernel'; version: string }
+  /** 零前置自动准备（不走 confirm；写盘范围固定，由 autoProvision 配置门控）。 */
+  | { action: 'auto-provision' }
 
 export type BootstrapAction = BootstrapRequest['action']
 
@@ -109,6 +112,11 @@ export function validateBootstrapRequest(
     }
     return { ok: true, request: { action: 'download-kernel', version } }
   }
+  // 零前置自动准备：写盘范围固定（~/.dsh/elab/**），且由 autoProvision 配置门控，
+  // 因此不走 confirm（它不是"某一次用户没点的动作"，而是产品默认行为）。
+  if (action === 'auto-provision') {
+    return { ok: true, request: { action: 'auto-provision' } }
+  }
   return { ok: false, code: 'unknown-action', message: `不支持的 action：${action || '(空)'}` }
 }
 
@@ -116,6 +124,44 @@ export interface CloneResult {
   ok: boolean
   stdout?: string
   error?: string
+}
+
+/**
+ * 自动回落用的固定克隆落点：`~/.dsh/elab/kernels/clone`（插件自有目录，
+ * 不碰用户工作区）。UI 不需要知道家目录，路径完全由宿主半决定。
+ */
+export function defaultCloneDir(): string {
+  return join(kernelsRoot(), 'clone')
+}
+
+export type CloneDefaultResult =
+  | { ok: true; dir: string }
+  | { ok: false; code: string; message: string }
+
+/**
+ * 浅克隆到固定落点（内核下载失败时的自动回落）。
+ *
+ * 幂等：目录已是 elab 仓库根 → 直接复用；在上一次半途失败留下的残缺目录
+ * （仍在 `~/.dsh/elab` 内）→ 清掉重来。错误文案面向用户，不回显原始 stdout。
+ */
+export async function cloneKernelDefault(isElabRoot: RootPredicate): Promise<CloneDefaultResult> {
+  const dir = defaultCloneDir()
+  try {
+    if (existsSync(dir)) {
+      if (isElabRoot(dir)) return { ok: true, dir }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  } catch {
+    return { ok: false, code: 'clone-failed', message: '无法清理上次残留的克隆目录，请手动删除后重试' }
+  }
+  const cloned = await cloneKernel(ELAB_REPO, dir)
+  if (cloned.ok === false) {
+    return { ok: false, code: 'clone-failed', message: 'git 浅克隆失败（请检查网络与 git 是否可用）' }
+  }
+  if (!isElabRoot(dir)) {
+    return { ok: false, code: 'not-elab-root', message: '克隆完成，但目录不是 elab 仓库根' }
+  }
+  return { ok: true, dir }
 }
 
 /** 浅克隆（固定参数 `clone --depth 1`；url 已校验为 https）。 */

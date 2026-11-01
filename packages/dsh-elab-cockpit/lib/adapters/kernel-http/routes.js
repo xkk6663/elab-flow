@@ -28,6 +28,7 @@ export const DEFAULT_HOST_ROUTE_CONFIG = {
     pythonPath: 'auto',
     idleKillSec: 1800,
     retention: { keepCount: 200, keepDays: 14, maxTotalBytes: 50 * 1024 * 1024, dryRun: false },
+    autoProvision: true,
 };
 /** 允许转发的 GET 端点（路径 → 是否允许）。 */
 const GET_ALLOW = new Set([

@@ -56,6 +56,12 @@ export function packPathDirs(pack, roots) {
     }
     return out;
 }
+/**
+ * 首次启动自动准备的内核版本（固定版本，不跟 main 走）。
+ * 与 `MIN_KERNEL_VERSION`（插件能接受的最低版本）不是同一件事：这个版本号
+ * 决定"零前置下载哪一个 tag"；UI 与宿主半共用同一常量，避免文案/请求漂移。
+ */
+export const DEFAULT_KERNEL_VERSION = '2.1.0';
 /** 内核下载归档的 URL（GitHub tag 源码归档，与内核仓同源）。 */
 export function kernelArchiveUrl(repo, version) {
     return `${repo.replace(/\.git$/, '')}/archive/refs/tags/v${version}.zip`;

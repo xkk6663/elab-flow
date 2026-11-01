@@ -54,6 +54,8 @@ export type Config = {
   runsMaxTotalMB?: number
   /** 清理干跑（只记日志不删）。 */
   runsCleanupDryRun?: boolean
+  /** 首次打开面板时自动准备内核与工具链（默认 true；唯一不自动的是主机 Python）。 */
+  autoProvision?: boolean
   /** 是否注册 `elab_*` 工具给 Agent（§250，默认 true）。 */
   autoExposeTools?: boolean
   /** 允许 agent 写硬件/写盘（串口、适配落盘；默认 false，§6.2 规则 6）。 */
@@ -62,6 +64,8 @@ export type Config = {
 
 /** 从插件行配置构造内部配置。 */
 export interface ResolvedConfig {
+  /** 零前置自动准备开关（同时下发到宿主半配置，供 POST /elab/bootstrap 门控）。 */
+  autoProvision: boolean
   host: Partial<HostRouteConfig>
   discover: Partial<DiscoverConfig>
   tools: { autoExposeTools: boolean; allowAgentWrite: boolean }
@@ -74,12 +78,15 @@ export function resolveConfig(config?: Config): ResolvedConfig {
     maxTotalBytes: (config?.runsMaxTotalMB ?? 50) * 1024 * 1024,
     dryRun: config?.runsCleanupDryRun ?? false,
   }
+  const autoProvision = config?.autoProvision ?? true
   return {
+    autoProvision,
     host: {
       elabRoot: config?.elabRoot ?? 'auto',
       pythonPath: config?.pythonPath ?? 'auto',
       idleKillSec: config?.idleKillSec ?? 1800,
       retention,
+      autoProvision,
     },
     discover: {
       elabRoot: config?.elabRoot ?? 'auto',
@@ -168,6 +175,7 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
         idleKillSec: hostController.current.idleKillSec,
         discoverMaxDepth: discoverCurrent.maxDepth,
         discoverLimit: discoverCurrent.limit,
+        autoProvision: hostController.current.autoProvision,
       }
     },
     apply(patch: ConfigPatch): void {
@@ -175,6 +183,7 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
       if (patch.elabRoot !== undefined) hostNext.elabRoot = patch.elabRoot
       if (patch.pythonPath !== undefined) hostNext.pythonPath = patch.pythonPath
       if (patch.idleKillSec !== undefined) hostNext.idleKillSec = patch.idleKillSec
+      if (patch.autoProvision !== undefined) hostNext.autoProvision = patch.autoProvision
       if (Object.keys(hostNext).length > 0) hostController.update(hostNext)
       const discoverNext: Partial<DiscoverConfig> = {}
       if (patch.elabRoot !== undefined) {
@@ -226,6 +235,7 @@ type ConfigPatch = {
   idleKillSec?: number
   discoverMaxDepth?: number
   discoverLimit?: number
+  autoProvision?: boolean
 }
 
 /** 白名单 + 范围校验；返回 undefined 表示 body 里没有任何合法字段。 */
@@ -244,6 +254,7 @@ export function sanitizeConfigPatch(body: unknown): ConfigPatch | undefined {
   if (typeof b.discoverLimit === 'number' && Number.isFinite(b.discoverLimit)) {
     out.discoverLimit = Math.min(500, Math.max(1, Math.round(b.discoverLimit)))
   }
+  if (typeof b.autoProvision === 'boolean') out.autoProvision = b.autoProvision
   return Object.keys(out).length > 0 ? out : undefined
 }
 

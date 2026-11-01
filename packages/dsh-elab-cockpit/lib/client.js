@@ -195,6 +195,9 @@ function reduce(s, e) {
   }
 }
 
+// src/domain/envpack.ts
+var DEFAULT_KERNEL_VERSION = "2.1.0";
+
 // src/domain/kernel-meta.ts
 var current = null;
 function setKernelMeta(meta) {
@@ -386,6 +389,15 @@ function createCockpitService(deps) {
     bootstrapBusy: false,
     bootstrapError: null,
     bootstrapNotice: null,
+    auto: {
+      phase: "idle",
+      step: null,
+      stage: "",
+      error: null,
+      blocked: null,
+      kernelVersion: DEFAULT_KERNEL_VERSION,
+      updatedAt: Date.now()
+    },
     rootSource: null
   };
   const listeners = /* @__PURE__ */ new Set();
@@ -615,6 +627,89 @@ function createCockpitService(deps) {
       return false;
     }
   }
+  const AUTO_POLL_MS = 1200;
+  let autoTimer = null;
+  let autoSettled = null;
+  function stopAutoPoll() {
+    if (autoTimer === null) return;
+    clearTimeout(autoTimer);
+    autoTimer = null;
+  }
+  function scheduleAutoPoll() {
+    stopAutoPoll();
+    if (disposed) return;
+    autoTimer = setTimeout(() => {
+      autoTimer = null;
+      void pollAuto();
+    }, AUTO_POLL_MS);
+  }
+  async function pollAuto() {
+    if (disposed || typeof api.bootstrapStatus !== "function") return;
+    try {
+      const r = await api.bootstrapStatus(sessionId);
+      adoptAuto(r.auto);
+    } catch {
+      scheduleAutoPoll();
+    }
+  }
+  function adoptAuto(status) {
+    set({ auto: status });
+    if (status.phase === "running") {
+      autoSettled = null;
+      scheduleAutoPoll();
+      return;
+    }
+    stopAutoPoll();
+    if (status.phase === "disabled" || status.phase === "idle") return;
+    if (autoSettled === status.phase) return;
+    autoSettled = status.phase;
+    void (async () => {
+      if (disposed) return;
+      await initFlow();
+      await refreshEnv();
+    })();
+  }
+  async function startAutoProvision(force) {
+    if (disposed || typeof api.bootstrap !== "function") return;
+    if (typeof api.getConfig === "function") {
+      try {
+        const cfg = await api.getConfig();
+        if (cfg.config.autoProvision === false) {
+          autoSettled = "disabled";
+          set({
+            auto: {
+              ...snap.auto,
+              phase: "disabled",
+              step: null,
+              stage: "\u81EA\u52A8\u51C6\u5907\u5DF2\u5728\u8BBE\u7F6E\u9875\u5173\u95ED\uFF08autoProvision=false\uFF09",
+              error: null,
+              blocked: null,
+              updatedAt: Date.now()
+            }
+          });
+          return;
+        }
+      } catch {
+      }
+    }
+    if (!force && snap.hostOk === true && snap.projects.length > 0) return;
+    if (typeof api.bootstrapStatus === "function") {
+      try {
+        const r = await api.bootstrapStatus(sessionId);
+        const p = r.auto.phase;
+        if (p === "running" || !force && (p === "done" || p === "failed" || p === "blocked" || p === "disabled")) {
+          adoptAuto(r.auto);
+          return;
+        }
+      } catch {
+      }
+    }
+    try {
+      const r = await api.bootstrap({ action: "auto-provision" }, sessionId);
+      if (r.auto !== void 0) adoptAuto(r.auto);
+    } catch {
+    }
+  }
   return {
     subscribe(l) {
       listeners.add(l);
@@ -625,6 +720,7 @@ function createCockpitService(deps) {
     },
     async init() {
       await initFlow();
+      await startAutoProvision(false);
     },
     setVisible(v) {
       visible = v;
@@ -712,8 +808,12 @@ function createCockpitService(deps) {
     installToolchain() {
       return bootstrapWrite({ action: "install-toolchain", confirm: true });
     },
+    retryAutoProvision() {
+      void startAutoProvision(true);
+    },
     dispose() {
       disposed = true;
+      stopAutoPoll();
       stopFollowPoll();
       closeConnection();
       listeners.clear();
@@ -791,8 +891,10 @@ var elabApi = {
   host: (sessionId) => request(withSession("/elab/host", sessionId)),
   /** 引导向导：只读环境探测（宿主半白名单执行，不 spawn 内核）。 */
   env: (sessionId) => request(withSession("/elab/env", sessionId)),
-  /** 引导向导：set-root / clone（写动作，clone 需 confirm:true）。 */
-  bootstrap: (req) => post("/elab/bootstrap", req),
+  /** 引导向导：set-root / clone / install-toolchain / download-kernel（写动作，需 confirm:true）。 */
+  bootstrap: (req, sessionId) => post(withSession("/elab/bootstrap", sessionId), req),
+  /** 零前置自动准备：主机侧状态快照（只读轮询，不触发动作）。 */
+  bootstrapStatus: (sessionId) => request(withSession("/elab/bootstrap", sessionId)),
   capabilities: (sessionId) => request(withSession("/elab/api/capabilities", sessionId)),
   projects: (sessionId) => request(withSession("/elab/api/projects", sessionId)),
   runs: (sessionId) => request(withSession("/elab/api/runs", sessionId)),
@@ -891,6 +993,11 @@ var elabApi = {
     withSession("/elab/api/pkg/verify", opts.sessionId),
     { ...opts.name !== void 0 && opts.name !== "" ? { name: opts.name } : {} }
   ),
+  /**
+   * 首次进入市场：现场遍历 GitHub 上现有 elab-pack 仓库（202 + job）。
+   * 结果落本机 `.work/pkg/market-live.json`，15 分钟内 `GET /api/packs` 直接复用。
+   */
+  marketRefresh: (opts) => post(withSession("/elab/api/pkg/market", opts?.sessionId), {}),
   /** activate 是同步 200：启用一套已装包 + 重生成平台 skill + 重载 Config。 */
   pkgActivate: (opts) => post(withSession("/elab/api/pkg/activate", opts.sessionId), {
     name: opts.name
@@ -1190,6 +1297,27 @@ function probeLine(label, item, busy) {
 function stepHeader(index, title, state) {
   return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: "6px" } }, dot(state), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "12px", fontWeight: 600, color: "var(--elab-fg-primary)" } }, `${index}. ${title}`));
 }
+var AUTO_STEP_LABEL = {
+  probe: "\u73AF\u5883\u81EA\u68C0",
+  kernel: "\u51C6\u5907\u5185\u6838",
+  toolchain: "\u5B89\u88C5\u5DE5\u5177\u94FE",
+  done: "\u5B8C\u6210"
+};
+var AUTO_SEGMENTS = 12;
+function useAutoPulse(active) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setTick((t) => (t + 1) % AUTO_SEGMENTS), 320);
+    return () => clearInterval(id);
+  }, [active]);
+  return tick;
+}
+function autoTone(phase) {
+  if (phase === "done") return "done";
+  if (phase === "blocked" || phase === "failed") return "blocked";
+  return "warn";
+}
 function BootstrapWizard(props) {
   const {
     env,
@@ -1202,10 +1330,12 @@ function BootstrapWizard(props) {
     hostOk,
     hostError,
     projectCount,
+    auto,
     onRefreshEnv,
     onSetRoot,
     onClone,
-    onInstallToolchain
+    onInstallToolchain,
+    onRetryAuto
   } = props;
   const [dismissed, setDismissed] = useState(() => {
     try {
@@ -1225,6 +1355,10 @@ function BootstrapWizard(props) {
     projectCount
   });
   const states = stepStates(phase);
+  const autoRunning = auto.phase === "running";
+  const autoTick = useAutoPulse(autoRunning);
+  const writeBusy = bootstrapBusy || autoRunning;
+  const autoStepText = auto.step === null ? "" : AUTO_STEP_LABEL[auto.step];
   const header = (state, index, title) => stepHeader(index, title, states[state]);
   if (dismissed) {
     return /* @__PURE__ */ react_default.createElement("div", { style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)", lineHeight: 1.7 } }, /* @__PURE__ */ react_default.createElement("div", { style: { fontWeight: 600 } }, "\u9A7E\u9A76\u8231\u672A\u5C31\u7EEA"), /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-fg-secondary)" } }, hostError ?? "\u672A\u627E\u5230 elab \u4ED3\u5E93\u6839"), /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement(
@@ -1240,9 +1374,20 @@ function BootstrapWizard(props) {
         }
       },
       "\u6253\u5F00\u5B89\u88C5\u5411\u5BFC"
-    ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u5F15\u5BFC\u4E0D\u4F1A\u81EA\u52A8\u5B89\u88C5\u4EFB\u4F55\u4E1C\u897F")));
+    ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, auto.phase === "running" ? `\u6B63\u5728\u81EA\u52A8\u51C6\u5907\uFF1A${auto.stage}` : "\u9996\u6B21\u6253\u5F00\u4F1A\u81EA\u52A8\u51C6\u5907\u5185\u6838\u4E0E\u5DE5\u5177\u94FE\uFF08\u53EA\u5199 ~/.dsh/elab\uFF09")));
   }
-  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)", lineHeight: 1.6 } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600 } }, "\u5B89\u88C5\u5411\u5BFC"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, `\u5F53\u524D\u9636\u6BB5\uFF1A${phase}`)), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", marginBottom: "10px" } }, "\u63D2\u4EF6\u4E0D\u5185\u7F6E\u5185\u6838\u4E0E\u5DE5\u5177\u94FE\uFF1A\u5185\u6838\u9700\u672C\u673A\u68C0\u51FA\u6216\u6309\u7248\u672C\u4E0B\u8F7D\uFF1B\u5DE5\u5177\u94FE\u53EF\u4E00\u952E\u88C5\u5165 ~/.dsh/elab/env\u3002\u6240\u6709\u5199\u76D8\u52A8\u4F5C\u90FD\u8981\u4F60\u663E\u5F0F\u70B9\u51FB\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("env", 1, "\u73AF\u5883\u81EA\u68C0"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, envBusy ? "\u6B63\u5728\u68C0\u6D4B python / git / \u5DE5\u5177\u94FE\u2026" : "\u5C1A\u672A\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine(`python${env.python.path === void 0 ? "" : ` (${env.python.path})`}`, env.python, envBusy), probeLine("pyserial\uFF08\u4E32\u53E3\u8BFB\u5199\uFF09", env.pyserial, envBusy), probeLine("git\uFF08\u514B\u9686\u5185\u6838\uFF09", env.git, envBusy)), env !== null && env.python.ok === false ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230 python\uFF1A\u8BF7\u5B89\u88C5 Python 3.10+\uFF0C\u6216\u5728\u8BBE\u7F6E\u9875\u628A\u300Cpython \u8DEF\u5F84\u300D\u586B\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 C:\\Python312\\python.exe\uFF09\u3002") : null, /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRefreshEnv, disabled: envBusy }, envBusy ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B"), envError !== null ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-fail)" } }, `\u68C0\u6D4B\u5931\u8D25\uFF1A${envError}`) : null)), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("kernel", 2, "\u5185\u6838\u6765\u6E90"), elabRoot !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", wordBreak: "break-all" } }, `\u5DF2\u627E\u5230\u5185\u6838\uFF1A${elabRoot}`) : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230\u5185\u6838\u3002\u53EF\u4EE5\u6307\u5B9A\u4E00\u4E2A\u5DF2\u6709\u7684 elab \u4ED3\u5E93\u76EE\u5F55\uFF0C\u6216\u6D45\u514B\u9686\u4E00\u4EFD\uFF08\u7EA6\u51E0\u5341 MB\uFF09\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" } }, /* @__PURE__ */ react_default.createElement(
+  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)", lineHeight: 1.6 } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600 } }, "\u5B89\u88C5\u5411\u5BFC"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, `\u5F53\u524D\u9636\u6BB5\uFF1A${phase}`)), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", marginBottom: "10px" } }, `\u96F6\u524D\u7F6E\uFF1A\u9996\u6B21\u6253\u5F00\u4F1A\u81EA\u52A8\u51C6\u5907\u5185\u6838 v${auto.kernelVersion} \u4E0E\u5DE5\u5177\u94FE\uFF08\u53EA\u5199 ~/.dsh/elab\uFF0C\u4E0D\u5199\u4F60\u7684\u5DE5\u4F5C\u533A\uFF09\u3002\u552F\u4E00\u9700\u8981\u4F60\u81EA\u5DF1\u88C5\u7684\u662F\u4E3B\u673A Python\u3002`), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle, "aria-live": "polite", "aria-busy": autoRunning }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: "6px" } }, dot(autoTone(auto.phase)), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "12px", fontWeight: 600, color: "var(--elab-fg-primary)" } }, "\u81EA\u52A8\u51C6\u5907"), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "8px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, auto.phase === "disabled" ? "\u5DF2\u5173\u95ED" : auto.phase === "idle" ? "\u5F85\u542F\u52A8" : auto.phase === "running" ? "\u8FDB\u884C\u4E2D" : auto.phase === "done" ? "\u5B8C\u6210" : auto.phase === "blocked" ? "\u9700\u8981\u4F60\u5904\u7406" : "\u5931\u8D25")), autoRunning ? /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-primary)", marginBottom: "4px", wordBreak: "break-word" } }, autoStepText === "" ? auto.stage : `${autoStepText} \xB7 ${auto.stage}`), /* @__PURE__ */ react_default.createElement("div", { "aria-hidden": "true", style: { display: "flex", gap: "2px" } }, Array.from({ length: AUTO_SEGMENTS }, (_, i) => /* @__PURE__ */ react_default.createElement(
+    "span",
+    {
+      key: i,
+      style: {
+        flex: "1 1 auto",
+        height: "3px",
+        borderRadius: "2px",
+        background: (i + autoTick) % AUTO_SEGMENTS < 4 ? "var(--elab-accent)" : "var(--elab-bg-raised)"
+      }
+    }
+  ))), /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u53EF\u4EE5\u5173\u6389\u9762\u677F\uFF0C\u4E0B\u6B21\u6253\u5F00\u4F1A\u81EA\u52A8\u7EED\u4E0A\u8FDB\u5EA6\uFF1B\u4E0B\u8F7D\u4E0E\u89E3\u538B\u90FD\u8D70\u73AF\u5883\u5305\u7684 sha256 \u6821\u9A8C\u3002")) : auto.phase === "blocked" ? /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "4px" } }, auto.blocked?.message ?? auto.stage), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", marginBottom: "6px" } }, auto.blocked?.hint ?? ""), /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRetryAuto }, "\u91CD\u8BD5")) : auto.phase === "failed" ? /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "6px" } }, auto.error?.message ?? "\u81EA\u52A8\u51C6\u5907\u5931\u8D25"), auto.error?.retryable === false ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u8BE5\u9519\u8BEF\u91CD\u8BD5\u65E0\u6CD5\u89E3\u51B3\uFF0C\u8BF7\u7528\u4E0B\u65B9\u624B\u52A8\u5165\u53E3\u3002") : /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRetryAuto }, "\u91CD\u8BD5")) : auto.phase === "done" ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-ok)" } }, auto.stage) : auto.phase === "disabled" ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, `\u81EA\u52A8\u51C6\u5907\u5DF2\u5728\u8BBE\u7F6E\u9875\u5173\u95ED${auto.stage === "" ? "" : `\uFF08${auto.stage}\uFF09`}\uFF1A\u4E0B\u9762\u662F\u624B\u52A8\u5165\u53E3\u3002`) : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u9996\u6B21\u6253\u5F00\u9762\u677F\u4F1A\u81EA\u52A8\u51C6\u5907\u5185\u6838\u4E0E\u5DE5\u5177\u94FE\uFF1B\u4E5F\u53EF\u4EE5\u7528\u4E0B\u9762\u7684\u624B\u52A8\u5165\u53E3\u3002")), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("env", 1, "\u73AF\u5883\u81EA\u68C0"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, envBusy ? "\u6B63\u5728\u68C0\u6D4B python / git / \u5DE5\u5177\u94FE\u2026" : "\u5C1A\u672A\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine(`python${env.python.path === void 0 ? "" : ` (${env.python.path})`}`, env.python, envBusy), probeLine("pyserial\uFF08\u4E32\u53E3\u8BFB\u5199\uFF09", env.pyserial, envBusy), probeLine("git\uFF08\u514B\u9686\u5185\u6838\uFF09", env.git, envBusy)), env !== null && env.python.ok === false ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230 python\uFF1A\u8BF7\u5B89\u88C5 Python 3.10+\uFF0C\u6216\u5728\u8BBE\u7F6E\u9875\u628A\u300Cpython \u8DEF\u5F84\u300D\u586B\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 C:\\Python312\\python.exe\uFF09\u3002") : null, /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRefreshEnv, disabled: envBusy }, envBusy ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B"), envError !== null ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-fail)" } }, `\u68C0\u6D4B\u5931\u8D25\uFF1A${envError}`) : null)), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("kernel", 2, "\u5185\u6838\u6765\u6E90"), elabRoot !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", wordBreak: "break-all" } }, `\u5DF2\u627E\u5230\u5185\u6838\uFF1A${elabRoot}`) : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230\u5185\u6838\u3002\u53EF\u4EE5\u6307\u5B9A\u4E00\u4E2A\u5DF2\u6709\u7684 elab \u4ED3\u5E93\u76EE\u5F55\uFF0C\u6216\u6D45\u514B\u9686\u4E00\u4EFD\uFF08\u7EA6\u51E0\u5341 MB\uFF09\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" } }, /* @__PURE__ */ react_default.createElement(
     "input",
     {
       style: inputStyle,
@@ -1255,7 +1400,7 @@ function BootstrapWizard(props) {
     "button",
     {
       style: buttonStyle,
-      disabled: bootstrapBusy || rootDraft.trim() === "",
+      disabled: writeBusy || rootDraft.trim() === "",
       onClick: () => onSetRoot(rootDraft.trim())
     },
     "\u4F7F\u7528\u6B64\u76EE\u5F55"
@@ -1281,7 +1426,7 @@ function BootstrapWizard(props) {
     "button",
     {
       style: buttonStyle,
-      disabled: bootstrapBusy || cloneDir.trim() === "",
+      disabled: writeBusy || cloneDir.trim() === "",
       onClick: () => setConfirmClone(true)
     },
     "\u6D45\u514B\u9686"
@@ -1302,7 +1447,7 @@ function BootstrapWizard(props) {
       "button",
       {
         style: buttonStyle,
-        disabled: bootstrapBusy,
+        disabled: writeBusy,
         onClick: () => {
           setConfirmClone(false);
           onClone(cloneUrl.trim(), cloneDir.trim());
@@ -1317,7 +1462,7 @@ function BootstrapWizard(props) {
       },
       "\u53D6\u6D88"
     ))
-  ) : null, hostError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, hostError) : null), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("toolchain", 3, "\u5DE5\u5177\u94FE\u4F53\u68C0"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)", marginBottom: "4px" } }, "\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1 / \u70E7\u5F55 / \u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\u3002\u53EF\u4E00\u952E\u4E0B\u8F7D\u5B98\u65B9\u5DE5\u5177\u94FE\uFF08\u4E0D\u9700\u8981\u672C\u673A\u9884\u88C5\uFF09\u3002"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u968F\u7B2C 1 \u6B65\u4E00\u8D77\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine("arm-none-eabi-gcc\uFF08\u7F16\u8BD1\uFF09", env.armGcc, envBusy), probeLine("cmake\uFF08\u6784\u5EFA\uFF09", env.cmake, envBusy), probeLine("ninja\uFF08\u6784\u5EFA\uFF09", env.ninja, envBusy), probeLine("openocd\uFF08\u70E7\u5F55/\u8C03\u8BD5\uFF09", env.openocd, envBusy)), /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onInstallToolchain, disabled: bootstrapBusy }, bootstrapBusy ? "\u5B89\u88C5\u4E2D\u2026" : "\u4E00\u952E\u5B89\u88C5\u5DE5\u5177\u94FE"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u4E0B\u8F7D\u5230 ~/.dsh/elab/env\uFF08\u7EA6 400 MB\uFF09\uFF0C\u5931\u8D25\u5373\u4E2D\u65AD"))), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("project", 4, "\u5DE5\u7A0B\u63A5\u5165"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, hostOk !== true ? "\u5185\u6838\u5C31\u7EEA\u540E\uFF0C\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u63A5\u5165\u5DE5\u7A0B\u3002" : projectCount > 0 ? `\u5DF2\u63A5\u5165 ${projectCount} \u4E2A\u5DE5\u7A0B\u3002` : "\u5185\u6838\u5DF2\u5C31\u7EEA\uFF0C\u4F46\u8FD8\u6CA1\u6709\u5DE5\u7A0B\uFF1A\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u9009\u62E9\u4E00\u4E2A\u56FA\u4EF6\u76EE\u5F55\u3002")), bootstrapError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "6px" } }, `\u64CD\u4F5C\u5931\u8D25\uFF1A${bootstrapError}`) : null, bootstrapNotice !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-ok)", marginBottom: "6px" } }, bootstrapNotice) : null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement(
+  ) : null, hostError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, hostError) : null), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("toolchain", 3, "\u5DE5\u5177\u94FE\u4F53\u68C0"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)", marginBottom: "4px" } }, "\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1 / \u70E7\u5F55 / \u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\u3002\u53EF\u4E00\u952E\u4E0B\u8F7D\u5B98\u65B9\u5DE5\u5177\u94FE\uFF08\u4E0D\u9700\u8981\u672C\u673A\u9884\u88C5\uFF09\u3002"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u968F\u7B2C 1 \u6B65\u4E00\u8D77\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine("arm-none-eabi-gcc\uFF08\u7F16\u8BD1\uFF09", env.armGcc, envBusy), probeLine("cmake\uFF08\u6784\u5EFA\uFF09", env.cmake, envBusy), probeLine("ninja\uFF08\u6784\u5EFA\uFF09", env.ninja, envBusy), probeLine("openocd\uFF08\u70E7\u5F55/\u8C03\u8BD5\uFF09", env.openocd, envBusy)), /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onInstallToolchain, disabled: writeBusy }, bootstrapBusy ? "\u5B89\u88C5\u4E2D\u2026" : "\u4E00\u952E\u5B89\u88C5\u5DE5\u5177\u94FE"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u4E0B\u8F7D\u5230 ~/.dsh/elab/env\uFF08\u7EA6 400 MB\uFF09\uFF0C\u5931\u8D25\u5373\u4E2D\u65AD"))), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("project", 4, "\u5DE5\u7A0B\u63A5\u5165"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, hostOk !== true ? "\u5185\u6838\u5C31\u7EEA\u540E\uFF0C\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u63A5\u5165\u5DE5\u7A0B\u3002" : projectCount > 0 ? `\u5DF2\u63A5\u5165 ${projectCount} \u4E2A\u5DE5\u7A0B\u3002` : "\u5185\u6838\u5DF2\u5C31\u7EEA\uFF0C\u4F46\u8FD8\u6CA1\u6709\u5DE5\u7A0B\uFF1A\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u9009\u62E9\u4E00\u4E2A\u56FA\u4EF6\u76EE\u5F55\u3002")), bootstrapError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "6px" } }, `\u64CD\u4F5C\u5931\u8D25\uFF1A${bootstrapError}`) : null, bootstrapNotice !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-ok)", marginBottom: "6px" } }, bootstrapNotice) : null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement(
     "button",
     {
       style: { ...buttonStyle, background: "transparent", color: "var(--elab-fg-secondary)" },
@@ -3803,7 +3948,16 @@ function SettingsSection(_props) {
       "aria-label": "python \u8DEF\u5F84",
       style: inputStyle2
     }
-  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u7A7A\u95F2\u56DE\u6536(\u79D2)"), /* @__PURE__ */ react_default.createElement(
+  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u81EA\u52A8\u51C6\u5907"), /* @__PURE__ */ react_default.createElement(
+    "input",
+    {
+      type: "checkbox",
+      checked: draft.autoProvision ?? cfg.autoProvision,
+      onChange: (e) => set({ autoProvision: Boolean(e.currentTarget.checked) }),
+      "aria-label": "\u9996\u6B21\u6253\u5F00\u81EA\u52A8\u51C6\u5907\u5185\u6838\u4E0E\u5DE5\u5177\u94FE",
+      style: { accentColor: "var(--elab-accent)", cursor: "pointer" }
+    }
+  ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u9996\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u4E0B\u8F7D\u5185\u6838 / \u6D45\u514B\u9686\u56DE\u843D / \u5B89\u88C5\u5DE5\u5177\u94FE\uFF08\u53EA\u5199 ~/.dsh/elab\uFF1B\u4E3B\u673A Python \u4E0D\u4F1A\u88AB\u81EA\u52A8\u5B89\u88C5\uFF09")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u7A7A\u95F2\u56DE\u6536(\u79D2)"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       type: "number",
@@ -3893,6 +4047,12 @@ var TABS = [
   { id: "installed", label: "\u5DF2\u5B89\u88C5" },
   { id: "kernel", label: "\u5185\u6838\u8BBE\u7F6E" }
 ];
+var ACTION_LABEL = {
+  install: "\u5B89\u88C5",
+  remove: "\u5378\u8F7D",
+  update: "\u66F4\u65B0",
+  market: "\u5E02\u573A\u904D\u5386"
+};
 var btn = (primary = false) => ({
   padding: "2px 8px",
   fontSize: "var(--elab-fs-xs)",
@@ -3951,7 +4111,8 @@ function PackSettingsView(props) {
   const [verifies, setVerifies] = useState({});
   const [pending, setPending] = useState(null);
   const jobActive = job !== null && (job.state === "queued" || job.state === "running");
-  const frozen = runActive || jobActive;
+  const marketJobActive = jobActive && job !== null && job.action === "market";
+  const frozen = runActive || jobActive && !marketJobActive;
   const load = useCallback(
     async (q, withMarket) => {
       setLoading(true);
@@ -3981,6 +4142,14 @@ function PackSettingsView(props) {
   }, []);
   const refreshArgs = useRef({ tab, query });
   refreshArgs.current = { tab, query };
+  const crawled = useRef(false);
+  useEffect(() => {
+    if (tab !== "market" || crawled.current) return;
+    crawled.current = true;
+    void api.marketRefresh({ sessionId }).then(watchJob).catch((e) => setError(
+      `\u672A\u80FD\u73B0\u573A\u904D\u5386 GitHub\uFF08${e instanceof Error ? e.message : String(e)}\uFF09\u2014\u2014 \u4ECD\u663E\u793A\u6700\u8FD1\u4E00\u6B21\u5E02\u573A\u7D22\u5F15`
+    ));
+  }, [tab, api, sessionId, watchJob]);
   useEffect(() => {
     if (job === null) return;
     if (job.state !== "queued" && job.state !== "running") return;
@@ -4250,7 +4419,7 @@ function PackSettingsView(props) {
             color: job.state === "ok" ? "var(--elab-status-ok)" : job.state === "failed" ? "var(--elab-status-fail)" : "var(--elab-accent)"
           }
         },
-        `${job.action} ${job.name || "\uFF08\u5168\u90E8\uFF09"}\uFF1A${job.stage}`
+        `${ACTION_LABEL[job.action] ?? job.action}${job.name ? ` ${job.name}` : ""}\uFF1A${job.stage}`
       ), /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto" } }), job.state === "ok" || job.state === "failed" ? /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setJob(null), style: btn() }, "\u5173\u95ED") : null),
       job.error !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-status-fail)", marginTop: "2px" } }, job.error) : null,
       job.log.length > 0 ? /* @__PURE__ */ react_default.createElement(
@@ -4313,7 +4482,7 @@ function PackSettingsView(props) {
           color: "var(--elab-fg-primary)"
         }
       }
-    ), query !== "" ? /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setQuery(""), style: btn() }, "\u6E05\u7A7A") : null), loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u8BFB\u53D6\u4E2D\u2026") : null, status?.market?.error !== void 0 && status?.market?.error !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-run)", marginBottom: "6px" } }, `\u5E02\u573A\u7D22\u5F15\u8BFB\u53D6\u5931\u8D25\uFF1A${status.market.error}`) : null, query.trim() === "" ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)", marginBottom: "8px", lineHeight: 1.6 } }, "\u8F93\u5165\u540D\u79F0\u5373\u53EF\u641C\u7D22\u5E76\u5B89\u88C5\u82AF\u7247\u9002\u914D\u5305\uFF1B\u5185\u5BB9\u7559\u5728\u4F5C\u8005\u4ED3\u5E93\uFF0C\u4E00\u6B21\u53EA\u542F\u7528\u4E00\u5957\u3002"), officialLocal.length > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", margin: "4px 0 6px" } }, "\u672C\u673A\u5B98\u65B9\u6E90\uFF08\u79BB\u7EBF\u53EF\u88C5\uFF09"), officialLocal.map((p) => renderInstallRow(p, true))) : null) : marketPacks.length === 0 && !loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, `\u6CA1\u6709\u5339\u914D\u300C${query.trim()}\u300D\u7684\u82AF\u7247\u5305\uFF08\u53EF\u8BD5\u8BD5\u5382\u5546\u540D\uFF1Astm32 / at32 / \u2026\uFF09`) : marketPacks.map((p) => renderInstallRow(p, false))) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u8BFB\u53D6\u4E2D\u2026") : null, installed.length === 0 && !loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)", lineHeight: 1.6 } }, "\u8FD8\u6CA1\u6709\u5B89\u88C5\u4EFB\u4F55\u82AF\u7247\u9002\u914D\u5305\uFF1A\u53BB\u300C\u5E02\u573A\u300D\u641C\u7D22\uFF08\u4F8B\u5982 stm32\uFF09\uFF0C\u6216\u88C5\u672C\u673A\u5B98\u65B9\u6E90\u91CC\u7684\u5185\u7F6E\u5305\u3002") : installed.map((p) => renderInstalledRow(p))))
+    ), query !== "" ? /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setQuery(""), style: btn() }, "\u6E05\u7A7A") : null), loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u8BFB\u53D6\u4E2D\u2026") : null, status?.market?.error !== void 0 && status?.market?.error !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-run)", marginBottom: "6px" } }, `\u5E02\u573A\u7D22\u5F15\u8BFB\u53D6\u5931\u8D25\uFF1A${status.market.error}`) : null, query.trim() === "" ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, marketPacks.length > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", margin: "4px 0 6px" } }, `\u5E02\u573A\uFF08GitHub \u53D1\u73B0 ${marketPacks.length} \u4E2A\uFF09`), marketPacks.map((p) => renderInstallRow(p, false))) : marketJobActive ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)", marginBottom: "8px" } }, "\u6B63\u5728\u904D\u5386 GitHub \u4E0A\u7684\u82AF\u7247\u9002\u914D\u5305\u2026") : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)", marginBottom: "8px", lineHeight: 1.6 } }, "\u5E02\u573A\u91CC\u6682\u65F6\u6CA1\u6709\u53EF\u7528\u5305\uFF1A\u53EF\u5728\u4E0A\u65B9\u8F93\u5165\u540D\u79F0\u8FC7\u6EE4\uFF0C\u6216\u88C5\u672C\u673A\u5B98\u65B9\u6E90\u91CC\u7684\u5185\u7F6E\u5305\u3002"), officialLocal.length > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", margin: "8px 0 6px" } }, "\u672C\u673A\u5B98\u65B9\u6E90\uFF08\u79BB\u7EBF\u53EF\u88C5\uFF09"), officialLocal.map((p) => renderInstallRow(p, true))) : null, marketPacks.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)", marginTop: "8px", lineHeight: 1.6 } }, "\u4EE5\u4E0A\u4E3A\u5E02\u573A\u91CC\u7684\u5168\u90E8\u9002\u914D\u5305\uFF1B\u8F93\u5165\u540D\u79F0\u53EF\u8FC7\u6EE4\u3002\u5185\u5BB9\u7559\u5728\u4F5C\u8005\u4ED3\u5E93\uFF0C\u4E00\u6B21\u53EA\u542F\u7528\u4E00\u5957\u3002") : null) : marketPacks.length === 0 && !loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, `\u6CA1\u6709\u5339\u914D\u300C${query.trim()}\u300D\u7684\u82AF\u7247\u5305\uFF08\u53EF\u8BD5\u8BD5\u5382\u5546\u540D\uFF1Astm32 / at32 / \u2026\uFF09`) : marketPacks.map((p) => renderInstallRow(p, false))) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u8BFB\u53D6\u4E2D\u2026") : null, installed.length === 0 && !loading ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)", lineHeight: 1.6 } }, "\u8FD8\u6CA1\u6709\u5B89\u88C5\u4EFB\u4F55\u82AF\u7247\u9002\u914D\u5305\uFF1A\u53BB\u300C\u5E02\u573A\u300D\u641C\u7D22\uFF08\u4F8B\u5982 stm32\uFF09\uFF0C\u6216\u88C5\u672C\u673A\u5B98\u65B9\u6E90\u91CC\u7684\u5185\u7F6E\u5305\u3002") : installed.map((p) => renderInstalledRow(p))))
   );
 }
 
@@ -4733,10 +4902,12 @@ function CockpitPane(props) {
         hostOk: snap.hostOk,
         hostError: snap.hostError,
         projectCount: snap.projects.length,
+        auto: snap.auto,
         onRefreshEnv: () => void service.refreshEnv(),
         onSetRoot: (dir) => void service.setRoot(dir),
         onClone: (url, dir) => void service.cloneKernel(url, dir),
-        onInstallToolchain: () => void service.installToolchain()
+        onInstallToolchain: () => void service.installToolchain(),
+        onRetryAuto: () => service.retryAutoProvision()
       }
     );
   }
@@ -4887,6 +5058,59 @@ function CockpitPane(props) {
           void service.checkAdapt(name, adaptCheckRoot).finally(() => setCheckingAdapt(false));
         }
       }
+    ) : null,
+    snap.hostOk === true && snap.auto.phase === "running" ? /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        "aria-live": "polite",
+        style: {
+          flex: "0 0 auto",
+          padding: "3px 8px",
+          fontSize: "11px",
+          color: "var(--elab-status-run)",
+          borderBottom: "1px solid var(--elab-border)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis"
+        }
+      },
+      `\u81EA\u52A8\u51C6\u5907\u4E2D\uFF1A${snap.auto.stage}`
+    ) : null,
+    snap.hostOk === true && snap.auto.phase === "failed" ? /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        role: "alert",
+        style: {
+          flex: "0 0 auto",
+          padding: "3px 8px",
+          fontSize: "11px",
+          color: "var(--elab-status-fail)",
+          borderBottom: "1px solid var(--elab-border)",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          minWidth: 0
+        }
+      },
+      /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, snap.auto.error?.message ?? "\u81EA\u52A8\u51C6\u5907\u5931\u8D25"),
+      /* @__PURE__ */ react_default.createElement(
+        "button",
+        {
+          type: "button",
+          onClick: () => service.retryAutoProvision(),
+          style: {
+            flex: "0 0 auto",
+            padding: "0 6px",
+            fontSize: "11px",
+            borderRadius: "4px",
+            border: "1px solid var(--elab-border)",
+            background: "transparent",
+            color: "var(--elab-accent)",
+            cursor: "pointer"
+          }
+        },
+        "\u91CD\u8BD5"
+      )
     ) : null,
     snap.hostOk === true && snap.kernelOld ? /* @__PURE__ */ react_default.createElement(
       "div",

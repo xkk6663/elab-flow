@@ -604,10 +604,12 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         hostOk={snap.hostOk}
         hostError={snap.hostError}
         projectCount={snap.projects.length}
+        auto={snap.auto}
         onRefreshEnv={() => void service.refreshEnv()}
         onSetRoot={(dir) => void service.setRoot(dir)}
         onClone={(url, dir) => void service.cloneKernel(url, dir)}
         onInstallToolchain={() => void service.installToolchain()}
+        onRetryAuto={() => service.retryAutoProvision()}
       />
     )
   }
@@ -774,6 +776,61 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             void service.checkAdapt(name, adaptCheckRoot).finally(() => setCheckingAdapt(false))
           }}
         />
+      ) : null}
+
+      {/* ── 零前置自动准备（内核已就绪后仍在装工具链的可见性 + 失败重试） ── */}
+      {snap.hostOk === true && snap.auto.phase === 'running' ? (
+        <div
+          aria-live="polite"
+          style={{
+            flex: '0 0 auto',
+            padding: '3px 8px',
+            fontSize: '11px',
+            color: 'var(--elab-status-run)',
+            borderBottom: '1px solid var(--elab-border)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {`自动准备中：${snap.auto.stage}`}
+        </div>
+      ) : null}
+      {snap.hostOk === true && snap.auto.phase === 'failed' ? (
+        <div
+          role="alert"
+          style={{
+            flex: '0 0 auto',
+            padding: '3px 8px',
+            fontSize: '11px',
+            color: 'var(--elab-status-fail)',
+            borderBottom: '1px solid var(--elab-border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            minWidth: 0,
+          }}
+        >
+          <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {snap.auto.error?.message ?? '自动准备失败'}
+          </span>
+          <button
+            type="button"
+            onClick={() => service.retryAutoProvision()}
+            style={{
+              flex: '0 0 auto',
+              padding: '0 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: 'var(--elab-accent)',
+              cursor: 'pointer',
+            }}
+          >
+            {'重试'}
+          </button>
+        </div>
       ) : null}
 
       {/* ── §16 内核过旧提示（capabilities 无 meta 时） ── */}

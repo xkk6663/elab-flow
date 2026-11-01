@@ -1,6 +1,6 @@
 {
   "name": "dsh-elab-cockpit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "elab-Flow 闭环驾驶舱的 DSH 插件：右栏窄栏面板（阶梯 + 日志尾），发现/接入/构建/烧录/调试/串口闭环一体化",
   "type": "module",
   "main": "lib/main.js",
