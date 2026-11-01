@@ -460,7 +460,7 @@ def _materialize(source=None, *, local=None, git=None, ref=None, archive=None,
                 _git(["-C", td, "fetch", "--quiet", "--depth", "1", "origin", ref])
                 _git(["-C", td, "checkout", "--quiet", "FETCH_HEAD"])
             else:
-                cmd = ["git", "clone", "--depth", "1"]
+                cmd = ["clone", "--depth", "1"]
                 if ref:
                     cmd += ["--branch", ref]
                 cmd += [url, td]
