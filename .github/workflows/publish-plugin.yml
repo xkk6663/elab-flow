@@ -30,6 +30,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # subtree split 需要完整历史
+          # ★ 必须关掉：checkout 默认会在本地写 `http.https://github.com/.extraheader`
+          #   （= 工作流自带的 GITHUB_TOKEN / github-actions[bot]），它会盖住下面
+          #   URL 里带的 PLUGIN_MIRROR_TOKEN，导致推镜像仓 403（git 仍以 bot 身份认证）。
+          persist-credentials: false
 
       - name: 校验镜像 token
         shell: bash
