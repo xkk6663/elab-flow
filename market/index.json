@@ -7,7 +7,7 @@
       "platform": "at32",
       "version": "0.1.0",
       "description": "AT32F421 芯片适配包（外置 GitHub 芯片包：AT32 WorkBench 指纹 + 芯片参数 + 平台坑位）",
-      "status": "official",
+      "status": "community",
       "license": "MIT",
       "requires": {
         "kernel_api": ">=1 <2",
@@ -19,9 +19,9 @@
       "source": {
         "type": "git",
         "url": "https://github.com/xkk6663/elab-pack-artery-at32.git",
-        "ref": "main"
+        "ref": "20eaa90c1ae9b1cfbfa3d84c2b69b1de47978c2d"
       },
-      "sha256": "605d71e2d854423f258eabe5ce112450e0b07c7de297c23aa3225a02ffc8192a"
+      "sha256": "0669317423269bc84472a9962a95879e031a3d237df14372c1f7f1d4afece625"
     },
     {
       "name": "st/stm32",

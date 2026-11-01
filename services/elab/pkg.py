@@ -204,7 +204,10 @@ def chip_files(pack_dir: Path) -> list[Path]:
     root = Path(pack_dir) / "chips"
     if not root.is_dir():
         return []
-    return sorted(root.rglob("*.yaml"))
+    # 按相对 posix 路径（大小写敏感）排序：Windows 的 Path 比较不区分大小写，
+    # 直接用 sorted(paths) 会让索引里的 chips 顺序随平台变化。
+    return sorted(root.rglob("*.yaml"),
+                   key=lambda p: p.relative_to(root).as_posix())
 
 
 def refs_in_pack(pack_dir: Path) -> list[str]:
@@ -341,15 +344,25 @@ def audit_dir(pack_dir: Path) -> list[str]:
 
 # ── 内容哈希（确定性）─────────────────────────────────────────────
 def tree_hash(pack_dir: Path) -> str:
-    """整包内容哈希：按相对路径排序，忽略安装元数据与临时目录。"""
+    """整包内容哈希：按相对路径排序，忽略安装元数据与临时目录。
+
+    ★ 必须按 ``as_posix()`` 字符串**区分大小写**排序：Windows 的 ``Path``
+      比较是大小写不敏感的，直接 ``sorted(paths)`` 会让同一个包在 Windows
+      与 Linux 上算出不同 sha256（``LICENSE`` / ``README.md`` / ``chips/``
+      的相对顺序不同），导致市场索引在 CI（Linux）生成、用户（Windows）
+      安装时必然报"内容哈希漂移"。
+    """
     h = hashlib.sha256()
     root = Path(pack_dir)
-    for path in sorted(root.rglob("*")):
+    items = []
+    for path in root.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
         if rel == INSTALL_META or any(part in _IGNORE_DIRS for part in Path(rel).parts):
             continue
+        items.append((rel, path))
+    for rel, path in sorted(items, key=lambda kv: kv[0]):
         h.update(rel.encode("utf-8"))
         h.update(b"\0")
         h.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))

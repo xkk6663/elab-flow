@@ -170,6 +170,22 @@ class TestHashAndVerify(PackTestBase):
         shutil.copytree(src, copy)
         self.assertEqual(pkg.tree_hash(src), pkg.tree_hash(copy))
 
+    def test_hash_order_is_platform_independent(self):
+        """★ Windows 的 Path 比较不区分大小写，排序必须按 as_posix() 区分大小写。
+
+        期望值在 Linux/Windows 都必须一致（同一条目不能按平台算出两个 sha256）。
+        """
+        pack = self.root / "case-pack"
+        (pack / "chips").mkdir(parents=True)
+        (pack / "pack.yaml").write_text("a\n", encoding="utf-8")
+        (pack / "LICENSE").write_text("b\n", encoding="utf-8")
+        (pack / "README.md").write_text("c\n", encoding="utf-8")
+        (pack / "chips" / "x.yaml").write_text("d\n", encoding="utf-8")
+        # 顺序 = LICENSE → README.md → chips/x.yaml → pack.yaml
+        self.assertEqual(
+            pkg.tree_hash(pack),
+            "9887b34cc63afee928892da51214ac8fec59c457e86696c61971942ce4d3a085")
+
 
 class TestMarket(PackTestBase):
     def test_index_roundtrip_and_install_from_market(self):
