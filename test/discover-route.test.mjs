@@ -151,18 +151,22 @@ test('会话 cwd 优先于 elabRoot=auto', async () => {
 })
 
 test('resolveSessionCwd 降级链：workingDirectory 优先于 header.cwd', () => {
+  // ★ 夹具必须用**平台原生绝对路径**：resolveSessionCwd 用 path.isAbsolute 判可用，
+  //   而 'C:/…' 在 POSIX 上不是绝对路径（Linux CI 曾因此假失败）。
+  const WD = join(ROOT, 'wd')
+  const HEADER = join(ROOT, 'header')
   const ctx = {
-    sessions: { get: () => ({ header: { cwd: 'C:/from-header' } }) },
-    workingDirectory: { get: () => 'C:/from-wd' },
+    sessions: { get: () => ({ header: { cwd: HEADER } }) },
+    workingDirectory: { get: () => WD },
     get(name) { return name === 'sessions' ? this.sessions : name === 'workingDirectory' ? this.workingDirectory : undefined },
   }
-  assert.equal(resolveSessionCwd(ctx, 's1'), 'C:/from-wd')
+  assert.equal(resolveSessionCwd(ctx, 's1'), WD)
   const ctx2 = {
-    sessions: { get: () => ({ header: { cwd: 'C:/from-header' } }) },
+    sessions: { get: () => ({ header: { cwd: HEADER } }) },
     workingDirectory: { get: () => undefined },
     get(name) { return name === 'sessions' ? this.sessions : name === 'workingDirectory' ? this.workingDirectory : undefined },
   }
-  assert.equal(resolveSessionCwd(ctx2, 's1'), 'C:/from-header')
+  assert.equal(resolveSessionCwd(ctx2, 's1'), HEADER)
   assert.equal(resolveSessionCwd({ sessions: { get: () => undefined }, get: () => undefined }, 'x'), undefined)
   const ctx3 = {
     sessions: { get: () => ({ header: { cwd: 'relative/dir' } }) },
