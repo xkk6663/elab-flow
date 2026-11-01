@@ -229,6 +229,13 @@ export function createCockpitService(deps: {
         progressRef = foldProgress(progressRef, t)
       }
     }
+    // ★ 新 run / 新步骤开始 → 进度条归零：否则上一轮（例如编译）的
+    //   「53/53 Linking C executable」会残留到本轮调试/串口通道里，
+    //   界面上出现与本步骤无关的进度（实测 2026-11-01）。
+    if (topic === 'run/start' || topic === 'run/step-enter') {
+      progressRef = makeProgress()
+      patch.progress = null
+    }
     if (progressRef.total > 0) {
       patch.progress = {
         current: progressRef.current,
@@ -245,7 +252,13 @@ export function createCockpitService(deps: {
     if (Object.keys(patch).length > 0) set(patch)
 
     // ④ run 收尾 → 立刻断流（旧实现同款；stream/closed 兜底在 handleClosed）
-    if (topic === 'run/end' || topic === 'run/cancel') closeConnection()
+    // ★ 同时清 busy：主动 dispose 后 EventStream 不会再回调 onClosed，
+    //   若只靠 handleClosed 复位，「跑完一次」后所有启动按钮就永久变灰
+    //   （disabled = running || busy || !available，实测 2026-11-01 实机复现）。
+    if (topic === 'run/end' || topic === 'run/cancel') {
+      closeConnection()
+      if (snap.busy) set({ busy: false })
+    }
   }
 
   function handleClosed(reason: string): void {

@@ -31,11 +31,14 @@
 #include "main.h"
 #include "usart.h"
 #include "KEY.h"
+#include "math.h"           /* elab 波形演示：sinf 产生正弦（FireWater 输出） */
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+/* elab 串口波形演示：以 FireWater 文本协议输出单通道正弦值（实现见文件末尾） */
+static void wave_emit_sine(float v);
 
 /* USER CODE END PTD */
 
@@ -191,6 +194,15 @@ void StartTask02(void *argument)
       printf("KEY:%u\r\n", key_value);
   }
 
+    /* elab 波形演示：100 Hz 采样、0.5 Hz 正弦（FireWater 协议 "amp\r\n"）。
+       面板「串口 → 波形」选 FireWater 即可看到曲线；[alive] 行由 defaultTask 每秒发一次。 */
+    {
+      static float wave_phase = 0.0f;
+      wave_phase += 0.0314159f;                 /* 2π × 0.5 Hz / 100 Hz */
+      if (wave_phase >= 6.283185f) wave_phase -= 6.283185f;
+      wave_emit_sine(sinf(wave_phase));
+    }
+
     osDelay(10);
   }
   /* USER CODE END StartTask02 */
@@ -220,6 +232,34 @@ int __io_putchar(int ch)
 {
   fputc(ch, stdout);
   return ch;
+}
+
+/**
+  * @brief elab 串口波形演示：把 [-1,1] 的浮点值按 FireWater 协议打成一行
+  *        （``0.707\r\n``）。
+  *        ★ 不用 printf：myUSART 任务栈只有 512 B，newlib 的 printf 会把这栈
+  *          压爆（实测 2026-11-01：100 Hz 输出跑几秒后 HardFault）。这里用
+  *          16 B 小缓冲 + fputc 逐字节发；fputc 自带互斥，与 defaultTask 的
+  *          ``[alive]`` 打印安全交错。整数值用毫单位拼装 —— newlib-nano 未开
+  *          ``-u _printf_float``，``%f`` 也打不出小数。
+  */
+static void wave_emit_sine(float v)
+{
+  int milli = (int)(v * 1000.0f);                  /* [-1000, 1000] */
+  uint32_t mag = (uint32_t)(milli < 0 ? -milli : milli);
+  char buf[16];
+  int n = 0;
+  if (milli < 0) buf[n++] = '-';
+  buf[n++] = (char)('0' + (mag / 1000u) % 10u);    /* 整数位（0 或 1） */
+  buf[n++] = '.';
+  buf[n++] = (char)('0' + (mag / 100u) % 10u);
+  buf[n++] = (char)('0' + (mag / 10u) % 10u);
+  buf[n++] = (char)('0' + mag % 10u);
+  buf[n++] = '\r';
+  buf[n++] = '\n';
+  for (int i = 0; i < n; i++) {
+    fputc(buf[i], stdout);
+  }
 }
 /* USER CODE END Application */
 

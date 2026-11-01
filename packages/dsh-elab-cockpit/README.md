@@ -53,6 +53,141 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 设置页（DSH 设置 → ELAB 驾驶舱）可改 `elabRoot` / `pythonPath`，保存即热更新并写入
 `~/.dsh/dsh-elab-cockpit.config.json`，重启仍生效；同页的「环境」分段复用同一探测结果。
 
+## 实机上机验证（STM32F411CEU6，2026-11-01）
+
+面板用真实 `CockpitPane` 渲染、经 loopback ICD 驱动内核，下列截图是**同一次真机运行**的原始界面
+（未做任何摆拍或改数）。
+
+- 硬件：STM32F411CEU6（512 KB Flash / 128 KB RAM）+ CMSIS-DAP 探针（`atlink`）+ COM10
+- 工程：`f411` —— OTA 双槽 `boot@0x08000000` + `app@0x08010000`；内核 2.1.0 / 适配包 `st/stm32`
+
+### 单步功能
+
+| 步骤 | 实机结果 |
+|---|---|
+| 编译 | 成功 7.07 s；RAM 16.28% / FLASH 8.49%（`411.elf` = 38956 B，APP 区 448 KB） |
+| 烧录 | 成功 7.16 s；双镜像 `f411_boot.bin`→`0x08000000`、`411.bin`→`0x08010000`，两段 Programming + Verified OK，device id `0x10006431` |
+| 调试校验 | 成功 5.86 s；GDB 命中断点 `main ()`（`main.c:84`），`ELAB_STOP` / `PC 0x8017214` |
+| 串口 | COM10 自动选口 @115200；`[alive] tick=…` 连续输出（471 B · 23 批），行/字节/终端/波形四视图 + 发送 |
+
+<img src="assets/02-build-ok.png" width="300" alt="编译成功">
+<img src="assets/03-flash-ok.png" width="300" alt="烧录成功">
+<img src="assets/04-debug-ok.png" width="300" alt="调试校验成功">
+<img src="assets/05-serial-ok.png" width="300" alt="串口实时输出">
+
+### 一键闭环（体检 → 编译 → 烧录 → 调试校验 → 串口闭环）
+
+| 步骤 | 实机结果 |
+|---|---|
+| 体检 | 成功 0.20 s（`全绿`：工具链 / ninja / cmake / openocd / 探针 / 适配包） |
+| 编译 | 成功 10.43 s |
+| 烧录 | 成功 3.57 s |
+| 调试校验 | 成功 4.04 s |
+| 串口闭环 | 成功 3.61 s —— 命中 `close_on: regex ^\[(boot|alive)\] within_s=10` |
+
+<img src="assets/06-loop-all-green.png" width="420" alt="五步全绿">
+<img src="assets/07-loop-serial.png" width="420" alt="串口闭环判据命中">
+
+> 本次实测还修掉一处面板缺陷：`run/end` 到达时主动断流后 `EventStream` 不再回调 `onClosed`，
+> `busy` 未复位会让「▶ 构建 / 烧录 / 调试 / 串口」在**跑完一次后永久变灰**（现在收尾即复位，
+> 单测 `cockpit-service.test.mjs` 已加断言）。
+
+## 上手流程：从芯片的正弦波看到波形可视化（实机）
+
+一条**最短实机路线**：让芯片自己生成一段正弦波 → 用面板把编译/烧录/调试跑通 →
+在「串口」里先看到数字、再切成「波形」直接看到曲线。
+
+下列截图全部来自**同一次真机运行**：STM32F411CEU6（512 KB Flash / 128 KB RAM）+
+CMSIS-DAP 探针 + COM10，工程 `f411`，适配包 `st/stm32`，内核 2.1.0。
+
+### 第 0 步：给芯片装一个"信号源"
+
+示例固件 [`freertos.c`](https://github.com/xkk6663/elab-flow/blob/main/examples/STM32F411CEU6/Core/Src/freertos.c)
+里，`StartTask02` 每 **10 ms** 采一个 **0.5 Hz** 正弦（`sinf`，相位每拍自增 `2π·0.5/100`），按
+**FireWater** 协议打成一行 ASCII（`0.707\r\n`）；`defaultTask` 每秒再打一条
+`[alive] tick=…` 心跳 —— 心跳既证明"芯片还活着"，也是闭环串口判据要匹配的行。
+
+> 两个实机踩出来的坑，已经写在示例里：
+> ① `myUSART` 任务栈只有 512 B，newlib 的 `printf` 会把栈压爆（实测 100 Hz 输出几秒后
+>   HardFault）—— 改成 16 B 小缓冲 + `fputc` 逐字节发，`fputc` 自带互斥，与心跳行安全交错；
+> ② newlib-nano 没开 `-u _printf_float`，`%f` 打不出小数 —— 按毫值拼字符串
+>   （`-1.000` … `1.000`，3 位小数）。
+
+### 第 1 步：编译
+
+面板点「▶ 构建」。九秒左右拿到体积结论，`RAM / FLASH` 都是**从 elf 里读出来的实数**
+（不是估算）：
+
+| 项 | 本次结果 |
+|---|---|
+| 状态 | 成功 9.85 s |
+| 链接 | `[53/53] Linking C executable 411.elf` |
+| RAM | 21 352 B / 128 KB = **16.29%** |
+| FLASH | 43 064 B / 448 KB（APP 区）= **9.39%** |
+
+<img src="assets/11-build.png" width="330" alt="编译成功：RAM/FLASH 占比 + 结束行">
+
+### 第 2 步：烧录
+
+点「▶ 烧录」。日志按顺序给出**这次到底往哪写了什么**：boot 是否冻结（指纹一致就
+`skip`，字节级零触碰）、`411.bin → STM32F411CEU6`、`device id`、`Programming finished`、
+`verified OK`：
+
+| 项 | 本次结果 |
+|---|---|
+| 状态 | 成功 3.54 s |
+| boot 决策 | `skip` —— boot 冻结（`v1.0.0` 指纹一致） |
+| 写入 | `411.bin → STM32F411CEU6`（`0x08010000` 槽 A） |
+| 校验 | `device id = 0x10006431`、`flash size = 512 kbytes`、`verified OK` |
+
+<img src="assets/12-flash.png" width="330" alt="烧录成功：Programming + verified OK">
+
+### 第 3 步：调试校验（证明"断得住"）
+
+点「▶ 调试」。内核会起 openocd + gdb、`monitor reset halt`、`break main`、`continue`，
+**命中断点才算通过**（只连上不复位不算）：
+
+| 项 | 本次结果 |
+|---|---|
+| 状态 | 成功 4.82 s |
+| 判据 | `✓ 调试闭环成立：已断到 main` |
+| 现场 | `Breakpoint 1, main () at …/main.c:84`、`ELAB_STOP pc=0x8017214`、`#0 main ()` |
+
+<img src="assets/13-debug-sine.png" width="330" alt="调试校验成功：断在 main">
+
+### 第 4 步：串口监视（先看见数字）
+
+点「▶ 串口」开监视（自动选口、默认 115200），「行」视图里就是芯片吐出来的原始数据：
+`0.031 / 0.062 / … / 1.000 / …` 的正弦，中间夹着每秒一条 `[alive] tick=`。
+右上角的 **字节数 / 批次** 是真流量统计（本图 20 536 B · 132 批）。
+
+<img src="assets/14-serial-lines.png" width="330" alt="串口行视图：正弦数值 + 心跳">
+
+### 第 5 步：波形视图（把数字变成曲线）
+
+切到「波形」，把解码器从默认的 `JustFloat` 换成 **FireWater**（设备发的是 ASCII 一行，
+JustFloat 只认 `N×4 小端 float + 00 00 80 7F` 尾，解不出来）：
+
+- 曲线：CH0 的 0.5 Hz 正弦（每通道独立 min/max 归一化，所以不需要关心量纲）
+- 徽标：`1024 帧（显示）· 共 1702 帧 · 1 通道 · 跳过 19` —— 「跳过」正是那些
+  `[alive]` 心跳行（非数字行不计入波形，也不污染通道）
+- `半帧 5 B（下一批续解）`：跨批次的半截数据留到下一批再解，不丢、不裂缝
+
+<img src="assets/15-serial-wave.png" width="330" alt="波形视图：FireWater 解码后的正弦">
+
+> 波形页的解码器是**会话级共享**的：agent 侧用 `serialMonitorToggle`
+> （`{"action":"decoder","decoder":"firewater"}`）切换，面板下拉会跟着变、渲染同一张图 ——
+> 图里那行「共享解码 · 人选定 FireWater」就是这条链路在显示"谁定的"。
+> 若切到「波形」只看到 `0 帧 · 0 通道` 且「半帧」字节数一直涨，多半就是解码器没选对。
+
+### 全流程一键跑
+
+上面四步也可以一次点「闭环」交给内核编排（`体检 → 编译 → 烧录 → 调试校验 → 串口闭环`），
+留意每步的阶梯灯：
+
+<img src="assets/06-loop-all-green.png" width="330" alt="五步全绿">
+<img src="assets/07-loop-serial.png" width="330" alt="串口闭环判据命中">
+
 ## 已知限制
 
 - 不内置内核、不随包分发工具二进制；内核与工具链**首次打开自动下载**，可关闭自动准备。

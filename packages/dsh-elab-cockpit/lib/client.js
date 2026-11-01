@@ -454,6 +454,10 @@ function createCockpitService(deps) {
         progressRef = foldProgress(progressRef, t);
       }
     }
+    if (topic === "run/start" || topic === "run/step-enter") {
+      progressRef = makeProgress();
+      patch2.progress = null;
+    }
     if (progressRef.total > 0) {
       patch2.progress = {
         current: progressRef.current,
@@ -465,7 +469,10 @@ function createCockpitService(deps) {
     const after = reduce(before, e);
     if (after !== before) patch2.run = after;
     if (Object.keys(patch2).length > 0) set(patch2);
-    if (topic === "run/end" || topic === "run/cancel") closeConnection();
+    if (topic === "run/end" || topic === "run/cancel") {
+      closeConnection();
+      if (snap.busy) set({ busy: false });
+    }
   }
   function handleClosed(reason) {
     connection = null;

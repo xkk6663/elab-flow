@@ -1,9 +1,22 @@
 {
   "name": "dsh-elab-cockpit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "elab-Flow 闭环驾驶舱的 DSH 插件：右栏窄栏面板（阶梯 + 日志尾），发现/接入/构建/烧录/调试/串口闭环一体化",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "elab",
+    "embedded",
+    "firmware",
+    "flash",
+    "openocd",
+    "serial",
+    "ota"
+  ],
   "type": "module",
   "main": "lib/main.js",
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "default": "./lib/main.js"
@@ -70,6 +83,9 @@
     "envpacks/manifest.json",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "README.md",
+    "screenshots.json",
+    "assets"
   ]
 }

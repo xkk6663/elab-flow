@@ -1,0 +1,6 @@
+url: https://github.com/xkk6663/elab-flow/tree/main/packages/dsh-elab-cockpit
+name: xkk6663/elab-flow#dsh-elab-cockpit
+category: dev
+description:
+  en: 'Closed-loop embedded dev cockpit for DeepSeek Harness: one right-side panel drives discover, build, flash, debug-verify and serial monitor on STM32/AT32 boards, shows live RAM/FLASH usage, and decodes FireWater/JustFloat serial streams into waveforms.'
+  zh: 'DSH 里的嵌入式闭环驾驶舱：一个右栏面板跑通发现、编译、烧录、调试校验与串口监视，实时给出 RAM/FLASH 占用，串口支持 FireWater/JustFloat 波形解码，实机验证到能看见芯片输出的正弦波。'

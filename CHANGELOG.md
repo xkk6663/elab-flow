@@ -5,6 +5,24 @@
 
 ---
 
+## [DSH 插件 0.3.1] — 2026-11-01（上架插件市场 · 实机波形教程 · 面板两处修复）
+
+`packages/dsh-elab-cockpit` 的补丁版本（npm 包版本，与内核版本独立）。
+
+- **实机波形教程**：插件 README 新增「上手流程：从芯片的正弦波看到波形可视化」——
+  编译 / 烧录 / 调试校验 / 串口行视图 / FireWater 波形五步，每步一张同一次真机运行的
+  原始截图；截图统一入库到 `packages/dsh-elab-cockpit/assets/`（README 与市场展示同源）。
+- **示例固件** `examples/STM32F411CEU6`：`StartTask02` 新增 100 Hz 采样、0.5 Hz 正弦
+  输出（FireWater 协议 `0.707\r\n`）。不用 `printf`：myUSART 任务栈只有 512 B，100 Hz
+  输出实测数秒后 HardFault；改用 16 B 缓冲 + `fputc` 逐字节发（自带互斥），且
+  newlib-nano 未开 `-u _printf_float`，小数按毫值拼装。
+- **面板修复**：`run/start` / `run/step-enter` 时进度条归零 —— 上一轮编译的
+  「53/53 Linking C executable」不再残留在本轮调试/串口通道；`run/end` 主动断流后同样
+  复位 `busy`，「跑完一次按钮永久变灰」彻底修掉（`cockpit-service.test.mjs` 已加密断言）。
+- **市场展示**：新增 `screenshots.json` + `assets/`（5 张真机截图），`files` 清单补
+  `README.md` / `screenshots.json` / `assets`，补 `keywords` 与 `icon`；
+  上架投稿文件备份在 `packages/dsh-elab-cockpit/docs/dsh-market-submission/`。
+
 ## [V2.1.0] — 2026-11-01（DSH 窄栏驾驶舱 · 串口工作区 · 芯片插件市场）
 
 V2.1.0 把 V2.0 的闭环能力**装进 DSH 右栏**，并把串口从"看输出"升级为

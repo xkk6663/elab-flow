@@ -227,6 +227,8 @@ test('发起：triple 用过滤后的 effectiveSteps；SSE 随发起建立并投
   assert.equal(s.run.status, 'ok')
   assert.equal(s.run.steps[0].state, 'ok')
   assert.equal(log.dispose, 1) // run/end → 断流
+  // ★ 主动断流后 onClosed 不会再来，busy 必须在这里复位（否则按钮永久变灰）
+  assert.equal(s.busy, false)
 
   close('run-finished') // 迟到的 closed 不再改变状态
   assert.equal(svc.getSnapshot().run.status, 'ok')
