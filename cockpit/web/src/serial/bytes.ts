@@ -59,6 +59,53 @@ export function hexDump(bytes: Uint8Array, perRow = 16): string[] {
   return rows;
 }
 
+/** 字节分类（HEX 视图按类着色；不是协议语义，只是"看得懂"的辅助） */
+export type ByteClass = "ctl" | "del" | "print" | "high";
+
+export function byteClass(b: number): ByteClass {
+  if (b < 0x20) return "ctl";
+  if (b === 0x7f) return "del";
+  if (b <= 0x7e) return "print";
+  return "high";
+}
+
+export interface HexCell {
+  text: string;
+  /** "pad" = 补齐用的 `..`（不是真实字节，按 faint 显示） */
+  cls: ByteClass | "pad";
+}
+
+export interface HexRow {
+  offset: string;
+  cells: HexCell[];
+  ascii: HexCell[];
+}
+
+/**
+ * 结构化字节网格（与 `hexDump` 同一排版，但每个字节带分类）。
+ * 视图按类给出颜色，偏移量/ASCII 列与 `hexDump` 完全一致。
+ */
+export function hexDumpRows(bytes: Uint8Array, perRow = 16): HexRow[] {
+  const rows: HexRow[] = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const cells: HexCell[] = [];
+    const ascii: HexCell[] = [];
+    for (let j = 0; j < perRow; j++) {
+      if (j < slice.length) {
+        const b = slice[j];
+        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
+        ascii.push({ text: printable(b), cls: byteClass(b) });
+      } else {
+        cells.push({ text: "..", cls: "pad" });
+        ascii.push({ text: ".", cls: "pad" });
+      }
+    }
+    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
+  }
+  return rows;
+}
+
 /** 导出用：一段可读的头部 + 逐批 HEX。 */
 export function captureText(chunks: Array<{ seq: number; dir: string; t: string; bytes: Uint8Array }>): string {
   const head = [

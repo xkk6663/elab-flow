@@ -47,6 +47,7 @@ from elab import serialterm as serialterm_mod        # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 from elab import pkg as pkg_mod                       # noqa: E402
+from elab import _yaml as yaml_mod                    # noqa: E402
 
 HOST = "127.0.0.1"            # ★ 只监听本地（§5.6：本地工具，不做远程暴露）
 #: ★ C34：默认端口**刻意避开 3333** —— openocd 的 gdb server 固定绑 3333，
@@ -650,6 +651,45 @@ def _packs_summary(cfg: Config) -> dict:
                 "chips": [], "error": str(exc)}
 
 
+def _profile_summary(cfg: Config) -> dict | None:
+    """读出驾驶舱 profile（R7 / P1-4 的最小装配）。
+
+    文件位置：``<ELAB_ROOT>/cockpit/profiles/*.yaml``。激活顺序：
+    ``elab.host.yaml: profile`` 指定名 → ``web.yaml`` → 排序第一份；
+    都没有时返回 None（前端回退到内置工作区集合）。
+
+    只装配两件事 —— **右列工作区顺序**与**项目工具启停**：
+    ``workspaces`` 为空 = 全部（内置三件套 + 工具页）；``tools.include``
+    非空 = 只启用列出的工具，``tools.exclude`` 优先剔除。
+    """
+    d = Path(cfg.root) / "cockpit" / "profiles"
+    if not d.is_dir():
+        return None
+    files = sorted(d.glob("*.yaml"))
+    if not files:
+        return None
+    try:
+        wanted = str(((cfg.host or {}).get("profile") or "")).strip()
+    except ElabError:
+        wanted = ""
+    chosen = next((p for p in files if p.stem == wanted), None) if wanted else None
+    if chosen is None:
+        chosen = next((p for p in files if p.stem == "web"), files[0])
+    try:
+        data = yaml_mod.load_file(chosen) or {}
+    except Exception:                                 # noqa: BLE001
+        return None
+    tools = data.get("tools") or {}
+    return {
+        "name": str(data.get("profile") or chosen.stem),
+        "path": to_fwd(chosen),
+        "available": [p.stem for p in files],
+        "workspaces": [str(x) for x in (data.get("workspaces") or []) if str(x)],
+        "tools": {"include": [str(x) for x in (tools.get("include") or []) if str(x)],
+                  "exclude": [str(x) for x in (tools.get("exclude") or []) if str(x)]},
+    }
+
+
 def capabilities(cfg: Config, mgr: RunManager) -> dict:
     caps = serialport_mod.capabilities()
     ports, backend = ("[]", "")
@@ -690,7 +730,9 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         # 工具层自描述（§16）：标签/通道/档位由内核声明
         "meta": {"steps": STEP_META, "plans": KERNEL_PLANS,
                  "channels": ["build", "flash", "debug", "serial"],
-                 "serial": SERIAL_META},
+                 "serial": SERIAL_META,
+                 # R7 / P1-4：profile 决定右列工作区与启用工具（缺省 = 内置集合）
+                 "profile": _profile_summary(cfg)},
     }
 
 
@@ -1332,6 +1374,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
 
             action=probe   只读：把"会生成什么样的接入文件"摆出来，不落任何盘
             action=write   写入 ``projects/<name>.yaml``
+            action=check   只读复探测：与已写入文件比对，报 missing/identical/drift
 
         write 的三类拒绝**原样**沿用 ``adapt.write`` 的实现（只有一份实现，CLI 与
         这里行为必然一致）：未决项 → 拒（force 可越）、芯片未匹配 → 拒、
@@ -1344,8 +1387,8 @@ class CockpitHandler(BaseHTTPRequestHandler):
           且进度走 SSE、结果落事件流，与"跑全闭环"完全同一套观测设施。
         """
         action = body.get("action") or "probe"
-        if action not in ("probe", "write"):
-            raise ElabError(f"action 必须是 probe 或 write：{action!r}")
+        if action not in ("probe", "write", "check"):
+            raise ElabError(f"action 必须是 probe / write / check：{action!r}")
         raw = (body.get("path") or "").strip()
         if not raw:
             raise ElabError("缺少 path（要适配的工程根目录）")
@@ -1374,6 +1417,11 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 cfg2 = Config(self.cfg.root)
                 type(self).cfg = cfg2
                 self.mgr.cfg = cfg2
+        elif action == "check":
+            # 复探测（不改盘）：重新探测后与已写入的 projects/<name>.yaml 逐字节比对。
+            # status ∈ missing / identical / drift —— 与 CLI `elab adapt --check` 同源。
+            out["result"] = adapt_mod.write(self.cfg, probe, name=out["name"],
+                                            check=True, log=lambda *a: None)
         out["next"] = {
             "steps": ["doctor_deep", "build"],
             "hint": ("写入后跑「体检 + 编译」即三绿灯自证：doctor_deep 全绿"

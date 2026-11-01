@@ -81,6 +81,8 @@ export interface CockpitService {
   preview(opts: { clean: boolean; jobs: number | null }): Promise<void>
   /** 批 3 一键适配：write → 重载工程 → 绑定新工程 → 刷新发现。 */
   adaptProject(path: string): Promise<void>
+  /** 适配复探测（只读）：重新探测并比对已写入的 projects/<name>.yaml（drift 判据）。 */
+  checkAdapt(name: string, root: string): Promise<void>
   dispose(): void
 }
 
@@ -446,6 +448,20 @@ export function createCockpitService(deps: {
         }
       } catch (e) {
         dispatchAdapt({ type: 'adapt/done', ok: false, error: message(e) })
+      }
+    },
+
+    async checkAdapt(name, root) {
+      try {
+        const r = await api.adapt({ action: 'check', path: root, name, sessionId })
+        const raw = r.result?.status
+        // check 只会回 missing / identical / drift；其它值（内核过旧）按 drift 呈现，
+        // 宁可让人多看一次，也不把"未知"当成"没漂移"。
+        const status =
+          raw === 'missing' || raw === 'identical' || raw === 'drift' ? raw : 'drift'
+        dispatchAdapt({ type: 'adapt/checked', name, status, at: Date.now() })
+      } catch (e) {
+        set({ error: message(e) })
       }
     },
 

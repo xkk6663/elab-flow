@@ -313,7 +313,8 @@ function initialAdaptState() {
     scanned: false,
     target: null,
     error: null,
-    lastAdapted: null
+    lastAdapted: null,
+    check: null
   };
 }
 function reduceAdapt(s, e) {
@@ -337,7 +338,10 @@ function reduceAdapt(s, e) {
       return { ...s, candidates: e.candidates, scanned: true, phase };
     }
     case "adapt/start": {
-      return { ...s, phase: "adapting", target: e.path, error: null };
+      return { ...s, phase: "adapting", target: e.path, error: null, check: null };
+    }
+    case "adapt/checked": {
+      return { ...s, check: { name: e.name, status: e.status, at: e.at } };
     }
     case "adapt/done": {
       if (e.ok) {
@@ -346,7 +350,8 @@ function reduceAdapt(s, e) {
           phase: "bound",
           target: null,
           lastAdapted: e.name ?? s.lastAdapted,
-          error: null
+          error: null,
+          check: null
         };
       }
       return { ...s, phase: s.elabRoot === null ? "unbound" : "discovered", target: null, error: e.error ?? "\u9002\u914D\u5931\u8D25" };
@@ -638,6 +643,16 @@ function createCockpitService(deps) {
         }
       } catch (e) {
         dispatchAdapt({ type: "adapt/done", ok: false, error: message(e) });
+      }
+    },
+    async checkAdapt(name, root) {
+      try {
+        const r = await api.adapt({ action: "check", path: root, name, sessionId });
+        const raw = r.result?.status;
+        const status = raw === "missing" || raw === "identical" || raw === "drift" ? raw : "drift";
+        dispatchAdapt({ type: "adapt/checked", name, status, at: Date.now() });
+      } catch (e) {
+        set({ error: message(e) });
       }
     },
     dispose() {
@@ -1482,6 +1497,9 @@ function parseAnsi(input) {
   push(input.slice(cursor));
   return out;
 }
+function stripAnsi(text) {
+  return text.replace(SGR_RE, "");
+}
 
 // src/adapters/dsh-web/EvidenceTail.tsx
 function renderLine(text) {
@@ -1562,6 +1580,15 @@ function EvidenceTail(props) {
     el.scrollTop = el.scrollHeight;
     setFollow(true);
   };
+  const doExport = useCallback(() => {
+    const text = lines.map((l) => stripAnsi(l.text)).join("\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `elab-${channel}.log`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(a.href), 4e3);
+  }, [lines, channel]);
   return /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, /* @__PURE__ */ react_default.createElement(
     "div",
     {
@@ -1600,14 +1627,32 @@ function EvidenceTail(props) {
         count > 0 ? /* @__PURE__ */ react_default.createElement("span", { style: { opacity: 0.6 } }, ` ${count}`) : null
       );
     }),
-    serialMode ? null : /* @__PURE__ */ react_default.createElement(
+    serialMode ? null : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: doExport,
+        disabled: lines.length === 0,
+        title: "\u5BFC\u51FA\u5F53\u524D\u901A\u9053\u7684\u7EAF\u6587\u672C\u65E5\u5FD7\uFF08.log\uFF09",
+        style: {
+          marginLeft: "auto",
+          padding: "1px 6px",
+          fontSize: "11px",
+          borderRadius: "4px",
+          border: "1px solid var(--elab-border)",
+          background: "transparent",
+          color: lines.length === 0 ? "var(--elab-fg-dimmed)" : "var(--elab-fg-secondary)",
+          cursor: lines.length === 0 ? "default" : "pointer"
+        }
+      },
+      "\u2913 \u5BFC\u51FA"
+    ), /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
         onClick: () => setFollow((v) => !v),
         title: follow ? "\u6B63\u5728\u8DDF\u968F\u6700\u65B0\u8F93\u51FA\uFF1B\u70B9\u51FB\u6682\u505C" : "\u5DF2\u6682\u505C\u8DDF\u968F\uFF1B\u70B9\u51FB\u6062\u590D",
         style: {
-          marginLeft: "auto",
           padding: "1px 6px",
           fontSize: "11px",
           borderRadius: "4px",
@@ -1618,7 +1663,7 @@ function EvidenceTail(props) {
         }
       },
       follow ? "\u25BE \u8DDF\u968F" : "\u21BA \u6062\u590D"
-    )
+    ))
   ), serialMode ? /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, props.serialContent) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, progress !== null && progress.total > 0 ? /* @__PURE__ */ react_default.createElement(ProgressBar, { current: progress.current, total: progress.total, label: progress.label, startedAt: null }) : null, failure !== null ? /* @__PURE__ */ react_default.createElement(
     "button",
     {
@@ -1736,6 +1781,32 @@ function hexDump(bytes, perRow = 16) {
     rows.push(
       `${i.toString(16).padStart(4, "0")}  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  |${asciiOf(slice)}|`
     );
+  }
+  return rows;
+}
+function byteClass(b) {
+  if (b < 32) return "ctl";
+  if (b === 127) return "del";
+  if (b <= 126) return "print";
+  return "high";
+}
+function hexDumpRows(bytes, perRow = 16) {
+  const rows = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const cells = [];
+    const ascii = [];
+    for (let j = 0; j < perRow; j += 1) {
+      if (j < slice.length) {
+        const b = slice[j];
+        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
+        ascii.push({ text: printable(b), cls: byteClass(b) });
+      } else {
+        cells.push({ text: "..", cls: "pad" });
+        ascii.push({ text: ".", cls: "pad" });
+      }
+    }
+    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
   }
   return rows;
 }
@@ -1953,7 +2024,8 @@ var EOLS = [
   { id: "none", label: "\u65E0" },
   { id: "lf", label: "LF" },
   { id: "cr", label: "CR" },
-  { id: "crlf", label: "CRLF" }
+  { id: "crlf", label: "CRLF" },
+  { id: "tab", label: "TAB" }
 ];
 var COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 function baudOptions(current2) {
@@ -1961,6 +2033,92 @@ function baudOptions(current2) {
 }
 var MAX_BYTE_BLOCKS = 200;
 var MAX_WAVE_BYTES = 64 * 1024;
+var HISTORY_KEY = "elab.serial.send.history";
+var HISTORY_MAX = 50;
+var MAX_FILE_LINES = 2e3;
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (raw === null) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string").slice(-HISTORY_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+function saveHistory(items) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)));
+  } catch {
+  }
+}
+var BYTE_COLORS = {
+  ctl: "var(--elab-ansi-bright-yellow)",
+  del: "var(--elab-ansi-bright-red)",
+  print: "var(--elab-fg-primary)",
+  high: "var(--elab-ansi-bright-cyan)",
+  pad: "var(--elab-fg-faint)"
+};
+var MAX_REPLAY_LINES = 5e3;
+function hmsOf(us) {
+  const d = new Date(Math.floor(us / 1e3));
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+function parseReplay(name, text) {
+  const chunks = [];
+  let skipped = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    try {
+      const rec = JSON.parse(line);
+      if (typeof rec.bytes_b64 !== "string" || typeof rec.seq !== "number" || typeof rec.t_us !== "number") {
+        skipped += 1;
+        continue;
+      }
+      const bytes2 = b64ToBytes(rec.bytes_b64);
+      chunks.push({
+        seq: rec.seq,
+        dir: rec.dir === "tx" ? "tx" : "rx",
+        t: hmsOf(rec.t_us),
+        t_us: rec.t_us,
+        len: bytes2.length,
+        data_b64: rec.bytes_b64
+      });
+    } catch {
+      skipped += 1;
+    }
+  }
+  if (chunks.length === 0) {
+    return { data: null, error: `\u6CA1\u6709\u53EF\u56DE\u653E\u7684\u6279\u6B21\uFF08\u8DF3\u8FC7 ${skipped} \u884C\uFF09` };
+  }
+  chunks.sort((a, b) => a.seq - b.seq);
+  const lines = [];
+  const dec = new TextDecoder("utf-8", { fatal: false });
+  let pending = "";
+  let seq = 0;
+  for (const c of chunks) {
+    if (c.dir !== "rx") continue;
+    pending += dec.decode(b64ToBytes(c.data_b64), { stream: true });
+    let idx = pending.indexOf("\n");
+    while (idx >= 0) {
+      const raw = pending.slice(0, idx);
+      pending = pending.slice(idx + 1);
+      seq += 1;
+      lines.push({ seq, text: raw.replace(/\r$/, ""), t: c.t.slice(0, 8) });
+      idx = pending.indexOf("\n");
+    }
+  }
+  const rest = pending + dec.decode();
+  if (rest !== "") {
+    seq += 1;
+    lines.push({ seq, text: rest.replace(/\r$/, ""), t: chunks[chunks.length - 1].t.slice(0, 8) });
+  }
+  const kept = lines.length > MAX_REPLAY_LINES ? lines.slice(-MAX_REPLAY_LINES) : lines;
+  const bytes = chunks.reduce((n, c) => n + c.len, 0);
+  return { data: { name, chunks, lines: kept, bytes, skipped }, error: "" };
+}
 var chip = {
   flex: "0 0 auto",
   padding: "2px 8px",
@@ -2083,6 +2241,13 @@ function SerialPane(props) {
   const [sendFormat, setSendFormat] = useState("utf8");
   const [eol, setEol] = useState("crlf");
   const [notice, setNotice] = useState(null);
+  const [history, setHistory] = useState(loadHistory);
+  const [histIdx, setHistIdx] = useState(-1);
+  const [fileBusy, setFileBusy] = useState(false);
+  const fileRef = useRef(null);
+  const [replay, setReplay] = useState(null);
+  const [replayErr, setReplayErr] = useState(null);
+  const replayRef = useRef(null);
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
   const scrollRef = useRef(null);
   const followRef = useRef(true);
@@ -2097,20 +2262,24 @@ function SerialPane(props) {
     return list;
   }, [ports, port]);
   const portLocked = stream.active;
+  const replayMode = replay !== null;
+  const sourceChunks = replayMode ? replay.chunks : stream.chunks;
   const filtered = useMemo(
-    () => dir === "all" ? stream.chunks : stream.chunks.filter((c) => c.dir === dir),
-    [stream.chunks, dir]
+    () => dir === "all" ? sourceChunks : sourceChunks.filter((c) => c.dir === dir),
+    [sourceChunks, dir]
   );
   const q = query.trim().toLowerCase();
   const monitorLines = useMemo(() => {
-    if (q === "") return stream.lines;
-    return stream.lines.filter((l) => l.text.toLowerCase().includes(q));
-  }, [stream.lines, q]);
+    const base = replayMode && replay !== null ? replay.lines : stream.lines;
+    if (q === "") return base;
+    return base.filter((l) => l.text.toLowerCase().includes(q));
+  }, [stream.lines, replay, replayMode, q]);
   const runLines = useMemo(() => {
+    if (replayMode) return [];
     const all = props.runLines;
     if (q === "") return all;
     return all.filter((l) => l.text.toLowerCase().includes(q));
-  }, [props.runLines, props.runLinesVersion, q]);
+  }, [props.runLines, props.runLinesVersion, q, replayMode]);
   const byteBlocks = useMemo(() => {
     const list = filtered.slice(-MAX_BYTE_BLOCKS);
     return list.flatMap((c) => {
@@ -2121,7 +2290,7 @@ function SerialPane(props) {
       else body = textOf(bytes, repr);
       const header = `#${c.seq} ${c.dir.toUpperCase()} ${c.t} \xB7 ${c.len} B`;
       if (q !== "" && !header.toLowerCase().includes(q) && !body.toLowerCase().includes(q)) return [];
-      return [{ c, header, body }];
+      return [{ c, header, body, rows: repr === "hex" ? hexDumpRows(bytes) : null }];
     });
   }, [filtered, repr, q]);
   const termEnc = repr === "gbk" ? "gbk" : "utf8";
@@ -2150,7 +2319,7 @@ function SerialPane(props) {
   const [decodeMeta, setDecodeMeta] = useState(null);
   const [waveErr, setWaveErr] = useState(null);
   const sharedDecoder = stream.snap?.decode?.decoder ?? "";
-  const sharedActive = sharedDecoder !== "";
+  const sharedActive = replayMode ? false : sharedDecoder !== "";
   const sharedFrames = useMemo(() => stream.decoded.map((f) => f.values), [stream.decoded]);
   const sharedState = sharedActive ? stream.decodedSnap ?? stream.snap?.decode ?? null : null;
   const shownFrames = sharedActive ? sharedFrames : frames;
@@ -2182,7 +2351,11 @@ function SerialPane(props) {
       off += b.length;
     }
     let cancelled = false;
-    api.serialDecode({ decoder, dataB64: bytesToB64(bytes), sessionId: props.sessionId }).then((r) => {
+    api.serialDecode({
+      decoder,
+      dataB64: bytesToB64(bytes),
+      ...replayMode ? {} : { sessionId: props.sessionId }
+    }).then((r) => {
       if (cancelled) return;
       if (!r.ok) {
         setWaveErr(r.error ?? "\u89E3\u7801\u5931\u8D25");
@@ -2199,7 +2372,7 @@ function SerialPane(props) {
     return () => {
       cancelled = true;
     };
-  }, [view, sharedActive, filtered, decoder, props.sessionId, api]);
+  }, [view, sharedActive, filtered, decoder, props.sessionId, api, replayMode]);
   useEffect(() => {
     const el = scrollRef.current;
     if (el !== null && followRef.current) el.scrollTop = el.scrollHeight;
@@ -2237,6 +2410,15 @@ function SerialPane(props) {
     a.click();
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4e3);
   }, [filtered, stream.snap, project]);
+  const remember = useCallback((text) => {
+    setHistory((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1] === text) return prev;
+      const next = [...prev, text].slice(-HISTORY_MAX);
+      saveHistory(next);
+      return next;
+    });
+    setHistIdx(-1);
+  }, []);
   const doSend = useCallback(
     async (e) => {
       e.preventDefault();
@@ -2254,16 +2436,119 @@ function SerialPane(props) {
         setNotice(
           `\u2713 \u5DF2\u53D1\u9001 ${r.written} B \u2192 ${r.port}@${r.baud}` + (r.via === "monitor" ? "\uFF08\u7ECF\u76D1\u89C6\u4F1A\u8BDD\uFF0C\u56DE\u663E\u89C1\u5B9E\u65F6\u6D41\uFF09" : "")
         );
+        remember(draft);
         setDraft("");
       } catch (err) {
         setNotice(`\u2717 ${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [draft, running, sendFormat, eol, stream]
+    [draft, running, sendFormat, eol, stream, remember]
   );
+  const onDraftKey = useCallback(
+    (e) => {
+      const key = e.key;
+      if (key !== "ArrowUp" && key !== "ArrowDown") return;
+      if (history.length === 0) return;
+      e.preventDefault();
+      if (key === "ArrowUp") {
+        const next2 = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1);
+        setHistIdx(next2);
+        setDraft(history[next2]);
+        return;
+      }
+      if (histIdx === -1) return;
+      const next = histIdx + 1;
+      if (next >= history.length) {
+        setHistIdx(-1);
+        setDraft("");
+      } else {
+        setHistIdx(next);
+        setDraft(history[next]);
+      }
+    },
+    [history, histIdx]
+  );
+  const doSendFile = useCallback(
+    async (e) => {
+      const file = e.currentTarget.files?.[0];
+      e.currentTarget.value = "";
+      if (file === void 0 || running || !writable) return;
+      setNotice(null);
+      let text = "";
+      try {
+        text = await file.text();
+      } catch (err) {
+        setNotice(`\u2717 \u8BFB\u53D6\u6587\u4EF6\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      let lines = text.split(/\r\n|\r|\n/);
+      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      if (lines.length === 0) {
+        setNotice("\u2717 \u6587\u4EF6\u91CC\u6CA1\u6709\u53EF\u53D1\u9001\u7684\u884C");
+        return;
+      }
+      let clipped = false;
+      if (lines.length > MAX_FILE_LINES) {
+        lines = lines.slice(0, MAX_FILE_LINES);
+        clipped = true;
+      }
+      setFileBusy(true);
+      let sent = 0;
+      let fail = "";
+      for (const line of lines) {
+        if (line === "") continue;
+        try {
+          const r = await stream.send(line, {
+            format: sendFormat,
+            eol: sendFormat === "hex" ? "none" : eol
+          });
+          if (!r.ok) {
+            fail = r.error ?? "\u672A\u77E5\u539F\u56E0";
+            break;
+          }
+          sent += 1;
+        } catch (err) {
+          fail = err instanceof Error ? err.message : String(err);
+          break;
+        }
+      }
+      setFileBusy(false);
+      if (fail !== "") {
+        setNotice(`\u2717 \u6587\u4EF6\u53D1\u9001\u4E2D\u65AD\uFF1A\u7B2C ${sent + 1}/${lines.length} \u884C\u5931\u8D25\uFF08${fail}\uFF09`);
+        return;
+      }
+      setNotice(`\u2713 \u6587\u4EF6\u5DF2\u6309\u884C\u53D1\u9001 ${sent} \u884C \u2192 ${file.name}${clipped ? `\uFF08\u53EA\u53D1\u524D ${MAX_FILE_LINES} \u884C\uFF09` : ""}`);
+    },
+    [running, writable, sendFormat, eol, stream]
+  );
+  const doReplay = useCallback(async (e) => {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = "";
+    if (file === void 0) return;
+    setReplayErr(null);
+    try {
+      const text = await file.text();
+      const r = parseReplay(file.name, text);
+      if (r.data === null) {
+        setReplay(null);
+        setReplayErr(r.error);
+        return;
+      }
+      setReplay(r.data);
+      setView("wave");
+      setNotice(
+        `\u25CF \u56DE\u653E ${file.name}\uFF1A${r.data.chunks.length} \u6279 / ${r.data.bytes} B${r.data.skipped > 0 ? `\uFF08\u8DF3\u8FC7 ${r.data.skipped} \u884C\uFF09` : ""}`
+      );
+    } catch (err) {
+      setReplay(null);
+      setReplayErr(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
   const bytesTotal = stream.snap?.bytes_total ?? 0;
   const chunkCount = stream.chunks.length;
-  const lossy = stream.gapLines + stream.gapChunks;
+  const lossy = replayMode ? 0 : stream.gapLines + stream.gapChunks;
+  const bytesShown = replayMode && replay !== null ? replay.bytes : bytesTotal;
+  const chunksShown = replayMode && replay !== null ? replay.chunks.length : chunkCount;
   const openedBy = stream.snap?.opened_by;
   const leaseLeft = Math.max(0, Math.ceil(stream.snap?.lease_remaining_s ?? 0));
   const cap = stream.snap?.capture;
@@ -2360,7 +2645,7 @@ function SerialPane(props) {
           const next = e.currentTarget.value;
           setDecoder(next);
           props.onDecoder?.(next);
-          if (stream.active) void stream.setDecoder(next);
+          if (!replayMode && stream.active) void stream.setDecoder(next);
         },
         "aria-label": "\u534F\u8BAE\u89E3\u7801\u5668",
         title: sharedActive ? `\u5171\u4EAB\u89E3\u7801\uFF08${stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"}\uFF09\uFF1A\u9762\u677F\u4E0E agent \u8BFB\u540C\u4E00\u4EFD\u5E27` : decoders.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
@@ -2408,7 +2693,40 @@ function SerialPane(props) {
       },
       "\u6E05\u7A7A"
     ),
-    /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: doExport, title: "\u5BFC\u51FA\u5F53\u524D\u8FC7\u6EE4\u7ED3\u679C\u7684\u539F\u59CB\u5B57\u8282\uFF08HEX + \u5143\u6570\u636E\uFF09", style: chip }, "\u5BFC\u51FA")
+    /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: doExport, title: "\u5BFC\u51FA\u5F53\u524D\u8FC7\u6EE4\u7ED3\u679C\u7684\u539F\u59CB\u5B57\u8282\uFF08HEX + \u5143\u6570\u636E\uFF09", style: chip }, "\u5BFC\u51FA"),
+    /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        ref: replayRef,
+        type: "file",
+        accept: ".jsonl,.json,.txt,text/plain",
+        onChange: (e) => void doReplay(e),
+        style: { display: "none" }
+      }
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => replayRef.current?.click(),
+        title: "\u9009\u4E00\u4E2A\u5F55\u5236 JSONL \u5728\u672C\u5730\u56DE\u653E\u6CE2\u5F62/\u884C\u89C6\u56FE\uFF08\u7EAF\u524D\u7AEF\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09",
+        style: chip
+      },
+      "\u56DE\u653E"
+    ),
+    replayMode ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => {
+          setReplay(null);
+          setReplayErr(null);
+        },
+        title: "\u9000\u51FA\u56DE\u653E\uFF0C\u56DE\u5230\u5B9E\u65F6\u6570\u636E\u9762",
+        style: { ...chip, borderColor: "var(--elab-accent)", color: "var(--elab-accent)" }
+      },
+      "\u9000\u51FA\u56DE\u653E"
+    ) : null
   ), /* @__PURE__ */ react_default.createElement(
     "div",
     {
@@ -2458,7 +2776,7 @@ function SerialPane(props) {
       },
       follow ? "\u25BE \u8DDF\u968F" : "\u21BA \u6062\u590D"
     ),
-    /* @__PURE__ */ react_default.createElement("span", { style: metaStyle, title: "\u5F53\u524D\u7F13\u51B2\uFF1A\u672A\u6E05\u7A7A\u3001\u672A\u88AB\u73AF\u5F62\u6324\u51FA\u7684\u5B57\u8282 / \u6279\u6B21" }, `${bytesTotal} B \xB7 ${chunkCount} \u6279`),
+    /* @__PURE__ */ react_default.createElement("span", { style: metaStyle, title: replayMode ? "\u56DE\u653E\u6587\u4EF6\uFF1A\u6279\u6B21\u6570 / \u539F\u59CB\u5B57\u8282\u6570" : "\u5F53\u524D\u7F13\u51B2\uFF1A\u672A\u6E05\u7A7A\u3001\u672A\u88AB\u73AF\u5F62\u6324\u51FA\u7684\u5B57\u8282 / \u6279\u6B21" }, `${bytesShown} B \xB7 ${chunksShown} \u6279`),
     stream.active && openedBy !== void 0 ? /* @__PURE__ */ react_default.createElement(
       "span",
       {
@@ -2470,7 +2788,7 @@ function SerialPane(props) {
       },
       `\u4F1A\u8BDD ${openedBy === "agent" ? "agent" : "\u6211"}${leaseLeft > 0 ? ` \xB7 \u79DF\u7EA6 ${leaseLeft}s` : ""}`
     ) : null
-  ), stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
+  ), replayErr !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u56DE\u653E\u5931\u8D25\uFF1A${replayErr}`) : null, replayMode && replay !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u56DE\u653E\u4E2D\uFF1A${replay.name} \u2014\u2014 ${replay.chunks.length} \u6279 / ${replay.bytes} B \xB7 ${replay.lines.length} \u884C\uFF08\u672C\u5730\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09${replay.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${replay.skipped} \u884C` : ""}`) : null, stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
     "div",
     {
       ref: scrollRef,
@@ -2485,7 +2803,7 @@ function SerialPane(props) {
         lineHeight: 1.55
       }
     },
-    view === "lines" ? runLines.length === 0 && monitorLines.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, "\u5C1A\u65E0\u884C\u8F93\u51FA\u3002\u70B9\u4E0A\u65B9\u300C\u25B6 \u4E32\u53E3\u300D\u542F\u52A8\u5E38\u9A7B\u76D1\u89C6\u540E\uFF0C\u8BBE\u5907\u8F93\u51FA\u4F1A\u5B9E\u65F6\u6D41\u8FDB\u6765\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", padding: "2px 0" } }, runLines.map((line, i) => /* @__PURE__ */ react_default.createElement(
+    view === "lines" ? runLines.length === 0 && monitorLines.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709 RX \u884C\uFF08\u5171 ${replay?.chunks.length ?? 0} \u6279\uFF0C\u53EF\u80FD\u662F\u7EAF TX \u5F55\u5236\uFF09\u2014\u2014 \u53EF\u5207\u5230\u300C\u5B57\u8282\u300D\u770B\u539F\u59CB\u5185\u5BB9\u3002` : "\u5C1A\u65E0\u884C\u8F93\u51FA\u3002\u70B9\u4E0A\u65B9\u300C\u25B6 \u4E32\u53E3\u300D\u542F\u52A8\u5E38\u9A7B\u76D1\u89C6\u540E\uFF0C\u8BBE\u5907\u8F93\u51FA\u4F1A\u5B9E\u65F6\u6D41\u8FDB\u6765\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", padding: "2px 0" } }, runLines.map((line, i) => /* @__PURE__ */ react_default.createElement(
       "div",
       {
         key: `run-${i}`,
@@ -2499,7 +2817,7 @@ function SerialPane(props) {
       },
       /* @__PURE__ */ react_default.createElement(AnsiLine, { text: line.text, query: query.trim() })
     )), runLines.length > 0 && monitorLines.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "2px 12px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, "\u2014\u2014 \u5E38\u9A7B\u76D1\u89C6 \u2014\u2014") : null, monitorLines.map((l) => /* @__PURE__ */ react_default.createElement("div", { key: `mon-${l.seq}`, style: { display: "flex", gap: "8px", padding: "0 12px", whiteSpace: "pre-wrap", wordBreak: "break-all" } }, /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", color: "var(--elab-fg-faint)", fontVariantNumeric: "tabular-nums" } }, l.t), /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", minWidth: "42px", textAlign: "right", color: "var(--elab-fg-faint)", fontVariantNumeric: "tabular-nums" } }, `#${l.seq}`), /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto", minWidth: 0, color: "var(--elab-fg-primary)" } }, /* @__PURE__ */ react_default.createElement(AnsiLine, { text: l.text, query: query.trim() }))))) : null,
-    view === "bytes" ? byteBlocks.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, "\u5C1A\u65E0\u5B57\u8282\u3002\u542F\u52A8\u76D1\u89C6\u540E\u8BBE\u5907\u8F93\u51FA\u4EE5 RX \u6279\u6B21\u6D41\u8FDB\u6765\uFF1B\u4F60\u53D1\u9001\u7684\u5185\u5BB9\u662F TX \u6279\u6B21\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", padding: "8px 12px" } }, byteBlocks.map(({ c, header, body }) => /* @__PURE__ */ react_default.createElement("div", { key: c.seq, style: { border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", overflow: "hidden", background: "var(--elab-bg-surface)" } }, /* @__PURE__ */ react_default.createElement(
+    view === "bytes" ? byteBlocks.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, "\u5C1A\u65E0\u5B57\u8282\u3002\u542F\u52A8\u76D1\u89C6\u540E\u8BBE\u5907\u8F93\u51FA\u4EE5 RX \u6279\u6B21\u6D41\u8FDB\u6765\uFF1B\u4F60\u53D1\u9001\u7684\u5185\u5BB9\u662F TX \u6279\u6B21\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", padding: "8px 12px" } }, byteBlocks.map(({ c, header, body, rows }) => /* @__PURE__ */ react_default.createElement("div", { key: c.seq, style: { border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", overflow: "hidden", background: "var(--elab-bg-surface)" } }, /* @__PURE__ */ react_default.createElement(
       "div",
       {
         style: {
@@ -2529,7 +2847,7 @@ function SerialPane(props) {
         },
         `${header} \xB7 ${c.t_us}\u03BCs`
       )
-    ), /* @__PURE__ */ react_default.createElement("pre", { style: { margin: 0, padding: "4px 8px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--elab-fg-primary)" } }, body)))) : null,
+    ), rows === null ? /* @__PURE__ */ react_default.createElement("pre", { style: { margin: 0, padding: "4px 8px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--elab-fg-primary)" } }, body) : /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 8px", whiteSpace: "pre", overflowX: "auto", color: "var(--elab-fg-primary)" } }, rows.map((row, ri) => /* @__PURE__ */ react_default.createElement("div", { key: ri }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, row.offset), "  ", row.cells.map((cell, ci) => /* @__PURE__ */ react_default.createElement("span", { key: ci, style: { color: BYTE_COLORS[cell.cls] } }, cell.text, ci === 7 ? "  " : ci === row.cells.length - 1 ? "" : " ")), "  |", row.ascii.map((cell, ci) => /* @__PURE__ */ react_default.createElement("span", { key: ci, style: { color: BYTE_COLORS[cell.cls] } }, cell.text)), "|")))))) : null,
     view === "terminal" ? shownTerm.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, "\u5C1A\u65E0\u7EC8\u7AEF\u5185\u5BB9\u3002ANSI \u989C\u8272\u3001`\\r` \u8986\u5199\u4E0E\u9000\u683C\u90FD\u5DF2\u6309\u7EC8\u7AEF\u8BED\u4E49\u5904\u7406\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px 12px", whiteSpace: "pre", minHeight: "100%" } }, shownTerm.map((ln, i) => /* @__PURE__ */ react_default.createElement("div", { key: i, style: { minHeight: "1.55em" } }, ln.length === 0 ? "\xA0" : ln.map((sp, j) => /* @__PURE__ */ react_default.createElement("span", { key: j, className: sp.cls }, sp.text))))) : null,
     view === "wave" ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px 12px" } }, sharedActive ? /* @__PURE__ */ react_default.createElement(
       "div",
@@ -2556,7 +2874,7 @@ function SerialPane(props) {
         stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"
       ),
       /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, `${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \xB7 \u5185\u6838\u53EA\u89E3 RX\uFF08\u8BBE\u5907\u8F93\u51FA\uFF09`)
-    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 ? /* @__PURE__ */ react_default.createElement(WaveChart, { frames: shownFrames, channels: shownChannels }) : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
+    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709\u89E3\u51FA\u5B8C\u6574\u5E27\uFF1A\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u89E3\u7801 ${replay?.chunks.length ?? 0} \u6279 \u2014\u2014 \u5F55\u5236\u91CC\u53EF\u80FD\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u5207\u65B9\u5411\u53EA\u770B RX \u6216\u6362\u89E3\u7801\u5668\u3002` : sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 ? /* @__PURE__ */ react_default.createElement(WaveChart, { frames: shownFrames, channels: shownChannels }) : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
   ), /* @__PURE__ */ react_default.createElement(
     "form",
     {
@@ -2620,7 +2938,11 @@ function SerialPane(props) {
       "input",
       {
         value: draft,
-        onChange: (e) => setDraft(e.currentTarget.value),
+        onChange: (e) => {
+          setDraft(e.currentTarget.value);
+          setHistIdx(-1);
+        },
+        onKeyDown: onDraftKey,
         disabled: sendDisabled,
         placeholder: running ? "\u6709 run \u5728\u8DD1\uFF1A\u4E32\u53E3\u4E0E run \u4E92\u65A5\uFF08N5\uFF09\uFF0C\u7B49\u5B83\u7ED3\u675F" : sendFormat === "hex" ? "\u8F93\u5165\u5341\u516D\u8FDB\u5236\uFF0C\u5982 01 A0 FF" : "\u8F93\u5165\u4E00\u884C\u5E76\u6309\u56DE\u8F66\u53D1\u9001\u5230\u8BBE\u5907",
         "aria-label": "\u4E32\u53E3\u53D1\u9001\u5185\u5BB9",
@@ -2654,8 +2976,33 @@ function SerialPane(props) {
         }
       },
       "\u53D1\u9001"
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        ref: fileRef,
+        type: "file",
+        accept: ".txt,.csv,.log,.json,.hex,text/plain",
+        onChange: (e) => void doSendFile(e),
+        style: { display: "none" }
+      }
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        disabled: sendDisabled || fileBusy,
+        onClick: () => fileRef.current?.click(),
+        title: `\u9009\u6587\u4EF6\u6309\u884C\u53D1\u9001\uFF08\u6BCF\u884C\u6309\u5F53\u524D\u683C\u5F0F\u4E0E\u884C\u5C3E\uFF0C\u6700\u591A ${MAX_FILE_LINES} \u884C\uFF09`,
+        style: {
+          ...chip,
+          opacity: sendDisabled || fileBusy ? 0.5 : 1,
+          cursor: sendDisabled || fileBusy ? "not-allowed" : "pointer"
+        }
+      },
+      fileBusy ? "\u53D1\u9001\u4E2D\u2026" : "\u6587\u4EF6"
     )
-  ), notice !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: noticeStyle(notice.startsWith("\u2717")) }, notice) : null, project === "" ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u672A\u9009\u62E9\u5DE5\u7A0B\uFF1A\u7AEF\u53E3/\u6CE2\u7279\u7387\u65E0\u6CD5\u89E3\u6790\uFF08\u5148\u5728\u9876\u90E8\u9009\u4E00\u4E2A\u5DE5\u7A0B\uFF09\u3002") : null, stream.active !== true && running !== true ? /* @__PURE__ */ react_default.createElement(
+  ), notice !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: noticeStyle(notice.startsWith("\u2717")) }, notice) : null, project === "" ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u672A\u9009\u62E9\u5DE5\u7A0B\uFF1A\u7AEF\u53E3/\u6CE2\u7279\u7387\u65E0\u6CD5\u89E3\u6790\uFF08\u5148\u5728\u9876\u90E8\u9009\u4E00\u4E2A\u5DE5\u7A0B\uFF09\u3002") : null, stream.active !== true && running !== true && !replayMode ? /* @__PURE__ */ react_default.createElement(
     "div",
     {
       style: {
@@ -3652,7 +3999,19 @@ function usePaneWidth(ref) {
   return width;
 }
 function AdaptBanner(props) {
-  const { phase, pending, adaptingPath, lastAdapted, error, disabled, onAdapt } = props;
+  const {
+    phase,
+    pending,
+    adaptingPath,
+    lastAdapted,
+    check,
+    checking,
+    checkRoot,
+    error,
+    disabled,
+    onAdapt,
+    onCheck
+  } = props;
   if (phase === "adapting") {
     return /* @__PURE__ */ react_default.createElement(
       "div",
@@ -3689,6 +4048,10 @@ function AdaptBanner(props) {
   }
   if (pending.length === 0) {
     if (phase === "bound" && lastAdapted !== null) {
+      const badge = check !== null && check.name === lastAdapted ? check : null;
+      const badgeText = badge === null ? null : badge.status === "identical" ? "\u914D\u7F6E\u4E00\u81F4" : badge.status === "drift" ? "\u5DE5\u7A0B\u5DF2\u6F02\u79FB\uFF08\u9700\u91CD\u65B0\u9002\u914D\uFF09" : "\u914D\u7F6E\u7F3A\u5931\uFF08\u9700\u91CD\u65B0\u9002\u914D\uFF09";
+      const badgeColor = badge === null ? "var(--elab-fg-muted)" : badge.status === "identical" ? "var(--elab-status-ok)" : "var(--elab-status-fail)";
+      const checkDisabled = disabled || checking || checkRoot === null;
       return /* @__PURE__ */ react_default.createElement(
         "div",
         {
@@ -3697,10 +4060,41 @@ function AdaptBanner(props) {
             padding: "3px 8px",
             fontSize: "11px",
             color: "var(--elab-status-ok)",
-            borderBottom: "1px solid var(--elab-border)"
+            borderBottom: "1px solid var(--elab-border)",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            minWidth: 0
           }
         },
-        `\u5DF2\u63A5\u5165\u5DE5\u7A0B\u300C${lastAdapted}\u300D\u2014\u2014\u5EFA\u8BAE\u8DD1\u4E00\u6B21\u4E09\u8FDE\u81EA\u8BC1\uFF08\u4F53\u68C0+\u7F16\u8BD1\uFF09`
+        /* @__PURE__ */ react_default.createElement(
+          "span",
+          {
+            style: { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+          },
+          `\u5DF2\u63A5\u5165\u5DE5\u7A0B\u300C${lastAdapted}\u300D\u2014\u2014\u5EFA\u8BAE\u8DD1\u4E00\u6B21\u4E09\u8FDE\u81EA\u8BC1\uFF08\u4F53\u68C0+\u7F16\u8BD1\uFF09`
+        ),
+        badgeText === null ? null : /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", color: badgeColor } }, `\u590D\u63A2\u6D4B\uFF1A${badgeText}`),
+        /* @__PURE__ */ react_default.createElement(
+          "button",
+          {
+            type: "button",
+            disabled: checkDisabled,
+            onClick: () => onCheck(lastAdapted),
+            title: checkRoot === null ? "\u5DE5\u7A0B\u5217\u8868\u5C1A\u672A\u7ED9\u51FA\u6839\u76EE\u5F55\uFF0C\u6682\u4E0D\u53EF\u590D\u63A2\u6D4B" : "\u53EA\u8BFB\u590D\u63A2\u6D4B\uFF1A\u91CD\u65B0\u63A2\u6D4B\u540E\u4E0E projects/<name>.yaml \u9010\u5B57\u8282\u6BD4\u5BF9\uFF08\u4E0D\u5199\u76D8\uFF09",
+            style: {
+              flex: "0 0 auto",
+              padding: "0 6px",
+              fontSize: "11px",
+              borderRadius: "4px",
+              border: "1px solid var(--elab-border)",
+              background: "transparent",
+              color: "var(--elab-accent)",
+              cursor: checkDisabled ? "default" : "pointer"
+            }
+          },
+          checking ? "\u63A2\u6D4B\u4E2D\u2026" : "\u590D\u63A2\u6D4B"
+        )
       );
     }
     return null;
@@ -3931,6 +4325,8 @@ function CockpitPane(props) {
   }, [serialStream, serialPref.decoder]);
   const steps = snap.run.steps;
   const running = snap.run.status === "running";
+  const [checkingAdapt, setCheckingAdapt] = useState(false);
+  const adaptCheckRoot = snap.projects.find((p) => p.name === snap.adapt.lastAdapted)?.root ?? null;
   const failure = useMemo(() => {
     for (let i = steps.length - 1; i >= 0; i -= 1) {
       if (steps[i].state === "failed") {
@@ -4091,9 +4487,17 @@ function CockpitPane(props) {
         pending: snap.adapt.candidates.filter((c) => c.adaptedAs === void 0).map((c) => ({ path: c.path, dirname: c.dirname })),
         adaptingPath: snap.adapt.target,
         lastAdapted: snap.adapt.lastAdapted,
+        check: snap.adapt.check,
+        checking: checkingAdapt,
+        checkRoot: adaptCheckRoot,
         error: snap.adapt.error,
         disabled: running || snap.busy,
-        onAdapt: (path) => void service.adaptProject(path)
+        onAdapt: (path) => void service.adaptProject(path),
+        onCheck: (name) => {
+          if (adaptCheckRoot === null) return;
+          setCheckingAdapt(true);
+          void service.checkAdapt(name, adaptCheckRoot).finally(() => setCheckingAdapt(false));
+        }
       }
     ) : null,
     snap.hostOk === true && snap.kernelOld ? /* @__PURE__ */ react_default.createElement(

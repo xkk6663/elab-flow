@@ -201,6 +201,108 @@ def render_platform(cfg: Config, vendor: str, platform: str,
     return "\n".join(L) + "\n"
 
 
+def render_adapt_skill(cfg: Config) -> str:
+    """工程适配专用 skill（`elab skill --adapt`）。
+
+    ★ 与平台 skill 的区别：平台 skill 回答"这颗芯片上怎么跑闭环"，
+      本 skill 回答"**一个新工程**怎么接进来"——探测、写 projects/*.yaml、
+      三绿灯自证、以及每种 status 该做什么。已装适配包只作为数据源列出。
+    """
+    packs = sorted(cfg.packs.values(), key=lambda r: str(r.get("name") or ""))
+    chips = [f"{r.get('name')}（{len(r.get('chips') or [])} 颗芯片）" for r in packs]
+
+    L: list[str] = []
+    A = L.append
+    A("---")
+    A("name: elab-adapt")
+    A('description: "把一个已有的嵌入式工程（CubeMX / WorkBench / 手写 CMake）'
+      "接入 elab-Flow：确定性探测 → 生成 projects/<name>.yaml → 三绿灯自证。"
+      '当需要适配新工程、或 elab adapt 报歧义/漂移/drift 时使用。'
+      '触发词：适配、接入工程、elab adapt、projects yaml、T3、drift、hand-edited。"')
+    A("agent_created: true")
+    A("---")
+    A("")
+    A("# 工程适配（elab-Flow）")
+    A("")
+    A("> 本文件由 `elab skill --adapt` 生成，**请勿手改**。")
+    A("")
+    A("## 0. 一句话")
+    A("")
+    A("**适配 ≠ 改造**：产出物只有 `projects/<name>.yaml`，业务工程一个字节都不动。")
+    A("")
+    A("## 1. 标准动作")
+    A("")
+    A("```bash")
+    A("elab adapt <工程目录>            # ① 只探测，打印证据链（不写盘）")
+    A("elab adapt <工程目录> --write    # ② 写 projects/<name>.yaml")
+    A("elab adapt <工程目录> --check    # ③ 幂等复探测（identical / drift）")
+    A("elab adapt <工程目录> --verify   # ④ 三绿灯：doctor --deep + build + guard.untouched")
+    A("```")
+    A("")
+    A("## 2. status 语义（看这一步该做什么）")
+    A("")
+    A("| status | 含义 | 该做什么 |")
+    A("|---|---|---|")
+    A("| `written` | 首次写入成功 | 跑 `--verify` |")
+    A("| `identical` | 已适配且内容一致（no-op） | 无需动作 |")
+    A("| `differs` | 文件已存在但内容不同 | 确认工程确实变了再 `--force`（会留 `.bak`） |")
+    A("| `drift` | 复探测结果与落盘文件不一致 | 工程被改过：重新 `--write`（**不会**自动覆盖） |")
+    A("| `hand-edited` | 人工接管（`generated-by` 标记被删） | 默认不覆盖；确需机器接管才 `--force` |")
+    A("| `missing` | 尚未适配 | 先 `--write` |")
+    A("")
+    A("## 3. 证据分级（冲突时高级别胜，低级别写进 conflicts）")
+    A("")
+    A("- **E1 编译事实**：编译宏 / 编译命令（最权威）")
+    A("- **E2 生成器结构化元数据**：`at32_chip.json` / `*.ioc`")
+    A("- **E3 链接事实**：ld 的 MEMORY、工具链 `-T`")
+    A("- **E4 结构约定**：目录名 / 变量名 / 文件名")
+    A("- **E5 生成器模板**：`*.ATWP` 等，**可能过期**（实测被证伪过一次）")
+    A("- **E6 文件名猜测**")
+    A("")
+    A("## 4. 不猜：`ambiguities` 是阻断项")
+    A("")
+    A("探测有未决项时 `--write` 会**拒绝写入**（除非 `--force`）。")
+    A("典型未决项：A/B 类互相矛盾的链接变量、多个 ld 候选、匹配不到芯片。")
+    A("先解决证据，不要用 `--force` 掩盖。")
+    A("")
+    A("## 5. 平台形态（两类工程都要挂 inject，但原因不同）")
+    A("")
+    A("- **A 类**：工具链由 `CMakePresets.json` 的 `toolchainFile` 指定；")
+    A("  接管后 preset 不再加载，故必须靠 `CMAKE_PROJECT_INCLUDE` 补齐工程自述约定。")
+    A("- **B 类**：`CMakeLists.txt` 行内 `include()` 自带工具链；接管后仍会执行，必须抢回来。")
+    A("")
+    A("## 6. 当前已安装的适配包（芯片知识来源）")
+    A("")
+    if chips:
+        for c in chips:
+            A(f"- {c}")
+    else:
+        A("- （无）—— 先 `elab pkg bootstrap` 或 `elab pkg install <vendor>/<platform>`，"
+          "否则探测不到任何芯片。")
+    A("")
+    A("## 7. 失败排查")
+    A("")
+    A("1. **T3**（没有 `CMakeLists.txt`）→ 回图形配置器把工具链切成 CMake 再导出。")
+    A("2. **匹配不到芯片** → 装对应适配包；**不要**把厂商分支写进内核。")
+    A("3. **drift** → 读 `--check` 的输出差异，确认是工程变了还是适配包芯片参数变了。")
+    A("4. **构建后业务工程被改动** → 看 `guard.untouched`；这是适配事故，不是正常状态。")
+    A("")
+    return "\n".join(L) + "\n"
+
+
+def generate_adapt(cfg: Config, *, log=print) -> list[dict]:
+    """生成适配专用 skill（`skills/elab-adapt` + DSH 发现路径镜像）。"""
+    text = render_adapt_skill(cfg)
+    written = []
+    for rel in (Path("skills") / "elab-adapt", Path(".agents") / "skills" / "elab-adapt"):
+        out = cfg.root / rel / "SKILL.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        log(f"[elab] ✓ 生成适配 skill：{to_fwd(out)}  ({len(text)} B)")
+        written.append({"skill": "elab-adapt", "path": to_fwd(out), "bytes": len(text)})
+    return written
+
+
 def generate(cfg: Config, *, project: str | None = None, chip_ref: str | None = None,
              all_chips: bool = False, log=print) -> list[dict]:
     """生成平台级 skill。

@@ -599,7 +599,7 @@ export interface AdaptWriteResult {
 }
 
 export interface AdaptResponse {
-  action: "probe" | "write";
+  action: "probe" | "write" | "check";
   probe: AdaptProbe;
   tier: string;
   confidence: AdaptProbe["confidence"];

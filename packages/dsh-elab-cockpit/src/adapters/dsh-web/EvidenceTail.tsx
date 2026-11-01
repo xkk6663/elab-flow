@@ -13,12 +13,12 @@
  */
 
 import React from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import type { LogChannelId } from '../../domain/channels.ts'
 import { CHANNEL_LABEL, LOG_CHANNELS } from '../../domain/channels.ts'
-import { parseAnsi } from './theme/ansi.ts'
+import { parseAnsi, stripAnsi } from './theme/ansi.ts'
 
 /** 日志尾可见的最大行数（窄栏；原驾驶舱 4000，实测单 run 最大 12KB 可承受）。 */
 /** ANSI → span 序列；无 ESC 时原样返回字符串，避免多余节点（§5.5.3）。 */
@@ -141,6 +141,18 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
     setFollow(true)
   }
 
+  /** 导出当前通道为纯文本 .log（与驾驶舱同格式：去 ANSI、逐行 \n、`elab-<通道>.log`）。 */
+  const doExport = useCallback((): void => {
+    const text = lines.map((l) => stripAnsi(l.text)).join('\n')
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `elab-${channel}.log`
+    a.click()
+    // 立即 revoke 会让部分浏览器下载失败，延后一拍（与驾驶舱同因）。
+    window.setTimeout(() => URL.revokeObjectURL(a.href), 4000)
+  }, [lines, channel])
+
   return (
     <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       {/* ── 通道切换 + 跟随开关 ── */}
@@ -184,23 +196,42 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
           })}
 
         {serialMode ? null : (
-          <button
-            type="button"
-            onClick={() => setFollow((v) => !v)}
-            title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
-            style={{
-              marginLeft: 'auto',
-              padding: '1px 6px',
-              fontSize: '11px',
-              borderRadius: '4px',
-              border: '1px solid var(--elab-border)',
-              background: 'transparent',
-              color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
-              cursor: 'pointer',
-            }}
-          >
-            {follow ? '\u25be 跟随' : '\u21ba 恢复'}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={doExport}
+              disabled={lines.length === 0}
+              title="导出当前通道的纯文本日志（.log）"
+              style={{
+                marginLeft: 'auto',
+                padding: '1px 6px',
+                fontSize: '11px',
+                borderRadius: '4px',
+                border: '1px solid var(--elab-border)',
+                background: 'transparent',
+                color: lines.length === 0 ? 'var(--elab-fg-dimmed)' : 'var(--elab-fg-secondary)',
+                cursor: lines.length === 0 ? 'default' : 'pointer',
+              }}
+            >
+              {'\u2913 导出'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setFollow((v) => !v)}
+              title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
+              style={{
+                padding: '1px 6px',
+                fontSize: '11px',
+                borderRadius: '4px',
+                border: '1px solid var(--elab-border)',
+                background: 'transparent',
+                color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
+                cursor: 'pointer',
+              }}
+            >
+              {follow ? '\u25be 跟随' : '\u21ba 恢复'}
+            </button>
+          </>
         )}
       </div>
 

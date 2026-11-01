@@ -196,6 +196,30 @@
   color: var(--elab-fg-primary);
 }
 
+/* HEX 分类着色：控制字节 / DEL / 高位（可打印沿用默认前景；只引用令牌） */
+.hexGrid {
+  padding: 4px var(--elab-space-2);
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--elab-fg-primary);
+}
+
+.bCtl {
+  color: var(--elab-ansi-bright-yellow);
+}
+
+.bDel {
+  color: var(--elab-ansi-bright-red);
+}
+
+.bHigh {
+  color: var(--elab-ansi-bright-cyan);
+}
+
+.bPad {
+  color: var(--elab-fg-faint);
+}
+
 /* ── 终端视图 ── */
 .term {
   padding: var(--elab-space-2) var(--elab-space-3);

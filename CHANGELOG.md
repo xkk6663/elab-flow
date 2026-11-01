@@ -58,18 +58,40 @@ V2.1.0 把 V2.0 的闭环能力**装进 DSH 右栏**，并把串口从"看输出
   license；`elab pkg` 全命令集（search / install / bootstrap / list / activate /
   remove / update / verify / index），`pkg index --check` 在 CI 拦索引漂移。
 
+### P1 收口（回放 / 数据面 / 装配 / 漂移复探测）
+
+- **波形回放器**：录制 JSONL 可在面板中纯前端回放（按 `seq/t_us` 重建时间轴、
+  可拖动进度与倍速），只读且**不走 sessionId**，回放与实时互不干扰。
+- **RawData 数据面补齐**：字节页 TAB 行尾、发送历史（`localStorage`
+  `elab.serial.send.history` ≤50 条）、文件发送（上限 2000 行）、HEX 逐字节
+  着色（`ctl/del/print/high/pad` 分类，全部用主题令牌）。
+- **DSH 面板日志导出**：`EvidenceTail` 一键导出当前日志尾为纯文本（与独立
+  驾驶舱同一导出语义）。
+- **`cockpit/profiles/*.yaml` 槽位装配**：内核 `_profile_summary()` 解析后经
+  `capabilities.meta.profile` 下发，前端 `workspaces.ts` 据此重排/裁剪右列
+  Tab 与项目工具启停 —— 换一套装配 = 加/改一份 yaml，业务代码零改动。
+- **`elab skill --adapt`**：生成适配 skill（`skills/elab-adapt/SKILL.md` 并镜像到
+  DSH 发现路径 `.agents/skills/elab-adapt/SKILL.md`），E1–E6 证据分级与
+  status 语义随包内真相一起下发。
+- **适配 drift 复探测**：`POST /elab/api/adapt` 新增只读 `action=check`，
+  面板适配 banner 显示「配置一致 / 工程已漂移 / 配置缺失」徽标与「复探测」按钮。
+- **`tests/test_adapt.py`**：10 例覆盖探测（A/B 两类工程合同）、T3 拒写、
+  written→identical→check、hand-edited 人工接管保护（`--force` 留 `.bak`）、
+  未匹配芯片拒写、atwp 波特率漂移 → `drift`。
+
 ### 文档
 
 - README 重写**项目定位（一个内核三种入口）/ 使用流程 / DSH 面板五步 / 17 工具总表 /
   共享解码**，并更新已知限制与限制边界。
 - 新增 [docs/需求对照与改进.md](docs/需求对照与改进.md)：逐项对照驾驶舱 R1–R10、
-  插件目标与非目标、串口 P1–P3.5、市场 R1–R4，并给出 P0/P1/P2 backlog。
+  插件目标与非目标、串口 P1–P3.5、市场 R1–R4，并给出 P0/P1/P2 backlog
+  （P0/P1 已全部收口，P1 证据见 §5）。
 
 ### 质量门
 
-- 插件门禁 **94 用例全绿**（含 `boundary.test.mjs` 分层守卫、主题硬规则、
-  客户端契约）；内核 `unittest` 全绿（`tests/test_serialmon.py` **44 例**，
-  新增"开会话即解码 / 未知解码器拒绝"两例）。
+- 插件门禁 **99 用例全绿**（含 `boundary.test.mjs` 分层守卫、主题硬规则、
+  双入口 SSE 复用、客户端契约）；内核 `unittest` 全绿（`tests/test_serialmon.py`
+  **44 例**、`tests/test_adapt.py` **10 例**）。
 
 ## [V2.0.0] — 2026-10-08（OTA 平台化 · 双槽 A/B Bank · 组合工程）
 

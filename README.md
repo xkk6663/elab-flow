@@ -6,7 +6,7 @@
 
 业务工程源码**零改动** · Python **仅标准库** · 驾驶舱前端产物已入仓（运行时不需要 Node）
 
-**本期新增**：串口工作区（行 / 字节 / 终端 / 波形四视图 + 发送面板 + 协议解码 + 录制导出）· **共享解码**（agent 选定 decoder，人与 agent 看同一份帧）· DSH 插件面板（每通道独立启动按钮）· 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md)
+**本期新增**：串口工作区（行 / 字节 / 终端 / 波形四视图 + 发送面板 + 协议解码 + 录制导出 + **录制回放**）· **共享解码**（agent 选定 decoder，人与 agent 看同一份帧）· DSH 插件面板（每通道独立启动按钮 + 日志导出 + 适配漂移复探测）· `cockpit/profiles/*.yaml` 槽位装配 · 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md)
 
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)

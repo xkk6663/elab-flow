@@ -150,6 +150,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-p", "--project", help="按项目推导芯片")
     p.add_argument("--chip", help="按 vendor/id 指定芯片")
     p.add_argument("--all", action="store_true", help="为所有芯片生成")
+    p.add_argument("--adapt", action="store_true",
+                   help="生成工程适配专用 skill（skills/elab-adapt/SKILL.md；与平台 skill 无关）")
 
     p = sub.add_parser("pkg",
                        help="芯片适配包：社区市场搜索 / 安装 / 卸载 / 校验（一切芯片差异皆包）")
@@ -849,6 +851,13 @@ def cmd_pkg(cfg: Config, args) -> int:
 # ── skill：生成 per-chip AI skill ─────────────────────────────────
 def cmd_skill(cfg: Config, args) -> int:
     silent = (lambda *a, **k: None) if args.json else print
+    if getattr(args, "adapt", False):
+        written = skillgen.generate_adapt(cfg, log=silent)
+        if args.json:
+            print(json.dumps(written, ensure_ascii=False, indent=2))
+        else:
+            print(f"[elab] 已生成 {len(written)} 份工程适配 skill（内容源自 adapt 探测契约）")
+        return 0
     written = skillgen.generate(cfg, project=args.project, chip_ref=args.chip,
                                 all_chips=args.all, log=silent)
     if args.json:

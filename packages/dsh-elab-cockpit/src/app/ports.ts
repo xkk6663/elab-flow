@@ -90,7 +90,7 @@ export interface IcdPort {
   runs(sessionId?: string): Promise<{ runs: unknown[]; active: unknown[] }>
   discover(sessionId?: string, refresh?: boolean): Promise<DiscoverResponse>
   adapt(opts: {
-    action: 'probe' | 'write'
+    action: 'probe' | 'write' | 'check'
     path: string
     name?: string
     force?: boolean

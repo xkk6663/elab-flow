@@ -51,6 +51,11 @@ test('硬规则 2：--dsw-* / --dsh-* 只出现在 theme/dsw-map.ts', () => {
 
 test('硬规则 3：组件引用的 --elab-* 都在 dsw-map.ts 中定义', () => {
   const defined = new Set([...mapSrc.matchAll(/(--elab-[\w-]+)\s*:/g)].map((m) => m[1]))
+  // ANSI 16 色由 ansiBlock() 从 ANSI_DARK / ANSI_LIGHT 数组生成，源码里没有字面定义；
+  // 名字取自数组首列（`['bright-cyan', '#…']`），与生成逻辑同源。
+  for (const m of mapSrc.matchAll(/^\s*\['([a-z-]+)', '#[0-9a-fA-F]{3,8}'\],/gm)) {
+    defined.add(`--elab-ansi-${m[1]}`)
+  }
   assert.ok(defined.size >= 20, `dsw-map.ts 定义数异常: ${defined.size}`)
   for (const f of componentFiles) {
     const src = readFileSync(f, 'utf8')

@@ -98,8 +98,8 @@ export const STATIC_WORKSPACES: WorkspaceDef[] = [buildWs, flashWs, serialWs];
  * 工作区，日志合进一个通道（step-enter/exit marker 区分是哪次工具），
  * 导航恒为 构建|烧录|串口|工具 四项，永不随工具数量膨胀。
  */
-function toolsWs(card: ProjectCard | null): WorkspaceDef | null {
-  const tools = card?.tools ?? [];
+function toolsWs(card: ProjectCard | null, caps: Capabilities | null): WorkspaceDef | null {
+  const tools = (card?.tools ?? []).filter((t) => toolEnabled(t.name, caps));
   if (tools.length === 0) return null;
   return {
     id: "tools",
@@ -108,22 +108,45 @@ function toolsWs(card: ProjectCard | null): WorkspaceDef | null {
     steps: tools.map((t) => `tool:${t.name}`),
     dim: () => false,
     dimReason: () => "",
-    emptyText: (c) => {
-      const names = (c?.tools ?? []).map((t) => `「${t.label}」`).join("、");
+    emptyText: () => {
+      const names = tools.map((t) => `「${t.label}」`).join("、");
       return `尚无工具输出。上方按钮发起项目声明工具（${names}，命令在 projects/*.yaml 的 tools: 节），输出实时进本工作区。`;
     },
   };
 }
 
+/* ── profile 装配（R7 / P1-4：cockpit/profiles/*.yaml → capabilities.meta.profile）── */
+
+function profileOf(caps: Capabilities | null) {
+  return caps?.meta?.profile ?? null;
+}
+
+/** 工具启停：exclude 优先；include 非空 = 只启用列出的工具。 */
+function toolEnabled(name: string, caps: Capabilities | null): boolean {
+  const t = profileOf(caps)?.tools;
+  if (!t) return true;
+  if ((t.exclude ?? []).includes(name)) return false;
+  const inc = t.include ?? [];
+  return inc.length === 0 || inc.includes(name);
+}
+
 /**
- * 当前工程的完整工作区列表 = 静态三个 + 「工具」页（卡片声明了 tools: 才出现）。
+ * 当前工程的完整工作区列表 = 静态三个 + 「工具」页（卡片声明了 tools: 才出现），
+ * 再按 profile 的 `workspaces` 重排/裁剪（缺省或空 = 内置顺序）。
  */
 export function workspacesFor(
   card: ProjectCard | null,
-  _caps: Capabilities | null,
+  caps: Capabilities | null,
 ): WorkspaceDef[] {
-  const tools = toolsWs(card);
-  return tools ? [...STATIC_WORKSPACES, tools] : [...STATIC_WORKSPACES];
+  const tools = toolsWs(card, caps);
+  const defs = tools ? [...STATIC_WORKSPACES, tools] : [...STATIC_WORKSPACES];
+  const wanted = profileOf(caps)?.workspaces ?? [];
+  if (wanted.length === 0) return defs;
+  const ordered = wanted
+    .map((id) => defs.find((w) => w.id === id))
+    .filter((w): w is WorkspaceDef => w !== undefined);
+  // profile 写了未知 id（内核/前端版本不一致）→ 原地回退，不留空右列
+  return ordered.length > 0 ? ordered : defs;
 }
 
 /** 按 id 找工作区；找不到返回 null（调用方决定回退） */

@@ -227,6 +227,17 @@ export interface Capabilities {
     plans?: Array<{ id: string; title: string; steps: string[]; requires_hardware?: boolean }>;
     channels?: string[];
     serial?: SerialMeta;
+    /**
+     * 驾驶舱装配清单（`cockpit/profiles/*.yaml`，R7 / P1-4）：
+     * 决定右列 Tab 的顺序/集合与项目工具的启停；缺失 = 内置集合。
+     */
+    profile?: {
+      name: string;
+      path?: string;
+      available?: string[];
+      workspaces?: string[];
+      tools?: { include?: string[]; exclude?: string[] };
+    };
   };
   serial: {
     pyserial: boolean;

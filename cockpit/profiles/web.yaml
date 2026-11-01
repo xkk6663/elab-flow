@@ -1,0 +1,19 @@
+# cockpit/profiles/web.yaml —— 驾驶舱装配清单（R7 / P1-4）
+#
+# 装配两件事（其余能力仍由内核自描述 + 工程 yaml 派生）：
+#   ① workspaces：右列 Tab 的顺序与集合（id 见 cockpit/web/src/workspaces.ts）；
+#      留空 = 内置集合（build / flash / serial / tools）。
+#   ② tools：项目声明工具（projects/*.yaml 的 tools:）的启停；
+#      include 非空 = 只启用列出的工具，exclude 优先剔除。
+#
+# 激活顺序：elab.host.yaml 的 `profile: <name>` → web.yaml → 排序第一份。
+# 换一套装配 = 复制本文件改名并改上面两节；业务代码零改动。
+profile: web
+workspaces:
+  - build
+  - flash
+  - serial
+  - tools
+tools:
+  include: []      # 空 = 全部启用
+  exclude: []

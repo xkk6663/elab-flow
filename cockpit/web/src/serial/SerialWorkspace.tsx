@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { api } from "../api/client";
 import type { Capabilities, SerialChunk, SerialFormat } from "../api/types";
 import { parseAnsi } from "../theme/ansi";
@@ -27,7 +27,7 @@ import {
   b64ToBytes,
   bytesToB64,
 } from "./ansiTerminal";
-import { asciiOf, captureText, hexDump, textOf } from "./bytes";
+import { asciiOf, captureText, hexDump, hexDumpRows, textOf } from "./bytes";
 import type { SerialRepr } from "./bytes";
 import type { SerialStream } from "./useSerialStream";
 import s from "./SerialWorkspace.module.css";
@@ -75,6 +75,33 @@ const MAX_BYTE_BLOCKS = 300;
 /** 波形最大回看字节（超出只取最近一段，避免每次轮询都重解 1 MiB） */
 const MAX_WAVE_BYTES = 64 * 1024;
 
+/** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆 */
+const HISTORY_KEY = "elab.serial.send.history";
+const HISTORY_MAX = 50;
+/** 文件按行发送的行数上限（按行逐条发，太多行会把发送面板占住很久） */
+const MAX_FILE_LINES = 2000;
+
+function loadHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (raw === null) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((x): x is string => typeof x === "string").slice(-HISTORY_MAX)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(items: string[]): void {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)));
+  } catch {
+    // 隐私模式/配额满：历史只是便利，不写也不影响发送
+  }
+}
+
 export interface SerialWorkspaceProps {
   stream: SerialStream;
   caps: Capabilities | null;
@@ -91,6 +118,15 @@ function cls(name: string): string {
     .filter(Boolean)
     .join(" ");
 }
+
+/** HEX 视图中字节分类 → 颜色 class（可打印不额外着色） */
+const HEX_CELL_CLS: Record<"ctl" | "del" | "print" | "high" | "pad", string> = {
+  ctl: s.bCtl,
+  del: s.bDel,
+  print: "",
+  high: s.bHigh,
+  pad: s.bPad,
+};
 
 /** 在纯文本里高亮搜索词（大小写不敏感；不做正则，避免用户输入被当成语法） */
 function highlight(text: string, query: string, keyBase: string): ReactNode {
@@ -146,6 +182,11 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [eol, setEol] = useState("crlf");
   const [notice, setNotice] = useState<string | null>(null);
   const [decoder, setDecoder] = useState("justfloat");
+  /** 发送历史（↑/↓ 调取；跨会话记忆） */
+  const [history, setHistory] = useState<string[]>(loadHistory);
+  const [histIdx, setHistIdx] = useState(-1);
+  const [fileBusy, setFileBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<{
@@ -188,7 +229,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       if (q && !header.toLowerCase().includes(q) && !body.toLowerCase().includes(q)) {
         return [];
       }
-      return [{ c, header, body }];
+      return [{ c, header, body, rows: repr === "hex" ? hexDumpRows(bytes) : null }];
     });
   }, [filtered, repr, q]);
 
@@ -328,6 +369,16 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   }, [filtered, stream.snap?.port]);
 
+  const remember = useCallback((text: string): void => {
+    setHistory((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1] === text) return prev;
+      const next = [...prev, text].slice(-HISTORY_MAX);
+      saveHistory(next);
+      return next;
+    });
+    setHistIdx(-1);
+  }, []);
+
   const doSend = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
@@ -343,12 +394,91 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           `✓ 已发送 ${r.written} B → ${r.port}@${r.baud}` +
             (r.via === "monitor" ? "（经监视会话，回显见实时流）" : ""),
         );
+        remember(draft);
         setDraft("");
       } catch (err) {
         setNotice(`✗ ${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [draft, running, sendFormat, eol, stream],
+    [draft, running, sendFormat, eol, stream, remember],
+  );
+
+  /** ↑/↓ 调取发送历史 */
+  const onDraftKey = useCallback(
+    (e: KeyboardEvent<HTMLInputElement>): void => {
+      const key = e.key;
+      if (key !== "ArrowUp" && key !== "ArrowDown") return;
+      if (history.length === 0) return;
+      e.preventDefault();
+      if (key === "ArrowUp") {
+        const next = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1);
+        setHistIdx(next);
+        setDraft(history[next]);
+        return;
+      }
+      if (histIdx === -1) return;
+      const next = histIdx + 1;
+      if (next >= history.length) {
+        setHistIdx(-1);
+        setDraft("");
+      } else {
+        setHistIdx(next);
+        setDraft(history[next]);
+      }
+    },
+    [history, histIdx],
+  );
+
+  /** 文件按行发送：逐行 await（同一口写穿），有界行数，失败即停并报第几行 */
+  const doSendFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>): Promise<void> => {
+      const file = e.currentTarget.files?.[0];
+      e.currentTarget.value = ""; // 允许重复选同一个文件
+      if (!file || running) return;
+      setNotice(null);
+      let text = "";
+      try {
+        text = await file.text();
+      } catch (err) {
+        setNotice(`✗ 读取文件失败：${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      let lines = text.split(/\r\n|\r|\n/);
+      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      if (lines.length === 0) {
+        setNotice("✗ 文件里没有可发送的行");
+        return;
+      }
+      let clipped = false;
+      if (lines.length > MAX_FILE_LINES) {
+        lines = lines.slice(0, MAX_FILE_LINES);
+        clipped = true;
+      }
+      setFileBusy(true);
+      let sent = 0;
+      let fail = "";
+      for (const line of lines) {
+        if (line === "") continue;
+        try {
+          const r = await stream.send(line, { format: sendFormat, eol: sendFormat === "hex" ? "none" : eol });
+          if (!r.ok) {
+            fail = r.error ?? "未知原因";
+            break;
+          }
+          sent += 1;
+        } catch (err) {
+          fail = err instanceof Error ? err.message : String(err);
+          break;
+        }
+      }
+      setFileBusy(false);
+      if (fail !== "") {
+        setNotice(`✗ 文件发送中断：第 ${sent + 1}/${lines.length} 行失败（${fail}）`);
+        return;
+      }
+      setNotice(`✓ 文件已按行发送 ${sent} 行 → ${file.name}${clipped ? `（只发前 ${MAX_FILE_LINES} 行）` : ""}`);
+    },
+    [running, sendFormat, eol, stream],
   );
 
   // 展示**当前缓冲**的口径（清空/被环形挤出后归零），而不是会话生命周期的
@@ -517,7 +647,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
             </div>
           ) : (
             <div className={s.bytesWrap}>
-              {byteBlocks.map(({ c, header, body }) => (
+              {byteBlocks.map(({ c, header, body, rows }) => (
                 <div key={c.seq} className={s.block}>
                   <div className={[s.blockHead, c.dir === "tx" ? s.tx : s.rx].join(" ")}>
                     <span className={s.dirTag}>{c.dir.toUpperCase()}</span>
@@ -526,7 +656,31 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                       {header} · {c.t_us}μs
                     </span>
                   </div>
-                  <pre className={s.pre}>{body}</pre>
+                  {rows === null ? (
+                    <pre className={s.pre}>{body}</pre>
+                  ) : (
+                    <div className={s.hexGrid}>
+                      {rows.map((row, ri) => (
+                        <div key={ri}>
+                          <span className={s.bPad}>{row.offset}</span>
+                          {"  "}
+                          {row.cells.map((cell, ci) => (
+                            <span key={ci} className={HEX_CELL_CLS[cell.cls]}>
+                              {cell.text}
+                              {ci === 7 ? "  " : ci === row.cells.length - 1 ? "" : " "}
+                            </span>
+                          ))}
+                          {"  |"}
+                          {row.ascii.map((cell, ci) => (
+                            <span key={ci} className={HEX_CELL_CLS[cell.cls]}>
+                              {cell.text}
+                            </span>
+                          ))}
+                          {"|"}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -628,10 +782,31 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           aria-label="串口发送内容"
           value={draft}
           disabled={running}
-          onChange={(e) => setDraft(e.currentTarget.value)}
+          onKeyDown={onDraftKey}
+          onChange={(e) => {
+            setDraft(e.currentTarget.value);
+            setHistIdx(-1);
+          }}
         />
         <Button size="sm" variant="primary" type="submit" disabled={running || !draft.trim()}>
           发送
+        </Button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".txt,.csv,.log,.json,.hex,text/plain"
+          onChange={(e) => void doSendFile(e)}
+          style={{ display: "none" }}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          type="button"
+          disabled={running || fileBusy}
+          onClick={() => fileRef.current?.click()}
+          title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
+        >
+          {fileBusy ? "发送中…" : "文件"}
         </Button>
       </form>
 

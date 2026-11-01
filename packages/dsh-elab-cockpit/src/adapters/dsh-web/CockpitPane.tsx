@@ -29,6 +29,7 @@ import { channelOfEvent, channelOfStep } from '../../domain/channels.ts'
 import type { LogChannelId } from '../../domain/channels.ts'
 import { LOG_CHANNELS } from '../../domain/channels.ts'
 import type { PlanView } from '../../domain/pipeline.ts'
+import type { AdaptCheck } from '../../domain/adapt.ts'
 import type { SerialMonitorSnapshot } from '../../domain/icd.ts'
 import { elabApi } from '../kernel-http/icd-client.ts'
 import { createRunEventsPort } from './events/run-events.ts'
@@ -127,11 +128,30 @@ function AdaptBanner(props: {
   pending: Array<{ path: string; dirname: string }>
   adaptingPath: string | null
   lastAdapted: string | null
+  /** 最近一次复探测结果（null = 还没探测过）。 */
+  check: AdaptCheck | null
+  /** 复探测在途（按钮防抖）。 */
+  checking: boolean
+  /** 已接入工程的磁盘根（null = 工程列表还没给出 root，无法复探测）。 */
+  checkRoot: string | null
   error: string | null
   disabled: boolean
   onAdapt(path: string): void
+  onCheck(name: string): void
 }): ReactNode {
-  const { phase, pending, adaptingPath, lastAdapted, error, disabled, onAdapt } = props
+  const {
+    phase,
+    pending,
+    adaptingPath,
+    lastAdapted,
+    check,
+    checking,
+    checkRoot,
+    error,
+    disabled,
+    onAdapt,
+    onCheck,
+  } = props
 
   if (phase === 'adapting') {
     return (
@@ -169,6 +189,23 @@ function AdaptBanner(props: {
   }
   if (pending.length === 0) {
     if (phase === 'bound' && lastAdapted !== null) {
+      // 复探测结果只对**当前**工程有效：切工程后旧结果不作数（避免误报 drift）。
+      const badge = check !== null && check.name === lastAdapted ? check : null
+      const badgeText =
+        badge === null
+          ? null
+          : badge.status === 'identical'
+            ? '配置一致'
+            : badge.status === 'drift'
+              ? '工程已漂移（需重新适配）'
+              : '配置缺失（需重新适配）'
+      const badgeColor =
+        badge === null
+          ? 'var(--elab-fg-muted)'
+          : badge.status === 'identical'
+            ? 'var(--elab-status-ok)'
+            : 'var(--elab-status-fail)'
+      const checkDisabled = disabled || checking || checkRoot === null
       return (
         <div
           style={{
@@ -177,9 +214,42 @@ function AdaptBanner(props: {
             fontSize: '11px',
             color: 'var(--elab-status-ok)',
             borderBottom: '1px solid var(--elab-border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            minWidth: 0,
           }}
         >
-          {`已接入工程「${lastAdapted}」——建议跑一次三连自证（体检+编译）`}
+          <span
+            style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
+            {`已接入工程「${lastAdapted}」——建议跑一次三连自证（体检+编译）`}
+          </span>
+          {badgeText === null ? null : (
+            <span style={{ flex: '0 0 auto', color: badgeColor }}>{`复探测：${badgeText}`}</span>
+          )}
+          <button
+            type="button"
+            disabled={checkDisabled}
+            onClick={() => onCheck(lastAdapted)}
+            title={
+              checkRoot === null
+                ? '工程列表尚未给出根目录，暂不可复探测'
+                : '只读复探测：重新探测后与 projects/<name>.yaml 逐字节比对（不写盘）'
+            }
+            style={{
+              flex: '0 0 auto',
+              padding: '0 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: 'var(--elab-accent)',
+              cursor: checkDisabled ? 'default' : 'pointer',
+            }}
+          >
+            {checking ? '探测中…' : '复探测'}
+          </button>
         </div>
       )
     }
@@ -487,6 +557,11 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
   const steps: LadderStep[] = snap.run.steps
   const running = snap.run.status === 'running'
+  /** 适配复探测在途（P1-5）：只读，不写盘。 */
+  const [checkingAdapt, setCheckingAdapt] = useState(false)
+  /** 已接入工程的磁盘根（复探测要 POST 给内核）；缺 root 时按钮禁用。 */
+  const adaptCheckRoot =
+    snap.projects.find((p) => p.name === snap.adapt.lastAdapted)?.root ?? null
   const failure = useMemo(() => {
     for (let i = steps.length - 1; i >= 0; i -= 1) {
       if (steps[i].state === 'failed') {
@@ -676,9 +751,17 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             .map((c) => ({ path: c.path, dirname: c.dirname }))}
           adaptingPath={snap.adapt.target}
           lastAdapted={snap.adapt.lastAdapted}
+          check={snap.adapt.check}
+          checking={checkingAdapt}
+          checkRoot={adaptCheckRoot}
           error={snap.adapt.error}
           disabled={running || snap.busy}
           onAdapt={(path) => void service.adaptProject(path)}
+          onCheck={(name) => {
+            if (adaptCheckRoot === null) return
+            setCheckingAdapt(true)
+            void service.checkAdapt(name, adaptCheckRoot).finally(() => setCheckingAdapt(false))
+          }}
         />
       ) : null}
 
