@@ -53,11 +53,11 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 |---|---|---|---|
 | **CLI `elab`** | `./elab loop -p <name>`（Windows 用 `elab.cmd`） | 脚本 / CI / 无人值守 / agent 直接调用 | 一行命令 + 可 grep 的证据行 |
 | **独立驾驶舱** | 双击 `cockpit.cmd`，或 `python -m cockpit.server` → `http://127.0.0.1:8333/` | 人坐在桌面前盯全程：工程轨 / 阶段轨 / 证据轨三列全屏 | Edge `--app` 独立窗口；已在跑则只开 UI |
-| **DSH 右栏面板** | 在 DSH 安装 `packages/dsh-elab-cockpit`，右栏开 elab tab | agent 在跑、你顺手看：窄栏阶梯 + 日志尾 + 串口页 + 设置页 | 工具层插件：托管内核子进程，只走 loopback HTTP ICD |
+| **DSH 右栏面板** | 安装独立插件仓 [`dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit)，右栏开 elab tab | agent 在跑、你顺手看：窄栏阶梯 + 日志尾 + 串口页 + 设置页 | 工具层插件：托管内核子进程，只走 loopback HTTP ICD |
 
 - 三者**不各有一套实现**：DSH 面板不 import 内核源码、不复制业务逻辑；它 `spawn` 同一个
   `python -m cockpit.server`，把 `/elab/api/*` 与 `/elab/events` 反代过来
-  （分层门禁 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 会拦违规）。
+  （分层门禁 `test/boundary.test.mjs` 在插件仓内会拦违规）。
 - **步骤 / 档位 / 串口词汇的唯一事实源在内核**（`cockpit/server.py` 的
   `STEP_META` / `KERNEL_PLANS` / `SERIAL_META`）。工具层只渲染；内核加一步，面板与 agent 工具自动跟上。
 
@@ -68,7 +68,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 | **业务层（内核）** | `services/elab/**`、`cockpit/server.py` | 闭环编排、编译/烧录/调试、串口字节面、OTA、适配包协议；`STEP_META` / `KERNEL_PLANS` 是步骤与档位的唯一事实源 |
 | **业务层（前端）** | `cockpit/web/**` | 零依赖驾驶舱 UI（React 产物已入仓，运行时只有 Python） |
 | **数据层** | `packs/official/**`、`packs/installed/**`、`market/index.json` | 芯片参数 / 厂商指纹 / 平台坑位（芯片知识的唯一宿主）；零服务器社区市场索引 |
-| **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件：右栏面板可视化、进程托管、`elab_*` agent 工具。与内核**只通过 loopback HTTP ICD 通信**，不 import 源码 |
+| **工具层（独立仓）** | [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit) | DSH 插件：右栏面板可视化、进程托管、`elab_*` agent 工具。与内核**只通过 loopback HTTP ICD 通信**，不 import 源码；不在本仓 |
 | 工程 | `projects/**`、`examples/**` | 工程接入 YAML 与实弹样例 |
 
 <a id="quickstart"></a>
@@ -88,8 +88,8 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 - 要求：**Python ≥ 3.10（无第三方依赖）**；上板另需 CMake + Ninja + ARM GCC + OpenOCD
 - Windows：`elab.cmd`；桌面场景直接双击 `cockpit.cmd`（幂等，已在跑只开 UI）
 - 没有探针时 `doctor` / `build` / `ci` 照样可跑（`loop` 会在 flash 步失败）
-- **DSH 插件**：把 `packages/dsh-elab-cockpit` 的绝对路径交给 DSH 的 `plugin_manager install_bundle`
-  （开发期可用 Junction 指向本仓），重载窗口后右栏出现 elab 面板
+- **DSH 插件**：单独安装 [`dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit)
+  （开发期可用 Junction 把该仓链接进 DSH profile 的 `node_modules`），重载窗口后右栏出现 elab 面板
 
 <a id="flow"></a>
 
@@ -141,8 +141,8 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 
 ### DSH 面板（窄栏版，agent 在跑时你在旁边看）
 
-**安装（一次）**：把 `packages/dsh-elab-cockpit` 的绝对路径交给 DSH 的
-`plugin_manager install_bundle`（开发期可用 Junction 指向本仓），重载窗口。
+**安装（一次）**：从独立仓 [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit)
+安装插件（开发期可用 Junction 把该仓链接进 DSH profile 的 `node_modules`），重载窗口。
 
 **用起来 5 步**：
 

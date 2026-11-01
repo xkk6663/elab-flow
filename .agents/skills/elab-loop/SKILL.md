@@ -53,8 +53,8 @@ loopback HTTP ICD 与它说话 —— **工具层没有业务逻辑，业务变�
 - 业务代码 → `services/elab/**`（内核）、`projects/**`（适配）；
 - 步骤标签 / 加步骤 / 档位定义 → `cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`
   （内核自描述，工具层自动跟随）；
-- `packages/dsh-elab-cockpit` 是工具层：只有修工具 bug 才碰；
-- 门禁：`packages/dsh-elab-cockpit/test/boundary.test.mjs`。
+- DSH 插件已拆为独立仓 `xkk6663/dsh-elab-cockpit`（工具层）：只有修工具 bug 才碰，不在本仓；
+- 门禁：插件仓的 `test/boundary.test.mjs`。
 
 ## 常见故障 → 处置
 
