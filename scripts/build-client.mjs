@@ -11,9 +11,9 @@
  */
 import { createRequire } from 'node:module'
 
-// esbuild 装在 cockpit/web 里（仓库复用它的构建依赖）；用 createRequire 拿绝对路径，
-// 避免相对层级写错（已踩过一次 ../../ vs ../../../）。
-const _req = createRequire('C:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/web/package.json')
+// esbuild 是本包自己的 devDependency（独立仓不再复用宿主仓库的构建依赖）。
+// 用 createRequire(import.meta.url) 从本包 node_modules 解析，路径与仓库位置无关。
+const _req = createRequire(import.meta.url)
 const { build } = _req('esbuild')
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

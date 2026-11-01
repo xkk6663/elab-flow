@@ -114,7 +114,8 @@ test('parsePortFromBanner 解析真实横幅', () => {
 })
 
 test('looksLikeElabRoot 需要 cockpit/server.py + services/elab', () => {
-  assert.equal(looksLikeElabRoot(process.cwd()), true)
+  // 独立仓不再位于 elab 仓库根下，用临时夹具代替 process.cwd()
+  assert.equal(looksLikeElabRoot(makeElabFixture()), true)
   assert.equal(looksLikeElabRoot('/definitely/not/elab'), false)
   assert.equal(looksLikeElabRoot('relative/path'), false)
 })

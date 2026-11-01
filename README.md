@@ -56,16 +56,18 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 | 串口打不开 | 装 `pyserial`（`pip install pyserial`），并确认没有被其它进程占用 |
 | 面板提示"内核旧" | `git -C <elabRoot> pull --ff-only` 后重开面板 |
 
+## 安装
+
+本仓库即插件包本体（`package.json` 自带 `dsh.bundle` / `dsh.client` 声明），仓库已打
+GitHub topic `dsh-plugin` 供 DSH 市场发现。本地开发时把本仓链接进 DSH profile 的
+`node_modules` 即可，无需拷贝源码。
+
 ## 开发与验证
 
 ```bash
-# 插件单测（仓库根执行）
-node --experimental-strip-types --test 'packages/dsh-elab-cockpit/test/*.test.mjs'
-
-# 构建产物（包目录执行）
-node ../../cockpit/web/node_modules/typescript/bin/tsc -p tsconfig.host.json --outDir lib
-node scripts/build-client.mjs
-node scripts/verify-client-contract.mjs
+npm install          # devDeps：typescript / esbuild / @types/*
+npm test             # 单测（含 boundary / style-rules 门禁）
+npm run build        # Host 半 tsc → lib + Client 半打包 + 契约校验
 ```
 
 分层纪律：工具层不 import 内核源码，只走 loopback HTTP ICD；门禁见 `test/boundary.test.mjs`。

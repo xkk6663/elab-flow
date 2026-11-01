@@ -16,10 +16,7 @@
       "DOM",
       "DOM.Iterable"
     ],
-    "types": [],
-    "typeRoots": [
-      "C:/Users/xiao1/.dsh/profiles/desktop/node_modules/@types"
-    ]
+    "types": []
   },
   "include": [
     "src/adapters/dsh-web/**/*.ts",
