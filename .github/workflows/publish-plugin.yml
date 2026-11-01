@@ -1,0 +1,62 @@
+# 镜像发布：把本仓 packages/dsh-elab-cockpit 的提交历史推成
+# xkk6663/dsh-elab-cockpit（只读镜像，供 DSH 插件市场按包分发）。
+#
+# 单一事实源 = 本仓。镜像仓不接受手工提交（README 已标只读）。
+# 触发：打 plugin-v* tag（推荐），或手动 workflow_dispatch。
+#
+# 需要仓库 secret PLUGIN_MIRROR_TOKEN：一个对 xkk6663/dsh-elab-cockpit 有
+# contents:write 的 PAT（GITHUB_TOKEN 只能写本仓，推不到镜像仓）。
+# 缺 secret 时本工作流**明确红灯**，不会静默跳过。
+
+name: publish-plugin
+
+on:
+  push:
+    tags:
+      - 'plugin-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-plugin
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # subtree split 需要完整历史
+
+      - name: 校验镜像 token
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.PLUGIN_MIRROR_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::缺少 secret PLUGIN_MIRROR_TOKEN（需对 xkk6663/dsh-elab-cockpit 有 contents:write）"
+            exit 1
+          fi
+
+      - name: 切出插件子树历史
+        shell: bash
+        run: |
+          git config user.name  "elab-flow mirror bot"
+          git config user.email "mirror@elab-flow.invalid"
+          git subtree split --prefix=packages/dsh-elab-cockpit -b plugin-mirror
+          echo "子树最新提交：$(git log --oneline -1 plugin-mirror)"
+
+      # --force：镜像仓是单向输出，历史以本仓为准。
+      - name: 推送镜像仓
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.PLUGIN_MIRROR_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          git push --force \
+            "https://x-access-token:${TOKEN}@github.com/xkk6663/dsh-elab-cockpit.git" \
+            plugin-mirror:main
+          echo "✓ 已镜像 plugin-mirror → xkk6663/dsh-elab-cockpit:main（来源 ${REF_NAME}）"

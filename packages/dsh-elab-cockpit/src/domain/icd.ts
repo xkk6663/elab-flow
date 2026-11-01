@@ -663,12 +663,16 @@ export interface EnvResponse {
 
 export type BootstrapRequest =
   | { action: 'set-root'; dir: string }
-  | { action: 'clone'; url: string; dir: string; confirm: true };
+  | { action: 'clone'; url: string; dir: string; confirm: true }
+  | { action: 'install-toolchain'; pack?: string; confirm: true }
+  | { action: 'download-kernel'; version: string; confirm: true };
 
 export interface BootstrapResponse {
   ok: boolean;
-  action?: 'set-root' | 'clone';
+  action?: 'set-root' | 'clone' | 'install-toolchain' | 'download-kernel';
   elabRoot?: string;
+  /** install-toolchain：安装结果摘要（工具数 / 告警）。 */
+  envPack?: { packId: string; tools: number; warnings: string[] };
   error?: { code: string; message: string };
 }
 

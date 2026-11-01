@@ -38,6 +38,11 @@ def to_os_path(p) -> str:
     return os.path.normpath(str(p))
 
 
+def _env_path(name: str) -> str:
+    """读路径类环境变量覆盖：空 / 全空白视为未设置（回退 yaml 事实源）。"""
+    return (os.environ.get(name) or "").strip()
+
+
 class Config:
     """elab-flow 配置树。
 
@@ -234,7 +239,20 @@ class Config:
 
 
 class Host:
-    """L0 主机层的**已解析视图**：把 elab.host.yaml 变成可直接用的路径。"""
+    """L0 主机层的**已解析视图**：把 elab.host.yaml 变成可直接用的路径。
+
+    每个主机路径都可以被环境变量覆盖（DSH 插件的「一键环境包」用这条缝：
+    工具解到 ``~/.dsh/elab/env/<id>`` 后只注入环境变量，**不改**仓库里的
+    ``elab.host.yaml``）：
+
+    | 变量 | 覆盖 |
+    |---|---|
+    | ``ELAB_ARM_GCC_ROOT`` | ``toolchains.arm-none-eabi.root``（bin 随之派生） |
+    | ``ELAB_CMAKE`` | ``tools.cmake.path`` |
+    | ``ELAB_NINJA`` | ``tools.ninja.path`` |
+    | ``ELAB_OPENOCD`` | ``tools.openocd.path`` |
+    | ``ELAB_OPENOCD_SCRIPTS`` | ``tools.openocd.scripts`` |
+    """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -267,7 +285,8 @@ class Host:
 
     @property
     def gcc_root(self) -> str:
-        return to_fwd(self.gcc.get("root", ""))
+        root = _env_path("ELAB_ARM_GCC_ROOT") or self.gcc.get("root", "")
+        return to_fwd(root)
 
     @property
     def gcc_bin(self) -> str:
@@ -299,7 +318,8 @@ class Host:
     # ── 主机工具 ─────────────────────────────────────────────────
     @property
     def cmake(self) -> str:
-        return ((self.data.get("tools") or {}).get("cmake") or {}).get("path", "auto")
+        return (_env_path("ELAB_CMAKE")
+                or ((self.data.get("tools") or {}).get("cmake") or {}).get("path", "auto"))
 
     @property
     def cmake_min(self) -> str:
@@ -307,15 +327,18 @@ class Host:
 
     @property
     def ninja(self) -> str:
-        return ((self.data.get("tools") or {}).get("ninja") or {}).get("path", "")
+        return (_env_path("ELAB_NINJA")
+                or ((self.data.get("tools") or {}).get("ninja") or {}).get("path", ""))
 
     @property
     def openocd(self) -> str:
-        return ((self.data.get("tools") or {}).get("openocd") or {}).get("path", "")
+        return (_env_path("ELAB_OPENOCD")
+                or ((self.data.get("tools") or {}).get("openocd") or {}).get("path", ""))
 
     @property
     def openocd_scripts(self) -> str:
-        return ((self.data.get("tools") or {}).get("openocd") or {}).get("scripts", "")
+        return (_env_path("ELAB_OPENOCD_SCRIPTS")
+                or ((self.data.get("tools") or {}).get("openocd") or {}).get("scripts", ""))
 
     @property
     def probes(self) -> dict:

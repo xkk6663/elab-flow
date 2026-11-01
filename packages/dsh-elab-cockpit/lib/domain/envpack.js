@@ -1,0 +1,66 @@
+/**
+ * 「一键环境包」清单 —— 纯函数，零 I/O。
+ *
+ * 插件瘦：**不内置任何工具二进制**，只内置一份清单（`envpacks/manifest.json`），
+ * 记录每个工具的官方上游直链、sha256、解压后要注入的环境变量。
+ * 下载/校验/解压/探测全在适配器层（`adapters/env/envpack.ts`）。
+ *
+ * 注入约定：内核侧 L0 主机视图支持 `ELAB_CMAKE` / `ELAB_NINJA` / `ELAB_OPENOCD`
+ * / `ELAB_OPENOCD_SCRIPTS` / `ELAB_ARM_GCC_ROOT` 环境变量覆盖（见内核
+ * `services/elab/config.py` 的 `Host`），所以环境包**不改**仓库里的 elab.host.yaml。
+ */
+/** 当前运行平台的键（Node 的 `process.platform` / `process.arch` 口径）。 */
+export function platformKey(os, arch) {
+    return `${os}-${arch}`;
+}
+/** 在清单里找当前平台的包；没有则 null（UI 显示"暂无此平台环境包"）。 */
+export function findPack(manifest, key) {
+    if (manifest === null)
+        return null;
+    return manifest.packs.find((p) => p.id === key) ?? null;
+}
+/** `${root}` 展开成该工具的解压目录（正斜杠，与内核路径口径一致）。 */
+export function expandTemplate(value, root) {
+    return value.split('${root}').join(root);
+}
+/** 一个工具要注入的环境变量（宿主侧 spawn 用）。 */
+export function toolEnv(spec, root) {
+    const out = {};
+    for (const [k, v] of Object.entries(spec.env))
+        out[k] = expandTemplate(v, root);
+    return out;
+}
+/** 一个工具要前置进 PATH 的绝对目录。 */
+export function toolPathDirs(spec, root) {
+    return spec.path.map((rel) => (rel === '' || rel === '.' ? root : `${root}/${rel}`));
+}
+/** 合并整包的环境变量（工具间互不覆盖；同键后者胜）。 */
+export function packEnv(pack, roots) {
+    const out = {};
+    for (const t of pack.tools) {
+        const root = roots[t.id];
+        if (root === undefined)
+            continue;
+        Object.assign(out, toolEnv(t, root));
+    }
+    return out;
+}
+/** 合并整包的 PATH 目录。 */
+export function packPathDirs(pack, roots) {
+    const out = [];
+    for (const t of pack.tools) {
+        const root = roots[t.id];
+        if (root === undefined)
+            continue;
+        out.push(...toolPathDirs(t, root));
+    }
+    return out;
+}
+/** 内核下载归档的 URL（GitHub tag 源码归档，与内核仓同源）。 */
+export function kernelArchiveUrl(repo, version) {
+    return `${repo.replace(/\.git$/, '')}/archive/refs/tags/v${version}.zip`;
+}
+/** 内核版本号允许的形状（只接受 `x.y` / `x.y.z`，避免把任意字符串拼进 URL）。 */
+export function isValidKernelVersion(version) {
+    return /^[0-9]+\.[0-9]+(\.[0-9]+)?$/.test(version);
+}

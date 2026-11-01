@@ -607,6 +607,7 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         onRefreshEnv={() => void service.refreshEnv()}
         onSetRoot={(dir) => void service.setRoot(dir)}
         onClone={(url, dir) => void service.cloneKernel(url, dir)}
+        onInstallToolchain={() => void service.installToolchain()}
       />
     )
   }

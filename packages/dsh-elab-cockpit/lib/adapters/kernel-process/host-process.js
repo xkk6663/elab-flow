@@ -13,7 +13,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join, normalize } from 'node:path';
+import { delimiter, isAbsolute, join, normalize } from 'node:path';
 import { armJobForPid, taskkillTree } from "./job-object.js";
 /**
  * 从启动横幅里取端口：`[cockpit] 监听 http://127.0.0.1:6338/`
@@ -128,8 +128,14 @@ export class CockpitHost {
             '0', // ② OS 分配端口
             ...(opts.extraArgs ?? ['--reload']),
         ];
+        // ③ 环境包：先拼 PATH 再注入 ELAB_*（顺序固定，避免 PATH 被覆盖）
+        const extraPath = (opts.toolEnv?.pathDirs ?? []).filter((d) => d !== '');
         const env = {
             ...process.env,
+            ...(opts.toolEnv?.env ?? {}),
+            ...(extraPath.length > 0
+                ? { PATH: [extraPath.join(delimiter), process.env.PATH ?? ''].join(delimiter) }
+                : {}),
             // ② UTF-8：GBK 解不了 ✓ 与中文
             PYTHONUTF8: '1',
             PYTHONIOENCODING: 'utf-8',

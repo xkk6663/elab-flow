@@ -14,7 +14,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { isAbsolute, join, normalize } from 'node:path'
+import { delimiter, isAbsolute, join, normalize } from 'node:path'
 
 import { armJobForPid, taskkillTree, type ArmedJob } from './job-object.ts'
 
@@ -25,6 +25,12 @@ export interface SpawnOptions {
   pythonPath?: string
   /** 额外参数（默认 --reload：插件不需要 cockpit 托管前端 dist）。 */
   extraArgs?: readonly string[]
+  /**
+   * 一键环境包注入（`adapters/env/envpack.ts` 的 `installedPackEnv()`）：
+   * 额外环境变量（ELAB_ARM_GCC_ROOT / ELAB_CMAKE / ELAB_NINJA / ELAB_OPENOCD…）
+   * 与需要前置进 PATH 的目录。内核只认这些变量，不改 elab.host.yaml。
+   */
+  toolEnv?: { env?: Record<string, string>; pathDirs?: readonly string[] }
 }
 
 export interface HostHandle {
@@ -168,8 +174,14 @@ export class CockpitHost {
       '0', // ② OS 分配端口
       ...(opts.extraArgs ?? ['--reload']),
     ]
+    // ③ 环境包：先拼 PATH 再注入 ELAB_*（顺序固定，避免 PATH 被覆盖）
+    const extraPath = (opts.toolEnv?.pathDirs ?? []).filter((d) => d !== '')
     const env = {
       ...process.env,
+      ...(opts.toolEnv?.env ?? {}),
+      ...(extraPath.length > 0
+        ? { PATH: [extraPath.join(delimiter), process.env.PATH ?? ''].join(delimiter) }
+        : {}),
       // ② UTF-8：GBK 解不了 ✓ 与中文
       PYTHONUTF8: '1',
       PYTHONIOENCODING: 'utf-8',

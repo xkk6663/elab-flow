@@ -99,6 +99,8 @@ export interface CockpitService {
   setRoot(dir: string): Promise<boolean>
   /** 引导向导：浅克隆到空目录（写盘，调用方需二次确认）。 */
   cloneKernel(url: string, dir: string): Promise<boolean>
+  /** 引导向导：一键安装当前平台工具链环境包（下载类动作，需二次确认）。 */
+  installToolchain(): Promise<boolean>
   dispose(): void
 }
 
@@ -412,7 +414,20 @@ export function createCockpitService(deps: {
     set({ bootstrapBusy: true, bootstrapError: null, bootstrapNotice: null })
     try {
       const r = await api.bootstrap(req)
-      set({ bootstrapBusy: false, bootstrapNotice: `已切换到 ${r.elabRoot ?? req.dir}` })
+      if (req.action === 'install-toolchain') {
+        // 装完只需重探环境（内核下次按需重启时自动带上新 ELAB_*）
+        const warnings = r.envPack?.warnings ?? []
+        set({
+          bootstrapBusy: false,
+          bootstrapNotice: `工具链已就绪（${r.envPack?.tools ?? 0} 件）${warnings.length > 0 ? ` · ${warnings.length} 条告警` : ''}`,
+        })
+        await refreshEnv()
+        return true
+      }
+      const notice = req.action === 'download-kernel'
+        ? `已下载内核 → ${r.elabRoot ?? ''}`
+        : `已切换到 ${r.elabRoot ?? req.dir}`
+      set({ bootstrapBusy: false, bootstrapNotice: notice })
       await initFlow()
       return true
     } catch (e) {
@@ -537,6 +552,10 @@ export function createCockpitService(deps: {
 
     cloneKernel(url, dir) {
       return bootstrapWrite({ action: 'clone', url, dir, confirm: true })
+    },
+
+    installToolchain() {
+      return bootstrapWrite({ action: 'install-toolchain', confirm: true })
     },
 
     dispose() {

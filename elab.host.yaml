@@ -3,7 +3,10 @@
 # 其他任何层禁止自己拼绝对路径。
 #
 # 本文件的值 = 本机实测值（2026-10-03 探测），见每项后的 "实测" 注释。
-# 覆盖方式：环境变量优先（CI 注入），例如 ELAB_HOST / ELAB_ARM_GCC_ROOT。
+# 覆盖方式：环境变量优先（CI / DSH 插件一键环境包注入），例如
+#   ELAB_HOST（换整份 host 文件）/ ELAB_ARM_GCC_ROOT（换 GCC 根）
+#   ELAB_CMAKE / ELAB_NINJA / ELAB_OPENOCD / ELAB_OPENOCD_SCRIPTS（换单个工具绝对路径）
+# 环境变量只覆盖运行时视图，**不改**本文件 —— 仓库仍是一台机器的唯一事实源。
 
 version: 1
 

@@ -597,7 +597,17 @@ function createCockpitService(deps) {
     set({ bootstrapBusy: true, bootstrapError: null, bootstrapNotice: null });
     try {
       const r = await api.bootstrap(req);
-      set({ bootstrapBusy: false, bootstrapNotice: `\u5DF2\u5207\u6362\u5230 ${r.elabRoot ?? req.dir}` });
+      if (req.action === "install-toolchain") {
+        const warnings = r.envPack?.warnings ?? [];
+        set({
+          bootstrapBusy: false,
+          bootstrapNotice: `\u5DE5\u5177\u94FE\u5DF2\u5C31\u7EEA\uFF08${r.envPack?.tools ?? 0} \u4EF6\uFF09${warnings.length > 0 ? ` \xB7 ${warnings.length} \u6761\u544A\u8B66` : ""}`
+        });
+        await refreshEnv();
+        return true;
+      }
+      const notice = req.action === "download-kernel" ? `\u5DF2\u4E0B\u8F7D\u5185\u6838 \u2192 ${r.elabRoot ?? ""}` : `\u5DF2\u5207\u6362\u5230 ${r.elabRoot ?? req.dir}`;
+      set({ bootstrapBusy: false, bootstrapNotice: notice });
       await initFlow();
       return true;
     } catch (e) {
@@ -698,6 +708,9 @@ function createCockpitService(deps) {
     },
     cloneKernel(url, dir) {
       return bootstrapWrite({ action: "clone", url, dir, confirm: true });
+    },
+    installToolchain() {
+      return bootstrapWrite({ action: "install-toolchain", confirm: true });
     },
     dispose() {
       disposed = true;
@@ -1191,7 +1204,8 @@ function BootstrapWizard(props) {
     projectCount,
     onRefreshEnv,
     onSetRoot,
-    onClone
+    onClone,
+    onInstallToolchain
   } = props;
   const [dismissed, setDismissed] = useState(() => {
     try {
@@ -1228,7 +1242,7 @@ function BootstrapWizard(props) {
       "\u6253\u5F00\u5B89\u88C5\u5411\u5BFC"
     ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u5F15\u5BFC\u4E0D\u4F1A\u81EA\u52A8\u5B89\u88C5\u4EFB\u4F55\u4E1C\u897F")));
   }
-  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)", lineHeight: 1.6 } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600 } }, "\u5B89\u88C5\u5411\u5BFC"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, `\u5F53\u524D\u9636\u6BB5\uFF1A${phase}`)), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", marginBottom: "10px" } }, "\u63D2\u4EF6\u4E0D\u5185\u7F6E\u5185\u6838\uFF1A\u9700\u8981\u672C\u673A elab \u4ED3\u5E93\u68C0\u51FA + Python 3.10+\u3002\u4E0B\u9762\u53EA\u505A\u68C0\u6D4B\u4E0E\u5F15\u5BFC\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u88C5\u4F9D\u8D56\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("env", 1, "\u73AF\u5883\u81EA\u68C0"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, envBusy ? "\u6B63\u5728\u68C0\u6D4B python / git / \u5DE5\u5177\u94FE\u2026" : "\u5C1A\u672A\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine(`python${env.python.path === void 0 ? "" : ` (${env.python.path})`}`, env.python, envBusy), probeLine("pyserial\uFF08\u4E32\u53E3\u8BFB\u5199\uFF09", env.pyserial, envBusy), probeLine("git\uFF08\u514B\u9686\u5185\u6838\uFF09", env.git, envBusy)), env !== null && env.python.ok === false ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230 python\uFF1A\u8BF7\u5B89\u88C5 Python 3.10+\uFF0C\u6216\u5728\u8BBE\u7F6E\u9875\u628A\u300Cpython \u8DEF\u5F84\u300D\u586B\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 C:\\Python312\\python.exe\uFF09\u3002") : null, /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRefreshEnv, disabled: envBusy }, envBusy ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B"), envError !== null ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-fail)" } }, `\u68C0\u6D4B\u5931\u8D25\uFF1A${envError}`) : null)), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("kernel", 2, "\u5185\u6838\u6765\u6E90"), elabRoot !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", wordBreak: "break-all" } }, `\u5DF2\u627E\u5230\u5185\u6838\uFF1A${elabRoot}`) : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230\u5185\u6838\u3002\u53EF\u4EE5\u6307\u5B9A\u4E00\u4E2A\u5DF2\u6709\u7684 elab \u4ED3\u5E93\u76EE\u5F55\uFF0C\u6216\u6D45\u514B\u9686\u4E00\u4EFD\uFF08\u7EA6\u51E0\u5341 MB\uFF09\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" } }, /* @__PURE__ */ react_default.createElement(
+  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)", lineHeight: 1.6 } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600 } }, "\u5B89\u88C5\u5411\u5BFC"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, `\u5F53\u524D\u9636\u6BB5\uFF1A${phase}`)), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", marginBottom: "10px" } }, "\u63D2\u4EF6\u4E0D\u5185\u7F6E\u5185\u6838\u4E0E\u5DE5\u5177\u94FE\uFF1A\u5185\u6838\u9700\u672C\u673A\u68C0\u51FA\u6216\u6309\u7248\u672C\u4E0B\u8F7D\uFF1B\u5DE5\u5177\u94FE\u53EF\u4E00\u952E\u88C5\u5165 ~/.dsh/elab/env\u3002\u6240\u6709\u5199\u76D8\u52A8\u4F5C\u90FD\u8981\u4F60\u663E\u5F0F\u70B9\u51FB\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("env", 1, "\u73AF\u5883\u81EA\u68C0"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, envBusy ? "\u6B63\u5728\u68C0\u6D4B python / git / \u5DE5\u5177\u94FE\u2026" : "\u5C1A\u672A\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine(`python${env.python.path === void 0 ? "" : ` (${env.python.path})`}`, env.python, envBusy), probeLine("pyserial\uFF08\u4E32\u53E3\u8BFB\u5199\uFF09", env.pyserial, envBusy), probeLine("git\uFF08\u514B\u9686\u5185\u6838\uFF09", env.git, envBusy)), env !== null && env.python.ok === false ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230 python\uFF1A\u8BF7\u5B89\u88C5 Python 3.10+\uFF0C\u6216\u5728\u8BBE\u7F6E\u9875\u628A\u300Cpython \u8DEF\u5F84\u300D\u586B\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 C:\\Python312\\python.exe\uFF09\u3002") : null, /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onRefreshEnv, disabled: envBusy }, envBusy ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B"), envError !== null ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-fail)" } }, `\u68C0\u6D4B\u5931\u8D25\uFF1A${envError}`) : null)), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("kernel", 2, "\u5185\u6838\u6765\u6E90"), elabRoot !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)", wordBreak: "break-all" } }, `\u5DF2\u627E\u5230\u5185\u6838\uFF1A${elabRoot}`) : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, "\u672A\u627E\u5230\u5185\u6838\u3002\u53EF\u4EE5\u6307\u5B9A\u4E00\u4E2A\u5DF2\u6709\u7684 elab \u4ED3\u5E93\u76EE\u5F55\uFF0C\u6216\u6D45\u514B\u9686\u4E00\u4EFD\uFF08\u7EA6\u51E0\u5341 MB\uFF09\u3002"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" } }, /* @__PURE__ */ react_default.createElement(
     "input",
     {
       style: inputStyle,
@@ -1303,7 +1317,7 @@ function BootstrapWizard(props) {
       },
       "\u53D6\u6D88"
     ))
-  ) : null, hostError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, hostError) : null), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("toolchain", 3, "\u5DE5\u5177\u94FE\u4F53\u68C0"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)", marginBottom: "4px" } }, "\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1 / \u70E7\u5F55 / \u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\u3002\u771F\u5B9E\u7ED3\u8BBA\u7531\u5185\u6838 doctor \u5728\u5DE5\u7A0B\u63A5\u5165\u540E\u7ED9\u51FA\u3002"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u968F\u7B2C 1 \u6B65\u4E00\u8D77\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine("arm-none-eabi-gcc\uFF08\u7F16\u8BD1\uFF09", env.armGcc, envBusy), probeLine("cmake\uFF08\u6784\u5EFA\uFF09", env.cmake, envBusy), probeLine("ninja\uFF08\u6784\u5EFA\uFF09", env.ninja, envBusy), probeLine("openocd\uFF08\u70E7\u5F55/\u8C03\u8BD5\uFF09", env.openocd, envBusy))), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("project", 4, "\u5DE5\u7A0B\u63A5\u5165"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, hostOk !== true ? "\u5185\u6838\u5C31\u7EEA\u540E\uFF0C\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u63A5\u5165\u5DE5\u7A0B\u3002" : projectCount > 0 ? `\u5DF2\u63A5\u5165 ${projectCount} \u4E2A\u5DE5\u7A0B\u3002` : "\u5185\u6838\u5DF2\u5C31\u7EEA\uFF0C\u4F46\u8FD8\u6CA1\u6709\u5DE5\u7A0B\uFF1A\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u9009\u62E9\u4E00\u4E2A\u56FA\u4EF6\u76EE\u5F55\u3002")), bootstrapError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "6px" } }, `\u64CD\u4F5C\u5931\u8D25\uFF1A${bootstrapError}`) : null, bootstrapNotice !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-ok)", marginBottom: "6px" } }, bootstrapNotice) : null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement(
+  ) : null, hostError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", fontSize: "11px", color: "var(--elab-fg-muted)" } }, hostError) : null), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("toolchain", 3, "\u5DE5\u5177\u94FE\u4F53\u68C0"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)", marginBottom: "4px" } }, "\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1 / \u70E7\u5F55 / \u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\u3002\u53EF\u4E00\u952E\u4E0B\u8F7D\u5B98\u65B9\u5DE5\u5177\u94FE\uFF08\u4E0D\u9700\u8981\u672C\u673A\u9884\u88C5\uFF09\u3002"), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u968F\u7B2C 1 \u6B65\u4E00\u8D77\u68C0\u6D4B") : /* @__PURE__ */ react_default.createElement("div", null, probeLine("arm-none-eabi-gcc\uFF08\u7F16\u8BD1\uFF09", env.armGcc, envBusy), probeLine("cmake\uFF08\u6784\u5EFA\uFF09", env.cmake, envBusy), probeLine("ninja\uFF08\u6784\u5EFA\uFF09", env.ninja, envBusy), probeLine("openocd\uFF08\u70E7\u5F55/\u8C03\u8BD5\uFF09", env.openocd, envBusy)), /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement("button", { style: buttonStyle, onClick: onInstallToolchain, disabled: bootstrapBusy }, bootstrapBusy ? "\u5B89\u88C5\u4E2D\u2026" : "\u4E00\u952E\u5B89\u88C5\u5DE5\u5177\u94FE"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u4E0B\u8F7D\u5230 ~/.dsh/elab/env\uFF08\u7EA6 400 MB\uFF09\uFF0C\u5931\u8D25\u5373\u4E2D\u65AD"))), /* @__PURE__ */ react_default.createElement("div", { style: cardStyle }, header("project", 4, "\u5DE5\u7A0B\u63A5\u5165"), /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-secondary)" } }, hostOk !== true ? "\u5185\u6838\u5C31\u7EEA\u540E\uFF0C\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u63A5\u5165\u5DE5\u7A0B\u3002" : projectCount > 0 ? `\u5DF2\u63A5\u5165 ${projectCount} \u4E2A\u5DE5\u7A0B\u3002` : "\u5185\u6838\u5DF2\u5C31\u7EEA\uFF0C\u4F46\u8FD8\u6CA1\u6709\u5DE5\u7A0B\uFF1A\u7528\u9762\u677F\u91CC\u7684\u300C\uFF0B\u9002\u914D\u300D\u9009\u62E9\u4E00\u4E2A\u56FA\u4EF6\u76EE\u5F55\u3002")), bootstrapError !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-fail)", marginBottom: "6px" } }, `\u64CD\u4F5C\u5931\u8D25\uFF1A${bootstrapError}`) : null, bootstrapNotice !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-status-ok)", marginBottom: "6px" } }, bootstrapNotice) : null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, /* @__PURE__ */ react_default.createElement(
     "button",
     {
       style: { ...buttonStyle, background: "transparent", color: "var(--elab-fg-secondary)" },
@@ -3748,6 +3762,26 @@ function SettingsSection(_props) {
       }
     })();
   };
+  const [packBusy, setPackBusy] = useState(false);
+  const [packNotice, setPackNotice] = useState(null);
+  const installToolchain = () => {
+    setPackBusy(true);
+    setPackNotice(null);
+    void (async () => {
+      try {
+        const r = await elabApi.bootstrap({ action: "install-toolchain", confirm: true });
+        const warnings = r.envPack?.warnings ?? [];
+        setPackNotice(
+          `\u5DF2\u5B89\u88C5 ${r.envPack?.tools ?? 0} \u4EF6\u5DE5\u5177\u5305${warnings.length > 0 ? `\uFF08${warnings.length} \u6761\u544A\u8B66\uFF09` : ""}\uFF1B\u5185\u6838\u91CD\u542F\u540E\u751F\u6548`
+        );
+        loadEnv();
+      } catch (e) {
+        setPackNotice(`\u5B89\u88C5\u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setPackBusy(false);
+      }
+    })();
+  };
   if (cfg === null) {
     return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-muted)" } }, status === "error" ? `\u914D\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A${error ?? "\u672A\u77E5\u539F\u56E0"}` : "\u6B63\u5728\u8BFB\u53D6\u914D\u7F6E\u2026");
   }
@@ -3834,7 +3868,23 @@ function SettingsSection(_props) {
       }
     },
     envBusy ? "\u68C0\u6D4B\u4E2D\u2026" : "\u91CD\u65B0\u68C0\u6D4B"
-  )), env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u5C1A\u672A\u68C0\u6D4B\uFF08\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1/\u70E7\u5F55/\u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\uFF09") : /* @__PURE__ */ react_default.createElement("div", null, probeRow("python", env.python, envBusy), probeRow("pyserial", env.pyserial, envBusy), probeRow("git", env.git, envBusy), probeRow("arm-none-eabi-gcc", env.armGcc, envBusy), probeRow("cmake", env.cmake, envBusy), probeRow("ninja", env.ninja, envBusy), probeRow("openocd", env.openocd, envBusy))));
+  ), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      onClick: installToolchain,
+      disabled: packBusy,
+      style: {
+        padding: "2px 10px",
+        fontSize: "11px",
+        borderRadius: "6px",
+        border: "1px solid var(--elab-btn-primary-border)",
+        background: "var(--elab-btn-primary-bg)",
+        color: "var(--elab-btn-primary-fg)",
+        cursor: "pointer"
+      }
+    },
+    packBusy ? "\u5B89\u88C5\u4E2D\u2026" : "\u4E00\u952E\u5B89\u88C5\u5DE5\u5177\u94FE"
+  )), packNotice !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", marginBottom: "6px", color: "var(--elab-fg-secondary)" } }, packNotice) : null, env === null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u5C1A\u672A\u68C0\u6D4B\uFF08\u7F3A\u4EF6\u53EA\u5F71\u54CD\u7F16\u8BD1/\u70E7\u5F55/\u8C03\u8BD5\uFF0C\u4E0D\u963B\u65AD\u9762\u677F\uFF09") : /* @__PURE__ */ react_default.createElement("div", null, probeRow("python", env.python, envBusy), probeRow("pyserial", env.pyserial, envBusy), probeRow("git", env.git, envBusy), probeRow("arm-none-eabi-gcc", env.armGcc, envBusy), probeRow("cmake", env.cmake, envBusy), probeRow("ninja", env.ninja, envBusy), probeRow("openocd", env.openocd, envBusy))));
 }
 
 // src/adapters/dsh-web/PackSettingsView.tsx
@@ -4685,7 +4735,8 @@ function CockpitPane(props) {
         projectCount: snap.projects.length,
         onRefreshEnv: () => void service.refreshEnv(),
         onSetRoot: (dir) => void service.setRoot(dir),
-        onClone: (url, dir) => void service.cloneKernel(url, dir)
+        onClone: (url, dir) => void service.cloneKernel(url, dir),
+        onInstallToolchain: () => void service.installToolchain()
       }
     );
   }

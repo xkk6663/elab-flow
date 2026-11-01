@@ -1,0 +1,64 @@
+# DSH 插件（packages/dsh-elab-cockpit）的 CI
+#
+# 插件源码的唯一事实源在本仓（工具层回到 packages/ 下）；镜像仓
+# xkk6663/dsh-elab-cockpit 只读、由 publish-plugin.yml 自动推送。
+# 因此插件的测试/构建门禁必须**在这里**跑，镜像仓的 ci.yml 只是镜像自身的健康检查。
+
+name: plugin
+
+on:
+  push:
+    paths:
+      - 'packages/dsh-elab-cockpit/**'
+      - '.github/workflows/plugin.yml'
+  pull_request:
+    paths:
+      - 'packages/dsh-elab-cockpit/**'
+      - '.github/workflows/plugin.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: packages/dsh-elab-cockpit
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/dsh-elab-cockpit/package-lock.json
+
+      - name: 安装依赖（严格按锁文件）
+        run: npm ci
+
+      - name: 单测（含 boundary / style-rules 分层门禁）
+        run: npm test
+
+      - name: 类型检查
+        run: |
+          npx tsc -p tsconfig.host.json --noEmit
+          npx tsc -p tsconfig.client.json --noEmit
+
+      # lib/ 入库（插件市场按包内容分发），改了源码忘了重建 lib 会静默发布旧产物。
+      - name: 构建并校验 lib/ 与源码同步
+        shell: bash
+        run: |
+          npm run build
+          if git diff --exit-code -- lib; then
+            echo "✓ lib/ 与源码一致（可复现）"
+          else
+            echo "::error::lib/ 与源码不同步 —— 请在 packages/dsh-elab-cockpit 下执行 npm run build 并提交"
+            exit 1
+          fi

@@ -1,17 +1,20 @@
 /**
- * Host 半 —— 引导写动作（`POST /elab/bootstrap`）：**只做两件事**。
+ * Host 半 —— 引导写动作（`POST /elab/bootstrap`）：四件事。
  *
- *   `set-root`：校验指定目录确实是 elab 仓库根 → 写配置（不克隆）；
- *   `clone`   ：浅克隆一个 https 仓库到**空目录** → 校验 → 写配置。
+ *   `set-root`         ：校验指定目录确实是 elab 仓库根 → 写配置（不克隆）；
+ *   `clone`            ：浅克隆一个 https 仓库到**空目录** → 校验 → 写配置；
+ *   `install-toolchain`：下载官方环境包（GCC / CMake / Ninja / OpenOCD）→ 注入 ELAB_*；
+ *   `download-kernel`   ：按 `vX.Y.Z` tag 下载内核源码归档 → 解到 `~/.dsh/elab/kernels/`。
  *
  * 纪律（方案 §3.7）：
- *   不静默写盘（clone 必须 `confirm:true`）、不执行任意命令（git 只用固定参数，
+ *   不静默写盘（一律 `confirm:true`）、不执行任意命令（git / 下载只用固定参数，
  *   url 必须是 https）、不覆盖用户已有检出（目标目录必须不存在或为空）。
  *   拉取更新（pull）**不在这里执行** —— UI 只给可复制命令。
  */
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { isAbsolute, normalize } from 'node:path';
+import { isValidKernelVersion } from "../../domain/envpack.js";
 /** 目录不存在或为空（避免覆盖用户已有内容）。 */
 function isAbsentOrEmpty(dir) {
     if (!existsSync(dir))
@@ -66,6 +69,25 @@ export function validateBootstrapRequest(body, isElabRoot) {
             };
         }
         return { ok: true, request: { action: 'clone', url: b.url.trim(), dir } };
+    }
+    if (action === 'install-toolchain') {
+        if (b.confirm !== true) {
+            return { ok: false, code: 'confirm-required', message: '安装环境包会下载并写盘，需要 confirm:true' };
+        }
+        const pack = typeof b.pack === 'string' && b.pack.trim() !== '' ? b.pack.trim() : undefined;
+        return pack === undefined
+            ? { ok: true, request: { action: 'install-toolchain' } }
+            : { ok: true, request: { action: 'install-toolchain', pack } };
+    }
+    if (action === 'download-kernel') {
+        if (b.confirm !== true) {
+            return { ok: false, code: 'confirm-required', message: '下载内核会写盘，需要 confirm:true' };
+        }
+        const version = typeof b.version === 'string' ? b.version.trim().replace(/^v/i, '') : '';
+        if (!isValidKernelVersion(version)) {
+            return { ok: false, code: 'bad-version', message: 'version 需为 x.y 或 x.y.z（如 2.1.0）' };
+        }
+        return { ok: true, request: { action: 'download-kernel', version } };
     }
     return { ok: false, code: 'unknown-action', message: `不支持的 action：${action || '(空)'}` };
 }

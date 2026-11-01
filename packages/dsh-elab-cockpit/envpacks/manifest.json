@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "_comment": [
+    "一键环境包清单：只记官方上游直链 + 期望 sha256 + 要注入的环境变量。",
+    "插件不内置任何二进制；下载后解到 ~/.dsh/elab/env/<packId>/<toolId>。",
+    "sha256 为空 = 首次下载时记录（TOFU）并警告；填入官方发布页的 sha256 即变成硬校验。",
+    "内核侧通过 ELAB_ARM_GCC_ROOT / ELAB_CMAKE / ELAB_NINJA / ELAB_OPENOCD /",
+    "ELAB_OPENOCD_SCRIPTS 覆盖主机视图，因此不改仓库里的 elab.host.yaml。"
+  ],
+  "packs": [
+    {
+      "id": "win32-x64",
+      "label": "Windows x64 · 编译 + 烧录/调试全套",
+      "platform": { "os": "win32", "arch": "x64" },
+      "tools": [
+        {
+          "id": "arm-gcc",
+          "label": "ARM GNU Toolchain (arm-none-eabi-gcc)",
+          "version": "13.3.1",
+          "url": "https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v13.3.1-1.1/xpack-arm-none-eabi-gcc-13.3.1-1.1-win32-x64.zip",
+          "sha256": "",
+          "sizeHintMB": 300,
+          "env": { "ELAB_ARM_GCC_ROOT": "${root}" },
+          "path": ["bin"],
+          "probe": ["bin/arm-none-eabi-gcc.exe", "--version"]
+        },
+        {
+          "id": "cmake",
+          "label": "CMake",
+          "version": "3.28.1",
+          "url": "https://github.com/Kitware/CMake/releases/download/v3.28.1/cmake-3.28.1-windows-x86_64.zip",
+          "sha256": "",
+          "sizeHintMB": 50,
+          "env": { "ELAB_CMAKE": "${root}/bin/cmake.exe" },
+          "path": ["bin"],
+          "probe": ["bin/cmake.exe", "--version"]
+        },
+        {
+          "id": "ninja",
+          "label": "Ninja",
+          "version": "1.11.1",
+          "url": "https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-win.zip",
+          "sha256": "",
+          "sizeHintMB": 1,
+          "env": { "ELAB_NINJA": "${root}/ninja.exe" },
+          "path": ["."],
+          "probe": ["ninja.exe", "--version"]
+        },
+        {
+          "id": "openocd",
+          "label": "OpenOCD（烧录 / 调试）",
+          "version": "0.12.0-3",
+          "url": "https://github.com/xpack-dev-tools/openocd-xpack/releases/download/v0.12.0-3/xpack-openocd-0.12.0-3-win32-x64.zip",
+          "sha256": "",
+          "sizeHintMB": 30,
+          "env": {
+            "ELAB_OPENOCD": "${root}/bin/openocd.exe",
+            "ELAB_OPENOCD_SCRIPTS": "${root}/scripts"
+          },
+          "path": ["bin"],
+          "probe": ["bin/openocd.exe", "--version"]
+        }
+      ]
+    }
+  ]
+}

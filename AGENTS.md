@@ -12,17 +12,20 @@
 | **业务层** | `projects/**`、`examples/**` | 工程适配与示例 |
 | **数据层（适配包）** | `packs/official/**`、`packs/installed/**` | 芯片参数 / 厂商指纹 / 平台坑位 —— **芯片知识的唯一宿主**；骨架仓不内置任何芯片 |
 | **数据层（市场）** | `market/index.json` | 零服务器社区市场索引（包内容留在作者仓库，索引只记 name/version/source/sha256/requires/license） |
-| **工具层（独立仓）** | [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit) | DSH 插件（开发工具整合器）：面板可视化、进程托管、`elab_*` agent 工具。**不在本仓** |
+| **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件（开发工具整合器）：面板可视化、进程托管、`elab_*` agent 工具；源码在本仓。对外分发仓 [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit) 是**只读镜像**，由 CI 自动推送 |
 | **工具层** | `packages/dsh-elab-iframe/**` | 历史探针包（已退役，仅存档） |
 
 ## Agent 边界规则（硬）
 
 1. **业务代码只写业务层**：改闭环行为/步骤/档位/串口 → `services/elab/**`；
    改步骤标签、加步骤、调三档定义 → `cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`（内核自描述，工具层自动跟随，**不要**去改插件的内置默认——那只是内核过旧时的兑底）。
-2. **DSH 插件已拆为独立仓** `xkk6663/dsh-elab-cockpit`：改面板/工具/进程托管去那个仓，
-   不要把插件代码加回本仓；业务逻辑写进工具层 = 分层违规。
+2. **DSH 插件源码在本仓** `packages/dsh-elab-cockpit/**`：改面板/工具/进程托管写这里。
+   镜像仓 `xkk6663/dsh-elab-cockpit` **只读**（供 DSH 市场按包分发），
+   **不要**在镜像仓手工提交：改完本仓 → 打 `plugin-v*` tag（或手动跑
+   `publish-plugin`）→ CI 用 `git subtree split` 强推镜像。
+   本地推送用 `scripts/mirror-plugin.ps1`。业务逻辑写进工具层 = 分层违规。
 3. **唯一合法缝隙是 loopback HTTP ICD**：工具层与内核之间不 import 源码、不共享文件；
-   门禁测试在插件仓的 `test/boundary.test.mjs` 会拦。
+   门禁测试在 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 会拦。
 4. 插件内的内核版本探测：`capabilities.meta` 缺失 = 内核过旧（面板会提示同步），不要在工具层为新业务字段写死兼容分支——先把内核同步了。
 5. **芯片知识只写适配包**：新增/修改厂商支持（芯片 YAML、`vendor_fingerprints`、
    平台坑位）一律落在 `packs/**`，**不得**写进 `services/elab/**` 或 `cockpit/**`；
@@ -41,6 +44,7 @@
 
 ## 验证
 
-- 插件（独立仓内）：`npm test` / `npm run build`（cwd = 插件仓根）
+- 插件：`npm test` / `npm run build`（cwd = `packages/dsh-elab-cockpit`）；
+  CI 见 `.github/workflows/plugin.yml`，镜像发布见 `.github/workflows/publish-plugin.yml`
 - 内核：`elab.cmd doctor`（或 `python -m elab doctor`，需 `PYTHONPATH=services`）
 - 改 `cockpit/server.py` 后**两个检出都要同步**（本仓 + 用户的 elab 工作检出）

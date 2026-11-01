@@ -13,6 +13,8 @@ import { dirname, normalize } from 'node:path';
 import { CockpitHost, looksLikeElabRoot } from "../adapters/kernel-process/host-process.js";
 import { probeEnv } from "../adapters/env/probe.js";
 import { cloneKernel, validateBootstrapRequest } from "../adapters/env/bootstrap.js";
+import { envPackStatus, installEnvPack, installedPackEnv } from "../adapters/env/envpack.js";
+import { downloadKernelTag } from "../adapters/env/kernel-download.js";
 import { registerOnce } from "../adapters/kernel-http/route-guard.js";
 import { DEFAULT_HOST_ROUTE_CONFIG, registerApiRoute, registerEventsRoute, } from "../adapters/kernel-http/routes.js";
 import { runRetention } from "../adapters/fs-store/run-retention.js";
@@ -74,7 +76,13 @@ export function apply(ctx, options = {}) {
             throw new Error('未找到 elab 仓库根（需要同时包含 cockpit/server.py 与 services/elab）。' +
                 '请在设置页指定 elabRoot，或在 elab 仓库内的会话里打开面板。');
         }
-        starting = CockpitHost.start({ elabRoot: root, pythonPath: current.pythonPath });
+        // 一键环境包装好的 ELAB_* / PATH（没装 = 不注入，完全走本机既有工具链）
+        const packEnvVars = installedPackEnv();
+        starting = CockpitHost.start({
+            elabRoot: root,
+            pythonPath: current.pythonPath,
+            ...(packEnvVars !== null ? { toolEnv: packEnvVars } : {}),
+        });
         try {
             const h = await starting;
             host = h;
@@ -151,8 +159,27 @@ export function apply(ctx, options = {}) {
             }
         },
     }));
+    // ── 一键环境包：状态（GET /elab/envpack）─────────────────────────
+    //  只读：清单里有什么、当前平台装到第几件。真正安装走 POST /elab/bootstrap。
+    disposers.push(registerOnce(ctx, {
+        kind: 'exact',
+        path: '/elab/envpack',
+        handler: async (req, res) => {
+            if (ctx.connection?.requestRejection(req) !== undefined) {
+                json(res, 403, { ok: false, error: { code: 'forbidden' } });
+                return;
+            }
+            if (req.method !== 'GET') {
+                res.setHeader('Allow', 'GET');
+                json(res, 405, { ok: false, error: { code: 'method-not-allowed' } });
+                return;
+            }
+            json(res, 200, { ok: true, status: envPackStatus() });
+        },
+    }));
     // ── 引导向导：写动作（POST /elab/bootstrap）────────────────────
-    //   只允许 set-root（校验 + 写配置）与 clone（浅克隆到空目录 + 写配置）。
+    //   set-root（校验 + 写配置）/ clone（浅克隆到空目录 + 写配置）/
+    //   install-toolchain（官方环境包）/ download-kernel（按 tag 下内核）。
     disposers.push(registerOnce(ctx, {
         kind: 'exact',
         path: '/elab/bootstrap',
@@ -196,6 +223,54 @@ export function apply(ctx, options = {}) {
                     });
                     return;
                 }
+            }
+            // 环境包 / 按版本下内核：写盘发生在固定目录（~/.dsh/elab/**），不接受任意路径
+            if (request.action === 'install-toolchain') {
+                const installed = await installEnvPack(request.pack);
+                if (installed.ok === false) {
+                    json(res, installed.code === 'no-pack' ? 400 : 502, {
+                        ok: false,
+                        error: { code: installed.code, message: installed.message },
+                    });
+                    return;
+                }
+                // 新工具要用在**重启后**的 spawn 环境里：丢弃旧进程，下次按需重启
+                const oldPack = host;
+                host = undefined;
+                void oldPack?.dispose().catch(() => undefined);
+                json(res, 200, {
+                    ok: true,
+                    action: request.action,
+                    envPack: {
+                        packId: installed.packId,
+                        tools: Object.keys(installed.state.tools).length,
+                        warnings: installed.warnings,
+                    },
+                });
+                return;
+            }
+            if (request.action === 'download-kernel') {
+                const dl = await downloadKernelTag(request.version);
+                if (dl.ok === false) {
+                    json(res, 502, { ok: false, error: { code: dl.code, message: dl.message } });
+                    return;
+                }
+                if (!looksLikeElabRoot(dl.dir)) {
+                    json(res, 422, {
+                        ok: false,
+                        error: {
+                            code: 'not-elab-root',
+                            message: `已下载 v${dl.version}，但解出的目录不是 elab 仓库根：${dl.dir}`,
+                        },
+                    });
+                    return;
+                }
+                const old = host;
+                host = undefined;
+                void old?.dispose().catch(() => undefined);
+                options.onRootPersisted?.(dl.dir);
+                json(res, 200, { ok: true, action: request.action, elabRoot: dl.dir });
+                return;
             }
             // 根已变更 → 丢弃旧进程，下次 ensureHost 按新根起
             const old = host;

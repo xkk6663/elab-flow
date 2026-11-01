@@ -126,6 +126,29 @@ export function SettingsSection(_props: Record<string, unknown>): ReactNode {
     })()
   }
 
+  // 环境包（一键安装）：官方上游直链下载 → 校验 → 解到 ~/.dsh/elab/env → 注入 ELAB_*
+  const [packBusy, setPackBusy] = useState(false)
+  const [packNotice, setPackNotice] = useState<string | null>(null)
+
+  const installToolchain = (): void => {
+    setPackBusy(true)
+    setPackNotice(null)
+    void (async () => {
+      try {
+        const r = await elabApi.bootstrap({ action: 'install-toolchain', confirm: true })
+        const warnings = r.envPack?.warnings ?? []
+        setPackNotice(
+          `已安装 ${r.envPack?.tools ?? 0} 件工具包${warnings.length > 0 ? `（${warnings.length} 条告警）` : ''}；内核重启后生效`,
+        )
+        loadEnv()
+      } catch (e) {
+        setPackNotice(`安装失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setPackBusy(false)
+      }
+    })()
+  }
+
   if (cfg === null) {
     return (
       <div className="elab-root" style={{ padding: '12px', fontSize: '12px', color: 'var(--elab-fg-muted)' }}>
@@ -231,7 +254,25 @@ export function SettingsSection(_props: Record<string, unknown>): ReactNode {
           >
             {envBusy ? '检测中…' : '重新检测'}
           </button>
+          <button
+            onClick={installToolchain}
+            disabled={packBusy}
+            style={{
+              padding: '2px 10px',
+              fontSize: '11px',
+              borderRadius: '6px',
+              border: '1px solid var(--elab-btn-primary-border)',
+              background: 'var(--elab-btn-primary-bg)',
+              color: 'var(--elab-btn-primary-fg)',
+              cursor: 'pointer',
+            }}
+          >
+            {packBusy ? '安装中…' : '一键安装工具链'}
+          </button>
         </div>
+        {packNotice !== null ? (
+          <div style={{ fontSize: '11px', marginBottom: '6px', color: 'var(--elab-fg-secondary)' }}>{packNotice}</div>
+        ) : null}
         {env === null ? (
           <div style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
             {'尚未检测（缺件只影响编译/烧录/调试，不阻断面板）'}

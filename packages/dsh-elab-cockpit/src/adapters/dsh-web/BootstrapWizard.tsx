@@ -34,6 +34,8 @@ export interface BootstrapWizardProps {
   onRefreshEnv(): void
   onSetRoot(dir: string): void
   onClone(url: string, dir: string): void
+  /** 一键环境包：下载官方 GCC / CMake / Ninja / OpenOCD 并注入 ELAB_*（需用户点击）。 */
+  onInstallToolchain(): void
 }
 
 const cardStyle: React.CSSProperties = {
@@ -127,6 +129,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
     onRefreshEnv,
     onSetRoot,
     onClone,
+    onInstallToolchain,
   } = props
 
   const [dismissed, setDismissed] = useState<boolean>(() => {
@@ -184,7 +187,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
         <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{`当前阶段：${phase}`}</span>
       </div>
       <div style={{ fontSize: '11px', color: 'var(--elab-fg-secondary)', marginBottom: '10px' }}>
-        {'插件不内置内核：需要本机 elab 仓库检出 + Python 3.10+。下面只做检测与引导，不会自动装依赖。'}
+        {'插件不内置内核与工具链：内核需本机检出或按版本下载；工具链可一键装入 ~/.dsh/elab/env。所有写盘动作都要你显式点击。'}
       </div>
 
       {/* 1 环境 */}
@@ -310,7 +313,7 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
       <div style={cardStyle}>
         {header('toolchain', 3, '工具链体检')}
         <div style={{ fontSize: '11px', color: 'var(--elab-fg-muted)', marginBottom: '4px' }}>
-          {'缺件只影响编译 / 烧录 / 调试，不阻断面板。真实结论由内核 doctor 在工程接入后给出。'}
+          {'缺件只影响编译 / 烧录 / 调试，不阻断面板。可一键下载官方工具链（不需要本机预装）。'}
         </div>
         {env === null ? (
           <div style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{'随第 1 步一起检测'}</div>
@@ -322,6 +325,14 @@ export function BootstrapWizard(props: BootstrapWizardProps): ReactNode {
             {probeLine('openocd（烧录/调试）', env.openocd, envBusy)}
           </div>
         )}
+        <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button style={buttonStyle} onClick={onInstallToolchain} disabled={bootstrapBusy}>
+            {bootstrapBusy ? '安装中…' : '一键安装工具链'}
+          </button>
+          <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+            {'下载到 ~/.dsh/elab/env（约 400 MB），失败即中断'}
+          </span>
+        </div>
       </div>
 
       {/* 4 工程 */}
