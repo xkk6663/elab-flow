@@ -1,7 +1,7 @@
 {
   "name": "dsh-elab-cockpit",
-  "version": "0.3.1",
-  "description": "elab-Flow 闭环驾驶舱的 DSH 插件：右栏窄栏面板（阶梯 + 日志尾），发现/接入/构建/烧录/调试/串口闭环一体化",
+  "version": "0.3.2",
+  "description": "嵌入式闭环开发的 DSH 驾驶舱：agent 在面板里闭环开发 STM32（发现/编译/烧录/调试/串口），开发过程对用户全程可视化——阶梯进度、实时日志、RAM/FLASH 占用、串口波形",
   "keywords": [
     "dsh",
     "dsh-plugin",
