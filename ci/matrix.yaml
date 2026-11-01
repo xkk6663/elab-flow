@@ -16,8 +16,13 @@ defaults:
 jobs:
   # ── 档 1：主机门禁（无探针依赖）────────────────────────────────
   - name: host-gate
-    desc: 环境体检 + 深度漂移校验 + 全芯片编译（云端可跑）
-    projects: [at32_test, stm32_test, at32f421g8u7]
+    desc: 环境体检 + 深度漂移校验 + 编译（云端可跑）
+    # ★ 云端只跑随仓可得的芯片（官方源 st/stm32）：
+    #   内核**一次只启用一套适配包**（packs/installed/active.json），
+    #   而 at32 是外置仓库、只能走市场索引安装 —— 放进云端门禁就要联网下载外置包，
+    #   且与 st 工程无法在同一次运行里同时生效。at32 的编译/烧录由 onhw-gate
+    #   （self-hosted，本机已装包）覆盖。
+    projects: [stm32_test]
     steps:
       - doctor_deep       # 真跑 configure，校验实际编译命令与 chip.yaml 一致
       - build             # 编译 + 统一产出 hex/bin + 零改动快照
