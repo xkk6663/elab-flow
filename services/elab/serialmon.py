@@ -460,14 +460,20 @@ def _snapshot(s: _Session | None) -> dict:
 
 def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
                  opened_by: str = "human", lease_s: float = 0.0,
-                 allow_agent_write: bool = False,
+                 allow_agent_write: bool = False, decoder: str = "",
                  log=print) -> dict:
     """打开（或拒绝重复打开）监视会话。返回值可直接 JSON 化。
 
     端口/波特率解析与 ``serialterm.resolve_target`` **同一份实现** ——
     "预览说 COM10、监视却开了别的口"这种分叉，一个都不许有。
+
+    ``decoder`` 是**跨会话记忆**的落点：面板把上次选的解码器随 open 带上来，
+    从第一批 RX 就按同一协议解码（不用先开一次空会话再补选）。
     """
     global _SESS, _EPOCH
+    dec = str(decoder or "").strip()
+    if dec not in ("", "justfloat", "firewater"):
+        return {"ok": False, "error": f"未知解码器：{dec!r}"}
     with _LOCK:
         cur = _SESS
         if cur is not None and cur.alive:
@@ -487,6 +493,9 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
         sess = _Session(project, t["port"], t["baud"], io, epoch=_EPOCH,
                         opened_by=opened_by, lease_s=lease_s,
                         allow_agent_write=allow_agent_write)
+        # 跨会话记忆的解码器：在 start() 之前挂上，第一批 RX 就按同一协议解码。
+        sess.decoder = dec
+        sess.decoder_by = opened_by if dec else ""
         try:
             sess.start()
         except OSError as exc:
@@ -495,7 +504,8 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
         _SESS = sess
     log(f"[serialmon] ▶ {sess.port}@{sess.baud}（project={project or '-'}，"
         f"backend={sess.backend}，epoch={sess.epoch}，by={opened_by}"
-        + (f"，lease={sess.lease_s}s" if sess.lease_s else "") + "）")
+        + (f"，lease={sess.lease_s}s" if sess.lease_s else "")
+        + (f"，decoder={dec}" if dec else "") + "）")
     return {"ok": True, **_snapshot(sess)}
 
 

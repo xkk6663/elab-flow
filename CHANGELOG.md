@@ -5,6 +5,72 @@
 
 ---
 
+## [V2.1.0] — 2026-11-01（DSH 窄栏驾驶舱 · 串口工作区 · 芯片插件市场）
+
+V2.1.0 把 V2.0 的闭环能力**装进 DSH 右栏**，并把串口从"看输出"升级为
+"人机同源的可视化工作区"。同一个 elab 内核，三种入口（CLI `elab` / 独立驾驶舱
+`:8333` / DSH 面板）共用同一套 ICD 与事件流，工具层与内核之间只有 loopback HTTP。
+
+### DSH 插件（`packages/dsh-elab-cockpit`）
+
+- **窄栏驾驶舱**：`main / domain / app / adapters` 分层迁移（批 1–3），只注册
+  `sidebar.right.pane.tab` 一个槽位；按容器宽窄/中/宽三档自适应，可见性驱动
+  SSE 断开/续传，失败即中断（不自动重试）；`boundary.test.mjs` +
+  `verify-client-contract.mjs` 守分层与槽位契约。
+- **内核自描述消费**：`capabilities.meta` 缺失即提示内核过旧；步骤标签、三档
+  计划、串口 views/formats/eols/decoders 全部由内核下发，插件内置默认只是兜底。
+- **17 个 `elab_*` agent 工具**：看（status/log/cancel）、闭环（build/triple/loop/
+  step/preview）、工程与包（adapt/pkg）、串口（起停/读写/等待/解码/录制）。
+- **适配状态机 + skill 桥**：unbound/discovered/adapting/bound 的 banner；
+  一键适配只生成 `projects/<name>.yaml`，业务工程零改动。
+- **设置视图（整幅覆盖）**：芯片插件市场 + 芯片包管理（搜索/安装/启用/卸载），
+  刻意不做成新槽位（槽位契约不变）。
+- **双入口单实例**：面板可同时出现在原生右栏与底部工作台 —— 事件端口按
+  `(run, sessionId)` 复用同一条 `/elab/events`（引用计数 + 可见性取并集），
+  关一个入口不断另一个，不再各占一条上游 SSE 槽位。
+
+### 串口工作区（P1–P3.5）
+
+- **常驻监视会话**（`serialmon`）：进程内单例 + 按钮显式关闭 + 读线程自愈
+  （异常即收摊，绝不带着死口挂着）；agent 租约 `lease_s` 到期自行释放，
+  "agent 忘关"不会把串口占死（N5）。
+- **字节为真值**：RX/TX 同构入字节环（`epoch` 连接纪元、`gap` 覆盖计数、`paused`
+  暂停入环仍继续读口）；行文本只是字节流的投影。行 / 字节 / 终端 / 波形四视图，
+  字节页可切 HEX / ASCII / UTF-8 / GBK。
+- **显式录制（K5）**：**有界** 5 MiB，到顶停录并标 `truncated`，落 `.jsonl`。
+- **会话级共享解码（P3.5）**：`decoder` 是**会话属性**，RX 入环时增量解码——
+  帧环 1024 帧、`dec_seq` 单调、半帧 `dec_pending` 续解（超 64 KiB 丢弃并计
+  `skipped`）；agent 的 `elab_serial_decoded` 与面板波形**同源同图**，TX 不解码，
+  `gap` 只报告不抹平。
+- **偏好与记忆**：端口/波特率落 `localStorage`；decoder 跨会话记忆（`open`
+  透传 decoder，打开后第一批 RX 即解码）。
+- **可关闭共享解码**：波形下拉新增「本地解码（关闭共享）」，人可一键回退到
+  本地兜底路径（agent 侧仍可用 `decoder=''` 关闭）。
+
+### 芯片插件市场（一切皆插件）
+
+- **分层**：芯片知识（芯片 YAML / 厂商指纹 / 平台坑位）只住 `packs/**`；内核只认
+  `pack.yaml` 协议（`elab.pkg`），不 import 包内文件、不为某厂商开分支。
+- **内置 vs 外置**：`st/stm32` 为内置包（`elab pkg bootstrap` 安装）；`artery/at32`
+  为外置示例仓库，只经市场索引登记。包与包相互独立，一次仅启用一套适配包，
+  本地可存放多套按需切换。
+- **零服务器市场**：`market/index.json` 只记 name/version/source/sha256/requires/
+  license；`elab pkg` 全命令集（search / install / bootstrap / list / activate /
+  remove / update / verify / index），`pkg index --check` 在 CI 拦索引漂移。
+
+### 文档
+
+- README 重写**项目定位（一个内核三种入口）/ 使用流程 / DSH 面板五步 / 17 工具总表 /
+  共享解码**，并更新已知限制与限制边界。
+- 新增 [docs/需求对照与改进.md](docs/需求对照与改进.md)：逐项对照驾驶舱 R1–R10、
+  插件目标与非目标、串口 P1–P3.5、市场 R1–R4，并给出 P0/P1/P2 backlog。
+
+### 质量门
+
+- 插件门禁 **94 用例全绿**（含 `boundary.test.mjs` 分层守卫、主题硬规则、
+  客户端契约）；内核 `unittest` 全绿（`tests/test_serialmon.py` **44 例**，
+  新增"开会话即解码 / 未知解码器拒绝"两例）。
+
 ## [V2.0.0] — 2026-10-08（OTA 平台化 · 双槽 A/B Bank · 组合工程）
 
 V1.0.0 交付的是"闭环工作链"（build / flash / debug / monitor / CI / 事件流 / 驾驶舱）；

@@ -504,6 +504,23 @@ class SharedDecode(Base):
         self.assertFalse(r["ok"])
         self.assertIn("没有进行中的监视", r["error"])
 
+    def test_open_restores_decoder_from_previous_session(self):
+        """跨会话记忆：open 带 decoder → 第一批 RX 就按同一协议解码。"""
+        r = self.open(decoder="justfloat")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["decode"]["decoder"], "justfloat")
+        self.assertEqual(r["decode"]["decoder_by"], "human")
+        self.io.rx.append(self._frame(3.0, 4.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="开会话即解码")
+        vals = sm.tail_decoded(0)["frames"][0]["values"]
+        self.assertAlmostEqual(vals[0], 3.0, places=5)
+        self.assertAlmostEqual(vals[1], 4.0, places=5)
+
+    def test_open_refuses_unknown_decoder(self):
+        r = self.open(decoder="nope")
+        self.assertFalse(r["ok"])
+        self.assertIn("未知解码器", r["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -102,6 +102,10 @@ export interface SerialPaneProps {
   /** 端口/波特率偏好的持久化由上层做（面板只负责发意图）。 */
   onPort?: (port: string) => void
   onBaud?: (baud: number) => void
+  /** 上次选定的解码器（跨会话记忆；'' = 显式关闭共享解码）。 */
+  decoderPref?: string
+  /** 解码器偏好变化（上层负责持久化；'' 表示关闭共享解码）。 */
+  onDecoder?: (decoder: string) => void
   writable: boolean
   /** 闭环 run 落在 serial 通道的事件行（保持闭环证据可见）。 */
   runLines: TailLine[]
@@ -261,7 +265,8 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [sendFormat, setSendFormat] = useState('utf8')
   const [eol, setEol] = useState('crlf')
   const [notice, setNotice] = useState<string | null>(null)
-  const [decoder, setDecoder] = useState(decoders[0]?.id ?? 'justfloat')
+  // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
+  const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followRef = useRef(true)
@@ -364,6 +369,12 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
 
   useEffect(() => {
     if (view !== 'wave' || sharedActive) return
+    if (decoder === '') {
+      // 用户显式关闭共享解码，也不做本地解码兜底
+      setFrames([])
+      setDecodeMeta(null)
+      return
+    }
     if (filtered.length === 0) {
       setFrames([])
       setDecodeMeta(null)
@@ -589,8 +600,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           <select
             value={sharedActive ? sharedDecoder : decoder}
             onChange={(e: any) => {
-              const next = e.currentTarget.value
+              const next: string = e.currentTarget.value
               setDecoder(next) // 无会话时的本地解码兜底
+              props.onDecoder?.(next) // 记住偏好（'' = 关闭共享解码）
               // 有会话：decoder 是**会话属性**，写进去才与 agent 同源同图
               if (stream.active) void stream.setDecoder(next)
             }}
@@ -607,6 +619,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                 {d.label}
               </option>
             ))}
+            {stream.active ? <option value="">本地解码（关闭共享）</option> : null}
           </select>
         ) : null}
         <button

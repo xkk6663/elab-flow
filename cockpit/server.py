@@ -1173,7 +1173,8 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         baud=body.get("baud") or 0,
                         opened_by=str(body.get("actor") or "human"),
                         lease_s=lease_s,
-                        allow_agent_write=bool(body.get("allow_agent_write")))
+                        allow_agent_write=bool(body.get("allow_agent_write")),
+                        decoder=str(body.get("decoder") or ""))
                     return self._json(res, 200)
                 if action == "close":
                     return self._json(serialmon_mod.close_session(), 200)

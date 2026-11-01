@@ -6,7 +6,7 @@
 
 业务工程源码**零改动** · Python **仅标准库** · 驾驶舱前端产物已入仓（运行时不需要 Node）
 
-**本期新增**：串口工作区（行 / 字节 / 终端 / 波形四视图 + 发送面板 + 协议解码 + 录制导出）· DSH 插件面板（每通道独立启动按钮）· 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md)
+**本期新增**：串口工作区（行 / 字节 / 终端 / 波形四视图 + 发送面板 + 协议解码 + 录制导出）· **共享解码**（agent 选定 decoder，人与 agent 看同一份帧）· DSH 插件面板（每通道独立启动按钮）· 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md)
 
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
@@ -14,7 +14,7 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 
-[快速上手](#quickstart) · [使用流程](#flow) · [驾驶舱](#cockpit) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
+[项目定位](#position) · [快速上手](#quickstart) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
 
 <img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱" width="100%">
 
@@ -41,6 +41,25 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 | ✅ 一份通用 `gcc.cmake`，差异只由芯片 YAML 驱动 | ❌ 每颗芯片各写一份工具链文件 |
 
 > **外骨骼原则**：业务代码是器官，elab 是外骨骼。外骨骼不改器官，只负责把器官接上流水线。
+
+<a id="position"></a>
+
+### 项目定位：一个内核，三种入口
+
+内核只有一套（`services/elab/**` + `cockpit/server.py`），对外提供三种**同源**入口 ——
+同一份事件流、同一个串口会话、同一套步骤与档位定义。区别只在"谁在看、屏幕多大"。
+
+| 入口 | 怎么启动 | 适合谁 | 形态 |
+|---|---|---|---|
+| **CLI `elab`** | `./elab loop -p <name>`（Windows 用 `elab.cmd`） | 脚本 / CI / 无人值守 / agent 直接调用 | 一行命令 + 可 grep 的证据行 |
+| **独立驾驶舱** | 双击 `cockpit.cmd`，或 `python -m cockpit.server` → `http://127.0.0.1:8333/` | 人坐在桌面前盯全程：工程轨 / 阶段轨 / 证据轨三列全屏 | Edge `--app` 独立窗口；已在跑则只开 UI |
+| **DSH 右栏面板** | 在 DSH 安装 `packages/dsh-elab-cockpit`，右栏开 elab tab | agent 在跑、你顺手看：窄栏阶梯 + 日志尾 + 串口页 + 设置页 | 工具层插件：托管内核子进程，只走 loopback HTTP ICD |
+
+- 三者**不各有一套实现**：DSH 面板不 import 内核源码、不复制业务逻辑；它 `spawn` 同一个
+  `python -m cockpit.server`，把 `/elab/api/*` 与 `/elab/events` 反代过来
+  （分层门禁 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 会拦违规）。
+- **步骤 / 档位 / 串口词汇的唯一事实源在内核**（`cockpit/server.py` 的
+  `STEP_META` / `KERNEL_PLANS` / `SERIAL_META`）。工具层只渲染；内核加一步，面板与 agent 工具自动跟上。
 
 ### 两层结构
 
@@ -74,7 +93,15 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 
 <a id="flow"></a>
 
-## 使用流程（从零到闭环）
+## 使用流程
+
+| 你在哪 | 走哪条路 | 入口 |
+|---|---|---|
+| 终端 / CI / 让 agent 自己跑 | **CLI**：命令即流程，失败即非零退出 | `elab <cmd>` |
+| 桌面前要盯全程、切工程、看 OTA | **独立驾驶舱**：三列全屏 | `cockpit.cmd` |
+| 在 DSH 里和 agent 一起干活 | **DSH 面板**：窄栏阶梯 + 日志尾 | 右栏 elab tab |
+
+三条路跑的是同一份内核、同一份事件流，所以下面按**能做什么**串流程，而不是按入口重复三遍。
 
 ```text
 安装适配包  →  接入工程  →  跑闭环 / 单步  →  看证据  →  串口调试  →  CI
@@ -82,15 +109,20 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 ```
 
 1. **装芯片**：`elab pkg search <vendor/platform>` → `elab pkg install <vendor/platform>`
-   （内置 `st/stm32` 用 `bootstrap`；不装包也能体检主机）。
+   （内置 `st/stm32` 用 `bootstrap`；不装包也能体检主机）。面板里对应工程条 ⚙ → 市场。
 2. **接工程**：驾驶舱「＋ 适配」一键探测→写入；或
    `elab adapt <path> --write && elab adapt <path> --verify`；或手写 `projects/<name>.yaml`。
-   人工接管的文件绝不覆盖。
+   人工接管的文件绝不覆盖。agent 走 `elab_adapt`（`write=false` 先看只读报告）。
 3. **跑闭环**：`elab loop -p <name>`（doctor → build → flash → debug --verify → monitor），
    每步都留可 grep 的证据行；也可 `elab run -p <name> --steps build` 只跑一步。
+   - **CLI**：上面两条命令。
+   - **独立驾驶舱**：「▶ 跑全闭环」/ 阶段轨「单步执行」，见[下节 6 步表](#cockpit)。
+   - **DSH 面板**：顶部三档 **编译 / 三连 / 闭环**；每个通道另有 **▶构建 / ▶烧录 / ▶调试 / ▶串口**。
+   - **agent**：`elab_build` / `elab_triple` / `elab_loop` / `elab_step`（返回 run id，进度面板实时可见）。
 4. **看证据**：驾驶舱阶段轨逐步点亮；内存占位取自 `.map`；产物 elf/hex/bin/map 可点开；
-   「零改动守卫」显示未触碰文件数。
-5. **调串口**：见下节 [串口工作区](#serial)。
+   「零改动守卫」显示未触碰文件数。agent 用 `elab_status`（现状）+ `elab_log`（日志尾）+
+   `elab_preview`（只读 argv）。
+5. **调串口**：见 [串口工作区](#serial)；agent 用 `elab_serial*` 一组（读 / 写 / 等 / 解码 / 录制）。
 6. **进门禁**：`elab ci`（本地）与 GitHub Actions 共用同一份 `ci/matrix.yaml`；
    门禁绿却零产物 → 红。
 
@@ -107,9 +139,53 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 | ⑤ 导航 | 右列恒为 **构建 \| 烧录 \| 串口 \| 工具**（工具页随 `tools:` 声明出现） | 每个工作区有自己的启动按钮与日志通道，日志互不串台 |
 | ⑥ 预览 | 阶段轨「运行选项」→「预览」 | 只读打印将执行的每条命令（`--clean` 副作用显式标红），不 spawn、不写盘 |
 
-> **DSH 面板**（工具层）是驾驶舱的窄栏版：顶部一行是三档 **编译 / 三连 / 闭环** + 取消 / 预览 / ⚙，
-> 下面每个通道各有独立启动按钮 **▶构建 / ▶烧录 / ▶调试 / ▶串口** ——
-> 不再需要先跑全闭环才能单独用某一页。
+### DSH 面板（窄栏版，agent 在跑时你在旁边看）
+
+**安装（一次）**：把 `packages/dsh-elab-cockpit` 的绝对路径交给 DSH 的
+`plugin_manager install_bundle`（开发期可用 Junction 指向本仓），重载窗口。
+
+**用起来 5 步**：
+
+1. **开面板**：右栏 elab tab（左栏 panellist 也有入口）。首次打开会自动托管内核子进程
+   （`python -m cockpit.server`，随机端口，只绑 `127.0.0.1`）；内核过旧时面板会提示同步。
+2. **看 agent 跑到哪**：阶梯逐行点亮（步骤 / 状态 / 耗时 / 单行 detail），日志尾跟着聚焦步骤滚动；
+   agent 发起的 run 会**自动切到对应工程**，但只跟新 run —— 不会把你手动切换的视图反复拽回。
+3. **自己动手**：顶部一行三档 **编译 / 三连 / 闭环** + 取消 / 预览 / ⚙；每个通道各有独立启动按钮
+   **▶构建 / ▶烧录 / ▶调试 / ▶串口**，不必先跑全闭环才能单独用某一页。
+4. **串口页**：行 / 字节 / 终端 / 波形四视图 + 发送面板，与独立驾驶舱**同一套工作区**；
+   agent 选定 decoder 后波形页会标 **「agent 选定」**并展示同一份帧，见[共享解码](#serial-shared)。
+5. **设置页**：工程条右上角 **⚙** 打开整幅设置视图（市场搜索安装 / 已装包启用管理 / 内核设置），
+   不挤占主视图。
+
+<a id="agent-tools"></a>
+
+## Agent 工具（`elab_*`，共 17 个）
+
+工具层向 agent 暴露的全部能力。**写硬件 / 写盘的都要 `allowAgentWrite`**（默认关）；
+安装适配包时内核会冻结闭环（有 run 在跑则返回 409）。
+
+| 组 | 工具 | 作用 |
+|---|---|---|
+| **看** | `elab_status` | 工程与步骤可用性（含不可用原因）+ 串口端口候选 / 当前会话 / 租约剩余 |
+| | `elab_preview` | 只读命令预览（每步 argv 与 `--clean` 删除目标；不 spawn、不写盘） |
+| | `elab_log` | 某个 run 的日志尾（默认 200 行，可按步骤过滤） |
+| **闭环** | `elab_build` | `plan=basic`：只编译 |
+| | `elab_triple` | `plan=triple`：编译 + 烧录 + 调试校验（需硬件） |
+| | `elab_loop` | `plan=loop`：体检 → 编译 → 烧录 → 调试校验 → 串口闭环 |
+| | `elab_step` | 按显式步骤执行（含 `tool:<name>`）；不可用**直接报错**，不静默剔除 |
+| | `elab_cancel` | 取消当前 run（人 / agent 发起都可） |
+| **工程与包** | `elab_adapt` | 探测（`write=false`）或写入接入 YAML（`write=true`） |
+| | `elab_pkg` | `status / search / install / activate / remove / update / verify` |
+| **串口** | `elab_serial` | 写串口（`utf8/ascii/gbk/hex` + 行尾） |
+| | `elab_serial_monitor` | 会话 `open / close / decoder / clear / pause / resume`（带租约） |
+| | `elab_serial_read` | 增量读原始字节批次（`seq / dir / t / len / gap`） |
+| | `elab_serial_wait` | 等匹配内容出现 / 超时（“发命令后等 OK”这类时序断言） |
+| | `elab_serial_decode` | 无状态解码（JustFloat / FireWater）；`apply=true` 同时落到会话 |
+| | `elab_serial_decoded` | 增量读**会话共享解码帧**（与面板波形页同一份数据） |
+| | `elab_serial_capture` | 开始 / 停止字节录制，返回证据文件路径与统计 |
+
+内核自描述 `capabilities.meta` 会把步骤、档位与解码器清单带给面板和 agent ——
+**工具层不写死业务枚举**，内核演进时自动跟随。
 
 <a id="serial"></a>
 
@@ -155,6 +231,23 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 > 界面上：驾驶舱「串口」页与 DSH 面板「串口」页是**同一套工作区**（窄栏版布局对齐，
 > 单条工具栏 + 搜索 subbar + 发送面板）。
 
+<a id="serial-shared"></a>
+
+### 共享解码：agent 与人的波形同源
+
+decoder 不是客户端设置，而是**会话属性**：谁把它落到会话，谁的画面就同图。
+
+| 谁 | 怎么做 | 结果 |
+|---|---|---|
+| agent 选解码 | `elab_serial_monitor`（`action=decoder`）或 `elab_serial_decode`（`apply=true`） | 面板波形页出现 **「共享解码 · agent 选定」** 徽标，画的是内核帧环里的那份帧 |
+| agent 拿数据 | `elab_serial_decoded`（`after` 游标） | 结构化 `values` 数组 + `gap`（帧环挤出只报告、不抹平）——与面板读**同一个帧环** |
+| 人切解码 | 波形页 decoder 下拉 | 徽标变 **「人选定」**，agent 下次读到的就是新解码 |
+
+- 内核只解 **RX**（设备输出）；TX 是"我们写出去的"，不解码。
+- 帧环 1024 帧；半帧跨批续解（半帧超过 64 KiB 丢弃并计入 `skipped`）；
+  换 decoder / 清空时帧序号保持单调，旧游标不会静默失效。
+- 没人落 decoder（`decode.decoder == ''`）时，面板回退到原本地解码路径，行为与之前一致。
+
 ### 纪律与互斥
 
 - **监视是"看"，不是证据**：实时流只活环形缓冲；可复核的判定走闭环 `monitor` 步骤
@@ -162,22 +255,22 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 - 串口监视（常驻）与闭环 run **双向 409 互斥**，端口不会被两个进程同时抢。
 - agent 打开监视默认带 **`lease_s` 租约**，到期自动释放端口，避免把串口一直占死。
 
-### Agent 工具（`elab_*`）
+### 串口类 Agent 工具
+
+全部 17 个工具见 [Agent 工具总表](#agent-tools)。串口这组：
 
 | 工具 | 作用 |
 |---|---|
-| `elab_status` | 状态总览：工程/步骤可用性 + **串口端口候选、当前会话、租约剩余** |
-| `elab_step` | 按显式步骤执行（含 `tool:<name>`），与面板单步按钮同源；不可用直接报错 |
-| `elab_preview` | 只读命令预览（不 spawn、不写盘），看将执行的 argv |
 | `elab_serial` | 写串口（`utf8/ascii/gbk/hex` + 行尾）；**写硬件**，需开启 `allowAgentWrite` |
-| `elab_serial_monitor` | 常驻会话 `open / close / clear / pause / resume`（带租约） |
+| `elab_serial_monitor` | 常驻会话 `open / close / decoder / clear / pause / resume`（带租约） |
 | `elab_serial_read` | 结构化读出批次（`seq / dir / t / len / gap`，只读） |
 | `elab_serial_wait` | 等匹配内容出现 / 超时，返回命中批次（只读） |
 | `elab_serial_decode` | 对指定字节跑 JustFloat / FireWater 解码，返回帧与通道数 |
+| `elab_serial_decoded` | 增量读会话共享解码帧（与面板波形同源，见[共享解码](#serial-shared)） |
 | `elab_serial_capture` | 开始 / 停止字节录制，返回证据文件路径与统计 |
 
-内核自描述 `capabilities.meta.serial.decoders` 会随内核演进自动把解码器清单带给面板与 agent，
-工具层不写死枚举。
+串口端口候选、当前会话与租约剩余看 `elab_status`；内核自描述
+`capabilities.meta.serial.decoders` 会把解码器清单带给面板与 agent，工具层不写死枚举。
 
 **画面同步**：agent 发起的 run 会自动切到对应工程并实时接管事件流（SSE 从 seq 0 重放，
 中途开始也不缺前序步骤）；只跟**新出现**的 run，不会把人手动切换的视图持续拽回。
@@ -283,6 +376,7 @@ $ ./elab loop -p at32_test --clean
 | 目标 | 入口 |
 |---|---|
 | 版本发布说明 | [CHANGELOG.md](CHANGELOG.md) |
+| **需求逐项对照与后续改进**（驾驶舱 R1–R10 / 插件目标 / 串口 P1–P3.5 / 市场 R1–R4 + backlog） | [docs/需求对照与改进.md](docs/需求对照与改进.md) |
 | 设计约束 C1–C35 | [docs/设计约束.md](docs/设计约束.md) |
 | **串口监视与调试可视化迁移方案**（P1/P2/P3、数据面契约、Agent 工具） | [docs/技术迁移方案_串口监视与调试可视化.md](docs/技术迁移方案_串口监视与调试可视化.md) |
 | **DSH 插件移植技术方案**（分层边界 / 面板 / ICD） | [docs/技术方案_dsh-elab-flow插件移植.md](docs/技术方案_dsh-elab-flow插件移植.md) |
@@ -297,8 +391,10 @@ $ ./elab loop -p at32_test --clean
 - `onhw-gate` 需 self-hosted 探针（云端编译门禁不受影响）
 - 驾驶舱 `profiles/*.yaml` 插件化装配、`elab skill --adapt` 未实现
 - 常驻监视的实时流只活环形缓冲（重启即失）—— 它是"看"，要证据走闭环 `monitor` 或「录制」
-- 字节视图只渲染最近若干批（驾驶舱 300 / DSH 面板 200）、波形只看最近 64 KiB 窗口
-  （更早的仍在服务端缓冲里，可用「导出」留档）
+- 字节视图只渲染最近若干批（驾驶舱 300 / DSH 面板 200）；波形页在**共享解码**模式下看内核
+  帧环最近 1024 帧（未启用的本地兜底解码仍是 64 KiB 窗口）——更早的可用「导出」/「录制」留档
+- 共享解码的"关闭"入口只在 agent 侧（`decoder` 传空串）；面板下拉只有具体的 decoder
+- 录制产物是有界 JSONL（可回放），但界面尚无回放器
 
 ## 设计边界
 

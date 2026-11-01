@@ -969,20 +969,67 @@ var KNOWN_TOPICS = [
 ];
 
 // src/adapters/dsh-web/events/run-events.ts
+var EVENTS_URL = "/elab/events";
+var Hub = class {
+  constructor(key, run, sessionId) {
+    __publicField(this, "stream");
+    __publicField(this, "entries", /* @__PURE__ */ new Set());
+    __publicField(this, "key");
+    this.key = key;
+    this.stream = new EventStream(
+      { url: EVENTS_URL, run, sessionId },
+      {
+        onEvent: (e) => {
+          for (const en of [...this.entries]) if (!en.disposed) en.sink.onEvent(e);
+        },
+        onClosed: (reason) => {
+          for (const en of [...this.entries]) if (!en.disposed) en.sink.onClosed(reason);
+        }
+      }
+    );
+  }
+  attach(sink) {
+    const self = this;
+    const entry = { sink, visible: true, disposed: false };
+    this.entries.add(entry);
+    return {
+      setVisible(visible) {
+        if (entry.disposed) return;
+        entry.visible = visible;
+        self.sync();
+      },
+      dispose() {
+        if (entry.disposed) return;
+        entry.disposed = true;
+        self.entries.delete(entry);
+        if (self.entries.size === 0) {
+          self.stream.dispose();
+          hubs.delete(self.key);
+        }
+      }
+    };
+  }
+  /** 可见性 = 任一订阅者可见（关一个入口不断另一个）。 */
+  sync() {
+    this.stream.setVisible([...this.entries].some((e) => e.visible && !e.disposed));
+  }
+};
+var hubs = /* @__PURE__ */ new Map();
 function createRunEventsPort() {
   return {
     connect(run, sessionId, sink) {
-      const stream = new EventStream(
-        { url: "/elab/events", run, sessionId: sessionId ?? void 0 },
-        {
-          onEvent: (e) => sink.onEvent(e),
-          onClosed: (reason) => sink.onClosed(reason)
-        }
-      );
-      return {
-        setVisible: (visible) => stream.setVisible(visible),
-        dispose: () => stream.dispose()
-      };
+      if (run === null) {
+        return { setVisible: () => {
+        }, dispose: () => {
+        } };
+      }
+      const key = `${run}|${sessionId ?? ""}`;
+      let hub = hubs.get(key);
+      if (hub === void 0) {
+        hub = new Hub(key, run, sessionId);
+        hubs.set(key, hub);
+      }
+      return hub.attach(sink);
     }
   };
 }
@@ -2036,7 +2083,7 @@ function SerialPane(props) {
   const [sendFormat, setSendFormat] = useState("utf8");
   const [eol, setEol] = useState("crlf");
   const [notice, setNotice] = useState(null);
-  const [decoder, setDecoder] = useState(decoders[0]?.id ?? "justfloat");
+  const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
   const scrollRef = useRef(null);
   const followRef = useRef(true);
   followRef.current = follow;
@@ -2110,6 +2157,11 @@ function SerialPane(props) {
   const shownChannels = sharedActive ? stream.decodedSnap?.channels ?? (sharedFrames[0]?.length ?? 0) : decodeMeta?.channels ?? (frames[0]?.length ?? 0);
   useEffect(() => {
     if (view !== "wave" || sharedActive) return;
+    if (decoder === "") {
+      setFrames([]);
+      setDecodeMeta(null);
+      return;
+    }
     if (filtered.length === 0) {
       setFrames([]);
       setDecodeMeta(null);
@@ -2307,13 +2359,15 @@ function SerialPane(props) {
         onChange: (e) => {
           const next = e.currentTarget.value;
           setDecoder(next);
+          props.onDecoder?.(next);
           if (stream.active) void stream.setDecoder(next);
         },
         "aria-label": "\u534F\u8BAE\u89E3\u7801\u5668",
         title: sharedActive ? `\u5171\u4EAB\u89E3\u7801\uFF08${stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"}\uFF09\uFF1A\u9762\u677F\u4E0E agent \u8BFB\u540C\u4E00\u4EFD\u5E27` : decoders.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
         style: selectStyle
       },
-      decoders.map((d) => /* @__PURE__ */ react_default.createElement("option", { key: d.id, value: d.id }, d.label))
+      decoders.map((d) => /* @__PURE__ */ react_default.createElement("option", { key: d.id, value: d.id }, d.label)),
+      stream.active ? /* @__PURE__ */ react_default.createElement("option", { value: "" }, "\u672C\u5730\u89E3\u7801\uFF08\u5173\u95ED\u5171\u4EAB\uFF09") : null
     ) : null,
     /* @__PURE__ */ react_default.createElement(
       "button",
@@ -2839,7 +2893,7 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
       busyRef.current = false;
     };
   }, [enabled, active, sessionId, resetLocal, remember, api]);
-  const open = useCallback(async () => {
+  const open = useCallback(async (decoder) => {
     genRef.current += 1;
     setError(null);
     try {
@@ -2848,6 +2902,7 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
         baud,
         port,
         actor: "human",
+        ...decoder !== void 0 && decoder !== "" ? { decoder } : {},
         sessionId
       });
       if (r.active !== true) {
@@ -3571,6 +3626,7 @@ function readSerialPref() {
     const out = {};
     if (typeof o.port === "string" && o.port !== "") out.port = o.port;
     if (typeof o.baud === "number" && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud;
+    if (typeof o.decoder === "string" && o.decoder !== "") out.decoder = o.decoder;
     return out;
   } catch {
     return {};
@@ -3851,6 +3907,15 @@ function CockpitPane(props) {
       return next;
     });
   }, []);
+  const onSerialDecoder = useCallback((decoder) => {
+    setSerialPref((prev) => {
+      const next = { ...prev };
+      if (decoder === "") delete next.decoder;
+      else next.decoder = decoder;
+      writeSerialPref(next);
+      return next;
+    });
+  }, []);
   const serialStream = useSerialStream({
     api: elabApi,
     initial: serialInitial,
@@ -3862,8 +3927,8 @@ function CockpitPane(props) {
   });
   const onSerialStart = useCallback(() => {
     setChannel("serial");
-    if (!serialStream.active) void serialStream.open();
-  }, [serialStream]);
+    if (!serialStream.active) void serialStream.open(serialPref.decoder);
+  }, [serialStream, serialPref.decoder]);
   const steps = snap.run.steps;
   const running = snap.run.status === "running";
   const failure = useMemo(() => {
@@ -4113,6 +4178,8 @@ function CockpitPane(props) {
               ports: serialMeta.ports,
               onPort: onSerialPort,
               onBaud: onSerialBaud,
+              decoderPref: serialPref.decoder,
+              onDecoder: onSerialDecoder,
               writable: serialMeta.writable,
               runLines: buffersRef.current.serial ?? [],
               runLinesVersion: tailVersion,
