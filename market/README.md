@@ -6,7 +6,9 @@
 
 - 市场索引：`market/index.json`（本仓离线兜底 + 生成/校验的单一入口）
 - 远程市场索引：<https://github.com/xkk6663/elab-pack-market>
-  （`elab.host.yaml: packs.market` 指向它的 raw URL；不可达时自动回退本仓索引）
+  （`elab.host.yaml: packs.market` 指向它的 raw URL；不可达时自动回退本仓索引）。
+  **该仓由 GitHub Actions 每小时自动生成**：作者仓库打上 `elab-pack` topic 即自动
+  上架，没有 PR、没有人工审核（见下文「自动维护」）
 - 外置包示例：<https://github.com/xkk6663/elab-pack-artery-at32>
 
 ## 设计约束（与本仓分层规则一致）
@@ -102,6 +104,27 @@ DSH 驾驶舱面板右上角 **⚙** 进入设置视图（整幅覆盖侧边栏�
 
 同一能力对 agent 暴露为工具 `elab_pkg`（status / search / install / activate /
 remove / update / verify），agent 可自行安装（安装不要求 `allowAgentWrite`）。
+
+## 自动维护（无人工审核）
+
+市场仓 `xkk6663/elab-pack-market` 的 `.github/workflows/index.yml` 每小时（cron）
+及手动触发时执行：
+
+```bash
+python -m elab pkg index --remote --out index.json --report report.json
+```
+
+流程：GitHub 搜索发现（`topic:elab-pack` + 仓库名含 `elab-pack` 两条查询合并去重）
+→ 逐仓 clone 到固定 ref（最高 semver tag；无 tag 用默认分支 commit SHA）
+→ 机器校验（`pack.yaml` schema / `requires` 握手 / 安全审计 / `.gitattributes`）
+→ 机器人用 `tree_hash` 重算 `sha256` → 有变化才提交（bot 身份，无人工合并）。
+
+- **准入 = 机器校验**，规则见 [CONTRIBUTING.md](CONTRIBUTING.md) §7；不合格仓库只是
+  跳过并写进 `report.json`，不影响其他包上架。
+- **紧急刹车**：索引仓根目录可选 `blocklist.json`（`{"repos": ["<url>", "owner/repo"]}`），
+  命中的仓库直接跳过 —— 仅用于恶意包，不属常规审核流程。
+- 本机跑同一套逻辑：`./elab pkg index --remote --out index.json --report report.json`
+  （`GITHUB_TOKEN` 可选，配了额度更高）。
 
 ## 维护本仓索引
 

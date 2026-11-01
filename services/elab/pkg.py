@@ -415,6 +415,15 @@ def _find_pack_root(path: Path) -> Path:
 
 
 # ── 来源物化（本地 / git / 压缩包）──────────────────────────────────
+def _git(cmd: list[str]) -> None:
+    try:
+        subprocess.run(["git", *cmd], check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise PackError("安装 git 来源需要主机安装 git") from exc
+    except subprocess.CalledProcessError as exc:
+        raise PackError(f"git 命令失败：{exc.stderr.strip() or exc}") from exc
+
+
 @contextmanager
 def _materialize(source=None, *, local=None, git=None, ref=None, archive=None,
                  subdir="", sha256: str | None = None):
@@ -428,17 +437,21 @@ def _materialize(source=None, *, local=None, git=None, ref=None, archive=None,
     if git:
         url, frag = str(git).split("#", 1) if "#" in str(git) else (str(git), "")
         subdir = subdir or frag
+        ref = str(ref or "").strip()
         with tempfile.TemporaryDirectory(prefix="elab-pack-") as td:
-            cmd = ["git", "clone", "--depth", "1"]
-            if ref:
-                cmd += ["--branch", str(ref)]
-            cmd += [url, td]
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-            except FileNotFoundError as exc:
-                raise PackError("安装 git 来源需要主机安装 git") from exc
-            except subprocess.CalledProcessError as exc:
-                raise PackError(f"git clone 失败：{exc.stderr.strip() or exc}") from exc
+            if ref and re.fullmatch(r"[0-9a-f]{40}", ref):
+                # 市场索引固定到 commit SHA 以保证可复现；`clone --branch`
+                # 不接受 SHA，改为 init + fetch 该提交。
+                _git(["init", "--quiet", td])
+                _git(["-C", td, "remote", "add", "origin", url])
+                _git(["-C", td, "fetch", "--quiet", "--depth", "1", "origin", ref])
+                _git(["-C", td, "checkout", "--quiet", "FETCH_HEAD"])
+            else:
+                cmd = ["git", "clone", "--depth", "1"]
+                if ref:
+                    cmd += ["--branch", ref]
+                cmd += [url, td]
+                _git(cmd)
             base = Path(td) / subdir if subdir else Path(td)
             yield _find_pack_root(base), {"type": "git", "url": url,
                                           "ref": ref or "", "subdir": subdir}

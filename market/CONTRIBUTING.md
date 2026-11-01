@@ -1,8 +1,8 @@
 # 适配包贡献指南
 
 本仓（elab-Flow）只维护**内置包** `packs/official/**` 与市场索引 `market/index.json`。
-社区适配包一律放在**作者自己的 GitHub 仓库**，通过市场索引上架。这份指南是贡献者
-和评审者的共同清单。
+社区适配包一律放在**作者自己的 GitHub 仓库**，由机器人定时发现并生成索引上架 ——
+**没有 PR、没有人工审核**。这份指南是贡献者的操作说明，也是机器准入规则的公开版。
 
 > 一句话原则：**适配包是数据，不是代码**。贡献者不需要改内核，也不需要懂闭环实现 ——
 > 只需要把一颗芯片的事实（参数 / 厂商指纹 / 平台坑位）按 schema 写对。
@@ -47,7 +47,7 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
 建议同时给出 `debug`（openocd target）、`verify`、`pitfalls` / `ota_layout`（如适用）。
 字段定义以本仓 `packs/official/st/stm32/chips/*.yaml` 为模板，**只写数据**，不写脚本。
 
-## 2. 硬规则（评审会逐条看）
+## 2. 硬规则（机器准入逐条校验，不通过即不上架）
 
 1. **相互独立**：包不得 `import`、`source`、`include` 或依赖另一个包；跨包能力走
    `pack.yaml` schema 或市场索引。
@@ -79,13 +79,34 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
 ```
 
 `verify` 通过的判定：结构合法、没有禁用文件、`tree_hash` 与 `.installed.json` 一致。
-**`sha256` 就来自这一步**（输出里的 `sha256` 字段），上架时原样填入索引。
+
+**你不需要提供 sha256**：市场索引里的哈希由机器人在上架时用 `tree_hash` 亲自计算，
+作者自报的数字不会被采用（也无法伪造 —— 安装时内核仍会强校验）。
 
 ## 4. 上架流程（零服务器）
 
-1. 把包推到**独立 GitHub 仓库**（建议命名 `elab-pack-<vendor>-<platform>`）。
-2. 打 tag（`v0.1.0`），用 tag 作为索引里的 `source.ref`（比 `main` 可复现）。
-3. 在 <https://github.com/xkk6663/elab-pack-market> 提 PR，在 `index.json` 增加条目：
+1. 把包推到**独立 GitHub 仓库**（建议命名 `elab-pack-<vendor>-<platform>`），
+   并带上 `.gitattributes`（§5）。
+2. 给仓库加 topic **`elab-pack`**：仓库首页 → About 右侧 ⚙ → Topics →
+   输入 `elab-pack` 保存。（仓库名里含 `elab-pack` 也会被搜到，但 topic 是正式
+   上架标记，建议务必打上。）
+3. （可选）打 tag `v0.1.0`。有语义化 tag 时索引固定到该 tag；没有 tag 时固定到
+   **默认分支的 commit SHA** —— 两种情况都可复现，且 `sha256` 由机器人计算。
+
+到此为止。市场仓 <https://github.com/xkk6663/elab-pack-market> 的 GitHub Actions
+每小时自动执行：
+
+```
+GitHub 搜索发现（topic + 仓库名两条查询合并去重）
+  → 逐仓 clone 到固定 ref
+  → 机器校验（schema / 安全审计 / .gitattributes / 兼容性）
+  → 机器人用 tree_hash 重算 sha256
+  → 写入 index.json（有变化才提交）
+```
+
+一条命令都不需要你敲，也没有 PR / 评审 / 合并环节。**上架结果 = 校验结果**。
+
+索引条目形如（机器生成，仅供排查参考）：
 
 ```json
 {
@@ -99,16 +120,13 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
   "requires": { "kernel_api": ">=1 <2", "schema_version": 1 },
   "chips": ["acme/acme32x"],
   "source": { "type": "git", "url": "https://github.com/<you>/elab-pack-acme-acme32.git", "ref": "v0.1.0" },
-  "sha256": "<第 3 步 verify 的 sha256>"
+  "sha256": "<机器人计算>"
 }
 ```
 
-4. PR 里附：仓库地址、验证过的内核版本、`doctor --deep` / `build`（有硬件再加
-   `triple`）的输出摘要、已知坑位。
-5. CI 会拉包安装并做 schema 校验 + `sha256` 强校验；通过后合入，`elab pkg search`
-   即可搜到。
-
-外置包也支持 `"type": "archive"`（zip/tar.gz 直链）与 `subdir`（仓内子目录）。
+`status` 恒为 `community`：`official` 只保留给随本仓分发的 `packs/official/**`，
+作者无法自称官方。外置包同样支持 `"type": "archive"`（zip/tar.gz 直链）与
+`subdir`（仓内子目录），但自动发现只认 git 仓库。
 
 ## 5. `.gitattributes`（必须）
 
@@ -125,24 +143,28 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
 
 | 动作 | 要求 |
 |---|---|
-| 改芯片参数 / 指纹 / 坑位 | 升 `version` + 重新算 `sha256` + 新 tag |
+| 改芯片参数 / 指纹 / 坑位 | 升 `version`（建议同时打新 tag；`sha256` 由机器人重算） |
 | 只改 README | 不必升版本（索引不记 README） |
-| 修安全/兼容问题 | 升版本并在 PR 说明影响面（哪些芯片受影响） |
-| 下架 | 在索引 PR 里删条目；已装用户本地副本不受影响（可用 `elab pkg remove`） |
+| 修安全/兼容问题 | 升版本并在仓库 README/Release 说明影响面（哪些芯片受影响） |
+| 下架 | 删掉仓库的 `elab-pack` topic（或归档仓库），下一轮自动移除；已装用户本地副本不受影响（`elab pkg remove`） |
+| 紧急封禁 | 恶意包可让维护者在索引仓的 `blocklist.json` 加一行仓库地址（不属常规流程） |
 
 同版本重装需要 `--force`；面板上对应「更新」按钮。
 
-## 7. 评审清单（维护者用）
+## 7. 机器准入清单（每轮自动执行，无需任何人审）
 
-- [ ] `name` / `vendor` / `platform` / `version` 合法且唯一
-- [ ] `license` 与仓库 LICENSE 一致
-- [ ] `requires.kernel_api` 覆盖实测内核版本
-- [ ] `chips` 与 `chips/*.yaml` 实际文件一一对应
-- [ ] 无禁用扩展名文件；无网络/子进程调用
-- [ ] `.gitattributes` 含 `* -text`
-- [ ] `sha256` 与 tag 内容一致（CI 会复核）
-- [ ] 包不依赖其他包；芯片知识与本仓内核无关
-- [ ] 起码 `build` 级验证有输出证据（有硬件建议 `triple`）
+| # | 检查 | 不通过的结果 |
+|---|---|---|
+| 1 | `pack.yaml`：`schema_version=1`、必填字段齐全、`name=vendor/platform` 一致、semver 版本 | 跳过该仓库 |
+| 2 | `requires.kernel_api` / `schema_version` 与当前内核握手 | 跳过（并注明要求的区间） |
+| 3 | 安全审计：无脚本 / 无预编译二进制 / 无符号链接（`pkg.audit_dir`） | 跳过并列出命中文件 |
+| 4 | 包内至少一颗 `chips/**/*.yaml`，且芯片 `vendor` 与包一致 | 跳过 |
+| 5 | `.gitattributes` 含 `* -text` | 跳过 |
+| 6 | 内容哈希由机器人用 `pkg.tree_hash` 重算（作者自报值一律忽略） | — |
+| 7 | 同名包只保留版本最高者（其余记入报告） | 被取代者不上架 |
+
+每一项的判定结果都写在市场仓 Actions 的 `report.json` 产物里（谁被拒、为什么被拒），
+排查时看那一份即可 —— 这也是"无人工审核"能成立的前提：**规则公开、结果可查**。
 
 ## 8. 官方包（`status: official`）
 
@@ -150,11 +172,17 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
 「本机官方源」（离线）。当前内置：`st/stm32`。官方包同样遵守上述全部规则 ——
 **它对格式是最好的自吃狗粮**；新增官方包也要走 `elab pkg index --check` 门禁。
 
+官方包**不进**自动市场索引（它们随骨架分发，本来就离线可用），因此市场里也不会
+出现 `status: official` 的条目。
+
 ## 9. 常见问题
 
 - **安装报"内容哈希漂移"**：多半是换行（`.gitattributes` 缺失）或有人改了包没升版本。
-- **`elab pkg search` 搜不到**：远程索引 5 分钟内存缓存；等 TTL 或重启驾驶舱。索引
-  文件不可达时会回退本仓 `market/index.json`（只含内置包）。
+- **`elab pkg search` 搜不到**：先确认仓库已打 `elab-pack` topic；索引每小时刷新，
+  最长等 1 小时。远程索引还有 5 分钟内存缓存；文件不可达时会回退本仓
+  `market/index.json`（只含内置包）。
+- **怎么知道为什么没上架**：看 <https://github.com/xkk6663/elab-pack-market> 的
+  Actions 运行记录，`report.json` 会给出具体拒绝原因。
 - **面板市场页签报"市场索引读取失败"**：网络问题；已装/启用/卸载不依赖网络。
 - **想同时保留多套芯片包**：直接装多套，`elab pkg activate <name>` 切换即可 ——
   一次只启用一套，但本地可以存很多套。

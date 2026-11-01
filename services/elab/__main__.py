@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from . import __version__
 from .config import Config, ElabError, Host, to_fwd
 from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
+from . import market as market_mod
 from . import monitor as monitor_mod
 from . import pkg as pkg_mod
 from . import run as run_mod
@@ -200,12 +202,21 @@ def _parser() -> argparse.ArgumentParser:
     sp = _pkg_sub("verify", "校验已装包的结构/安全/内容哈希")
     sp.add_argument("name", nargs="?", help="包名；缺省 = 全部")
 
-    sp = _pkg_sub("index", "生成或校验市场索引（官方包自吃狗粮）")
+    sp = _pkg_sub("index", "生成或校验市场索引（官方包自吃狗粮 / 社区市场自动维护）")
     sp.add_argument("--from", dest="from_path",
                     help="包源目录（默认 packs/official）")
     sp.add_argument("--out", help="索引输出路径（默认 market/index.json）")
     sp.add_argument("--base", help="source 相对路径基准（默认索引文件所在目录）")
     sp.add_argument("--check", action="store_true", help="只校验索引与包内容是否漂移")
+    sp.add_argument("--remote", action="store_true",
+                    help="从 GitHub 自动发现社区包并生成索引（打 topic 即上架，无人工审核）")
+    sp.add_argument("--token", help="GitHub token（默认读 GITHUB_TOKEN / GH_TOKEN）")
+    sp.add_argument("--topic", default="elab-pack",
+                    help="GitHub topic 标记（默认 elab-pack）")
+    sp.add_argument("--limit", type=int, default=100,
+                    help="每条查询最多取多少个仓库（默认 100）")
+    sp.add_argument("--block", help="封禁清单 JSON（市场仓 blocklist.json，紧急下架用）")
+    sp.add_argument("--report", help="把发现/拒绝报告写到该路径")
 
     p = sub.add_parser("adapt",
                        help="一键适配图形配置器导出的工程（确定性探测 → 生成 projects/*.yaml）")
@@ -817,6 +828,25 @@ def cmd_pkg(cfg: Config, args) -> int:
         out = Path(args.out) if args.out else Path(cfg.root) / "market" / "index.json"
         # 仓库内索引的 source.path 相对仓库根（与 load_market 的 _base 约定一致）
         base = Path(args.base) if args.base else Path(cfg.root)
+        if args.remote:
+            if args.check:
+                print("[elab] ✗ --remote 与 --check 不能同时使用", file=sys.stderr)
+                return 2
+            token = (args.token or os.environ.get("GITHUB_TOKEN")
+                     or os.environ.get("GH_TOKEN"))
+            result = market_mod.build_remote_index(
+                token=token, topic=args.topic, limit=args.limit, block=args.block)
+            data, report = result["index"], result["report"]
+            if args.report:
+                market_mod.write_report(report, args.report)
+            if args.json:
+                print(json.dumps({"index": data, "report": report},
+                                 ensure_ascii=False, indent=2))
+            else:
+                market_mod.write_index(data, out)
+                print(market_mod.report_text(report))
+                print(f"[elab] ✓ 已生成市场索引：{out}（{len(data['packs'])} 个包）")
+            return 0
         if args.check:
             probs = pkg_mod.index_problems(root, base, out)
             if args.json:
