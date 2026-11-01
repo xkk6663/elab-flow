@@ -31,7 +31,9 @@ async function mk(path, body) {
 
 before(async () => {
   ROOT = await mkdtemp(join(tmpdir(), 'elab-discover-'))
-  // 一个 elab 仓库形态的树
+  // 一个 elab 仓库形态的树（判据与宿主半统一：cockpit/server.py + services/elab）
+  await mk('repo/cockpit/server.py', '# cockpit\n')
+  await mk('repo/services/elab/__init__.py', '')
   await mk('repo/elab.host.yaml', 'version: 1\n')
   await mk('repo/projects/alpha.yaml', 'name: alpha\nroot: ${ELAB_ROOT}/fw/alpha\n')
   await mk('repo/projects/beta.yaml', 'name: beta\nroot: ${ELAB_ROOT}/fw/beta\n')
@@ -170,10 +172,14 @@ test('resolveSessionCwd 降级链：workingDirectory 优先于 header.cwd', () =
   assert.equal(resolveSessionCwd(ctx3, 's1'), undefined)
 })
 
-test('findElabRoot 需要同时存在 projects/ 与 elab.host.yaml', async () => {
+test('findElabRoot 用统一判据：cockpit/server.py + services/elab（不再另立 projects 标准）', async () => {
   const found = await findElabRoot(join(ROOT, 'repo/fw/alpha'))
   assert.equal(norm(found), norm(join(ROOT, 'repo')))
   assert.equal(await findElabRoot(join(ROOT, 'nowhere')), undefined)
+  // 只有 projects/ + elab.host.yaml、没有 cockpit/services/elab → 不算根
+  await mk('lookalike/elab.host.yaml', 'version: 1\n')
+  await mk('lookalike/projects/a.yaml', 'name: a\n')
+  assert.equal(await findElabRoot(join(ROOT, 'lookalike')), undefined)
 })
 
 test('readAdaptedProjects 求值 ${ELAB_ROOT}（本仓库全部 yaml 的真实写法）', async () => {

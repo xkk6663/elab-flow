@@ -11,6 +11,7 @@ import React, { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { elabApi, type ElabConfig } from '../kernel-http/icd-client.ts'
+import type { EnvProbe, ProbeItem } from '../../domain/icd.ts'
 
 const inputStyle: React.CSSProperties = {
   flex: '1 1 auto',
@@ -36,11 +37,52 @@ const labelStyle: React.CSSProperties = {
   color: 'var(--elab-fg-secondary)',
 }
 
+/** 环境灯：一行 label + 版本/错误（绿色可用 / 黄色缺件）。 */
+function probeRow(label: string, item: ProbeItem | undefined, busy: boolean): ReactNode {
+  const ok = item?.ok === true
+  return (
+    <div key={label} style={{ display: 'flex', gap: '8px', fontSize: '11px', lineHeight: 1.9 }}>
+      <span
+        aria-hidden="true"
+        style={{
+          display: 'inline-block',
+          width: '8px',
+          height: '8px',
+          marginTop: '6px',
+          borderRadius: '50%',
+          background: ok ? 'var(--elab-status-ok)' : 'var(--elab-status-run)',
+        }}
+      />
+      <span style={{ flex: '0 0 150px', color: 'var(--elab-fg-secondary)' }}>{label}</span>
+      <span style={{ color: 'var(--elab-fg-muted)', wordBreak: 'break-all' }}>
+        {ok ? (item?.version ?? '可用') : busy ? '检测中…' : (item?.error ?? '未检测到')}
+      </span>
+    </div>
+  )
+}
+
 export function SettingsSection(_props: Record<string, unknown>): ReactNode {
   const [cfg, setCfg] = useState<ElabConfig | null>(null)
   const [draft, setDraft] = useState<Partial<ElabConfig>>({})
   const [status, setStatus] = useState<'loading' | 'idle' | 'saving' | 'saved' | 'error'>('loading')
   const [error, setError] = useState<string | null>(null)
+  // 环境分段（复用 GET /elab/env；只读、不 spawn 内核）
+  const [env, setEnv] = useState<EnvProbe | null>(null)
+  const [envBusy, setEnvBusy] = useState(false)
+
+  const loadEnv = (): void => {
+    setEnvBusy(true)
+    void (async () => {
+      try {
+        const r = await elabApi.env()
+        setEnv(r.env)
+      } catch {
+        /* 探测失败不阻断设置页（面板会提示） */
+      } finally {
+        setEnvBusy(false)
+      }
+    })()
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -59,6 +101,11 @@ export function SettingsSection(_props: Record<string, unknown>): ReactNode {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    loadEnv()
+    // 只在挂载时探一次；手动「重新检测」在环境分段里
   }, [])
 
   const set = (patch: Partial<ElabConfig>): void => setDraft((cur) => ({ ...cur, ...patch }))
@@ -163,6 +210,43 @@ export function SettingsSection(_props: Record<string, unknown>): ReactNode {
         {status === 'saved' ? <span style={{ color: 'var(--elab-status-ok)' }}>{'已保存并热更新'}</span> : null}
         {status === 'error' ? <span style={{ color: 'var(--elab-status-fail)' }}>{`失败：${error ?? '未知原因'}`}</span> : null}
         <span style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>{'保存后写入 ~/.dsh/dsh-elab-cockpit.config.json，重启仍生效'}</span>
+      </div>
+
+      {/* 环境（只读探测；与安装向导同一数据源，不 spawn 内核） */}
+      <div style={{ marginTop: '12px', borderTop: '1px solid var(--elab-border)', paddingTop: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+          <span style={{ fontWeight: 600 }}>{'环境'}</span>
+          <button
+            onClick={loadEnv}
+            disabled={envBusy}
+            style={{
+              padding: '2px 10px',
+              fontSize: '11px',
+              borderRadius: '6px',
+              border: '1px solid var(--elab-border-strong)',
+              background: 'transparent',
+              color: 'var(--elab-fg-secondary)',
+              cursor: 'pointer',
+            }}
+          >
+            {envBusy ? '检测中…' : '重新检测'}
+          </button>
+        </div>
+        {env === null ? (
+          <div style={{ fontSize: '11px', color: 'var(--elab-fg-muted)' }}>
+            {'尚未检测（缺件只影响编译/烧录/调试，不阻断面板）'}
+          </div>
+        ) : (
+          <div>
+            {probeRow('python', env.python, envBusy)}
+            {probeRow('pyserial', env.pyserial, envBusy)}
+            {probeRow('git', env.git, envBusy)}
+            {probeRow('arm-none-eabi-gcc', env.armGcc, envBusy)}
+            {probeRow('cmake', env.cmake, envBusy)}
+            {probeRow('ninja', env.ninja, envBusy)}
+            {probeRow('openocd', env.openocd, envBusy)}
+          </div>
+        )}
       </div>
     </div>
   )

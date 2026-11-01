@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { apply as applyHost } from './app/host-app.ts'
 import { applyDiscover, type DiscoverConfig } from './adapters/kernel-http/discover-route.ts'
+import { looksLikeElabRoot } from './adapters/kernel-process/host-process.ts'
 import { createSerialMutexTracker } from './adapters/kernel-http/routes.ts'
 import { RunArbiter } from './domain/arbiter.ts'
 import { registerElabTools } from './adapters/dsh-tools/tools.ts'
@@ -119,6 +120,8 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
     applyDiscover(ctx, {
       ...resolved.discover,
       cacheTtlMs: 30_000,
+      // ★ 判据唯一真源：与宿主半 /elab/host 完全同一函数（方案 B1）
+      isElabRoot: looksLikeElabRoot,
     }),
   )
   // applyDiscover 把热更新入口挂在自己的函数属性上（见 discover-route.ts）
@@ -143,16 +146,19 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
   const serialMutex = createSerialMutexTracker()
 
   // ② API 代理 + SSE + 进程托管 + runs 清理
+  //    onRootPersisted：向导写根后热更新 + 持久化（由下方 config 控制器提供）
+  let persistRoot: (dir: string) => void = () => {}
   const hostController = applyHost(ctx, {
     config: resolved.host,
     resolveCwd: cwdResolver(ctx),
     arbiter,
     serialMutex,
+    onRootPersisted: (dir: string) => persistRoot(dir),
   })
 
   // ③ 设置页配置（P4）：启动时先叠加持久化覆盖，再挂 GET/POST /elab/config
   const persistPath = env?.persistPath ?? join(homedir(), '.dsh', 'dsh-elab-cockpit.config.json')
-  registerConfigRoute(ctx, {
+  const configController = registerConfigRoute(ctx, {
     persistPath,
     initialPatch: resolvePersisted(persistPath),
     get(): ConfigPatch {
@@ -187,6 +193,8 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
     },
     warn: (msg: string) => ctx.logger?.warn?.(msg),
   })
+  // 向导写根 → 与设置页保存同一路径（热更新 + 持久化）
+  persistRoot = (dir: string) => configController.update({ elabRoot: dir })
 
   // ④ P5 工具化：elab_* agent 工具（§6.1，autoExposeTools=true 时注册）
   if (resolved.tools.autoExposeTools && ctx.tools !== undefined) {
@@ -254,6 +262,8 @@ function resolvePersisted(persistPath: string): ConfigPatch {
 /**
  * GET/POST /elab/config。POST 合法字段热更新（宿主 + 发现），并合并写入
  * 持久化文件；GET 返回当前生效值。持久化文件在启动时叠加在行配置之上。
+ *
+ * 返回控制器：`update(patch)` 与 POST 走同一路径（供引导向导写根复用）。
  */
 function registerConfigRoute(
   ctx: HostRouteContext,
@@ -264,7 +274,7 @@ function registerConfigRoute(
     apply(patch: ConfigPatch): void
     warn(msg: string): void
   },
-): void {
+): { dispose(): void; update(patch: ConfigPatch): void } {
   // 启动：叠加持久化覆盖（文件不存在/损坏 = 首次运行，用行配置）
   if (Object.keys(opts.initialPatch).length > 0) opts.apply(opts.initialPatch)
 
@@ -274,6 +284,18 @@ function registerConfigRoute(
     res.setHeader('Content-Type', 'application/json; charset=utf-8')
     res.setHeader('Cache-Control', 'no-store')
     res.end(text)
+  }
+
+  /** 热更新 + 合并持久化（POST 与向导写根共用）。 */
+  const applyAndPersist = (patch: ConfigPatch): void => {
+    opts.apply(patch)
+    try {
+      const merged = { ...resolvePersisted(opts.persistPath), ...patch }
+      mkdirSync(join(opts.persistPath, '..'), { recursive: true })
+      writeFileSync(opts.persistPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+    } catch (error) {
+      opts.warn(`dsh-elab-cockpit: 配置持久化失败：${String(error)}`)
+    }
   }
 
   const dispose = registerOnce(ctx, {
@@ -300,18 +322,12 @@ function registerConfigRoute(
       if (patch === undefined) {
         return respond(res, 400, { ok: false, error: { code: 'no-valid-fields', message: '没有可识别的配置字段' } })
       }
-      opts.apply(patch)
-      try {
-        const merged = { ...resolvePersisted(opts.persistPath), ...patch }
-        mkdirSync(join(opts.persistPath, '..'), { recursive: true })
-        writeFileSync(opts.persistPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
-      } catch (error) {
-        opts.warn(`dsh-elab-cockpit: 配置持久化失败：${String(error)}`)
-      }
+      applyAndPersist(patch)
       return respond(res, 200, { ok: true, config: opts.get() })
     },
   })
   ctx.effect(() => dispose, 'dsh-elab-cockpit: config route')
+  return { dispose, update: applyAndPersist }
 }
 
 function readBody(req: IncomingMessage, limit = 1 << 20): Promise<string> {
