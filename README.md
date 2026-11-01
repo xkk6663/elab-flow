@@ -231,6 +231,24 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 > 界面上：驾驶舱「串口」页与 DSH 面板「串口」页是**同一套工作区**（窄栏版布局对齐，
 > 单条工具栏 + 搜索 subbar + 发送面板）。
 
+### 界面演示（模拟串口 · agent 与人协同）
+
+> 无实板：用 `pyserial` 的 `socket://127.0.0.1:5599` 接一台模拟设备，行 / 字节 / 终端 /
+> 波形 / 发送 / 录制**全部走真实内核数据面**（未改内核，仅让端口枚举看见该 URL 口）。
+>
+> 演示分工：agent 先开会话（`opened_by=agent`，租约 120 s）并选定共享解码器 → 人重载页面
+> 接入、接管会话并发送 `status` → agent 切回文本、交还会话 → 人录制并停止。
+> 因此「行」页显示 `会话 agent · 租约`，发送页显示 `会话 我`；两侧看到的是**同一份帧**。
+
+| 行（agent 会话 + 租约 + ANSI 启动日志） | 字节（HEX / ASCII，逐字节着色） |
+|---|---|
+| <img src="docs/assets/serial/01-lines.png" width="440"> | <img src="docs/assets/serial/02-bytes.png" width="440"> |
+| **终端（流式 ANSI 颜色）** | **波形（JustFloat 4 通道 · 共享解码）** |
+| <img src="docs/assets/serial/03-terminal.png" width="440"> | <img src="docs/assets/serial/04-wave.png" width="440"> |
+| **人接管后发送 `status`（TX 与 RX 同面）** | **录制停止（JSONL 路径 / 批数 / 字节数）** |
+| <img src="docs/assets/serial/05-send.png" width="440"> | <img src="docs/assets/serial/06-capture.png" width="440"> |
+
+
 <a id="serial-shared"></a>
 
 ### 共享解码：agent 与人的波形同源
