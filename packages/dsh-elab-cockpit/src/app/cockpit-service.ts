@@ -448,7 +448,7 @@ export function createCockpitService(deps: {
       }
       const notice = req.action === 'download-kernel'
         ? `已下载内核 → ${r.elabRoot ?? ''}`
-        : `已切换到 ${r.elabRoot ?? req.dir}`
+        : `已切换到 ${r.elabRoot ?? ('dir' in req ? req.dir : '')}`
       set({ bootstrapBusy: false, bootstrapNotice: notice })
       await initFlow()
       return true

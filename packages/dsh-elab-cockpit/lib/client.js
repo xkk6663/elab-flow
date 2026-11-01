@@ -618,7 +618,7 @@ function createCockpitService(deps) {
         await refreshEnv();
         return true;
       }
-      const notice = req.action === "download-kernel" ? `\u5DF2\u4E0B\u8F7D\u5185\u6838 \u2192 ${r.elabRoot ?? ""}` : `\u5DF2\u5207\u6362\u5230 ${r.elabRoot ?? req.dir}`;
+      const notice = req.action === "download-kernel" ? `\u5DF2\u4E0B\u8F7D\u5185\u6838 \u2192 ${r.elabRoot ?? ""}` : `\u5DF2\u5207\u6362\u5230 ${r.elabRoot ?? ("dir" in req ? req.dir : "")}`;
       set({ bootstrapBusy: false, bootstrapNotice: notice });
       await initFlow();
       return true;
