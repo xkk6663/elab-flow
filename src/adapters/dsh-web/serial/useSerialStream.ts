@@ -49,7 +49,8 @@ export interface SerialStream {
   decoded: SerialDecodedFrame[]
   decodedSnap: SerialDecodedTail | null
   error: string | null
-  open(): Promise<{ ok: boolean; error?: string }>
+  /** 打开监视；`decoder` = 上次选定（跨会话记忆，缺省为空 = 不启用共享解码）。 */
+  open(decoder?: string): Promise<{ ok: boolean; error?: string }>
   close(): Promise<void>
   clear(): Promise<void>
   setPaused(next: boolean): Promise<void>
@@ -247,7 +248,7 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
   }, [enabled, active, sessionId, resetLocal, remember, api])
 
   // ── 会话操作 ────────────────────────────────────────────────
-  const open = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+  const open = useCallback(async (decoder?: string): Promise<{ ok: boolean; error?: string }> => {
     genRef.current += 1
     setError(null)
     try {
@@ -256,6 +257,7 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
         baud,
         port,
         actor: 'human',
+        ...(decoder !== undefined && decoder !== '' ? { decoder } : {}),
         sessionId,
       })) as unknown as SerialMonitorSnapshot & { ok?: boolean; error?: string }
       if (r.active !== true) {

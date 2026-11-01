@@ -69,16 +69,19 @@ const SERIAL_PREF_KEY = 'elab.serial.pref'
 interface SerialPref {
   port?: string
   baud?: number
+  /** 上次选定的解码器（跨会话记忆；'' 或缺省 = 不启用共享解码）。 */
+  decoder?: string
 }
 
 function readSerialPref(): SerialPref {
   try {
     const raw = window.localStorage.getItem(SERIAL_PREF_KEY)
     if (raw === null) return {}
-    const o = JSON.parse(raw) as { port?: unknown; baud?: unknown }
+    const o = JSON.parse(raw) as { port?: unknown; baud?: unknown; decoder?: unknown }
     const out: SerialPref = {}
     if (typeof o.port === 'string' && o.port !== '') out.port = o.port
     if (typeof o.baud === 'number' && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud
+    if (typeof o.decoder === 'string' && o.decoder !== '') out.decoder = o.decoder
     return out
   } catch {
     return {}
@@ -451,6 +454,19 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
       return next
     })
   }, [])
+  /**
+   * 解码器偏好：'' = 关闭共享解码（从偏好里删掉）。
+   * 记住它是为了"下次打开监视从第一批 RX 就按同一协议解码"（P0-4）。
+   */
+  const onSerialDecoder = useCallback((decoder: string) => {
+    setSerialPref((prev) => {
+      const next: SerialPref = { ...prev }
+      if (decoder === '') delete next.decoder
+      else next.decoder = decoder
+      writeSerialPref(next)
+      return next
+    })
+  }, [])
 
   const serialStream = useSerialStream({
     api: elabApi,
@@ -465,8 +481,8 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   /** 串口通道的「启动」：切到串口页 + 打开常驻监视（已在跑则只切页）。 */
   const onSerialStart = useCallback(() => {
     setChannel('serial')
-    if (!serialStream.active) void serialStream.open()
-  }, [serialStream])
+    if (!serialStream.active) void serialStream.open(serialPref.decoder)
+  }, [serialStream, serialPref.decoder])
 
   // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
   const steps: LadderStep[] = snap.run.steps
@@ -752,6 +768,8 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                   ports={serialMeta.ports}
                   onPort={onSerialPort}
                   onBaud={onSerialBaud}
+                  decoderPref={serialPref.decoder}
+                  onDecoder={onSerialDecoder}
                   writable={serialMeta.writable}
                   runLines={buffersRef.current.serial ?? []}
                   runLinesVersion={tailVersion}
