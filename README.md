@@ -222,6 +222,25 @@ $env:ELAB_ROOT  = "."
 安装（或 `npm install dsh-elab-cockpit`）；开发期可用 Junction 把本仓该目录链接进
 DSH profile 的 `node_modules`。装完重载窗口。
 
+**面板里有什么**：阶梯进度 / 日志尾 / FLASH·RAM 占位 / 构建·烧录·调试·串口四通道 /
+串口行·字节·终端·波形四视图 / 参数化发送组件 / 市场与内核设置。下面是真实 DSH Desktop
+右栏（440 px，STM32F411CEU6 + CMSIS-DAP + COM10，同一次运行）的截图：
+
+<div align="center">
+<table>
+<tr>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-lines.png" width="240" alt="DSH 窄栏·串口行视图"><br><sub>行视图 · 心跳与正弦逐行滚动</sub></td>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-wave.png" width="240" alt="DSH 窄栏·波形视图"><br><sub>波形视图 · 双通道 / 通道绑定 / 缩放</sub></td>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-widget-params.png" width="240" alt="DSH 窄栏·发送组件参数"><br><sub>发送组件 · 参数与服务端预览</sub></td>
+</tr>
+<tr>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-widget-run.png" width="240" alt="DSH 窄栏·周期任务运行中"><br><sub>周期任务 · 轮次与累计字节</sub></td>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-widget-paused.png" width="240" alt="DSH 窄栏·任务已暂停"><br><sub>暂停 · 冻结发送节拍</sub></td>
+<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-widget-stopped.png" width="240" alt="DSH 窄栏·任务已停止"><br><sub>停止 · 人点即 cancelled</sub></td>
+</tr>
+</table>
+</div>
+
 **用起来 5 步**：
 
 1. **开面板**：右栏 elab tab（左栏 panellist 也有入口）。首次打开会自动托管内核子进程
