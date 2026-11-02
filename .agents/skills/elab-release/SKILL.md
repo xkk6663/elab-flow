@@ -35,33 +35,60 @@ description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版
 # 插件（cwd = packages/dsh-elab-cockpit）
 $env:USERPROFILE = "$env:TEMP\dsh-empty-home"   # 隔离本机持久化 elabRoot 配置
 npm test                                        # boundary / style-rules / routes 等
-npm run build                                   # tsc + client bundle + 契约校验
+npx tsc -p tsconfig.host.json --noEmit          # CI 会跑；npm run build 不覆盖
+npx tsc -p tsconfig.client.json --noEmit        # 同上（client 只用自带的 React 最小面）
+npm run build                                   # client bundle + 契约校验 + lib/ 重建
 
 # 内核
 python tests/test_serialwidgets.py -v           # unittest（仓库未装 pytest）
 .\elab.cmd doctor                               # 环境体检
 ```
 
+- **必须本地跑两条 `tsc --noEmit`**：`npm run build` 走 esbuild 打包，**不做完整类型检查**，
+  CI 的 `plugin` 工作流才会跑 tsc；漏跑会得到「本地全绿、CI 红」的假绿。
+  Client 侧没有 `@types/react`，只用 [env.d.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/dsh-web/env.d.ts)
+  的最小声明 —— 新用到的 React 类型（如 `WheelEvent`）要先补进这里。
 - `npm test` 里 `/elab/host` 会话 cwd 用例会被 `~/.dsh/dsh-elab-cockpit.config.json` 的
   `elabRoot` 干扰 → 用空 `USERPROFILE` 跑。
 - `elab doctor` 报 `proj.at32_* 未知芯片` 是本机未装 `artery/at32` 适配包，**不是代码缺陷**。
-- 插件 `npm run build` 结束时会打印 `PASS: client.js 满足宿主 ModuleLoader 契约` 与 5 个槽位。
+- 插件 `npm run build` 结束时会打印 `PASS: client.js 满足宿主 ModuleLoader 契约` 与 5 个槽位；
+  随后 `git diff --exit-code -- lib` 必须为空（CI 同样校验 lib 与源码同步）。
 
-## 4. 提交与双标签
+## 4. 提交、推送与双标签
 
 ```powershell
 git add <具体路径>            # 不要 git add -A
 git commit -m "release(v3.0.0): ... （插件 0.4.0）"
+git push origin main          # ① 先推 main，等 plugin 工作流转绿（badge 见 §9）
 git tag -a v3.0.0 -m "elab-Flow v3.0.0"
 git tag -a plugin-v0.4.0 -m "dsh-elab-cockpit 0.4.0"
-git push origin main
-git push origin v3.0.0 plugin-v0.4.0
+git push origin v3.0.0 plugin-v0.4.0   # ② 绿了再推 tag
 ```
 
+- **顺序很重要**：tag 会再触发一轮 CI；先把 main 推到绿，再打 tag，避免"标签自带红灯"。
 - `v*` tag → 内核发布；`plugin-v*` tag → 触发 `.github/workflows/publish-plugin.yml`。
-- tag 一旦推送就不再移动；修问题发下一个版本。
+- **标签默认不移动**：修问题发下一个版本。唯一例外：tag 刚推送、**未发 GitHub Release、
+  未打新 npm 版本**，且只是补齐门禁（类型声明/测试）而非改产物时，可重指：
+  ```powershell
+  git tag -f -a v3.0.0 -m "elab-Flow v3.0.0" <修复提交>
+  git push --force origin v3.0.0          # 逐个 tag 强推，并在发布说明里注明
+  ```
+  产物（npm tarball / 镜像）保持不变；若已发 npm 新版本，只改运行时行为就必须发下一版。
 
-## 5. 镜像仓（只读）
+## 5. 网络与代理（GitHub 推送）
+
+- 本机系统代理常为 `127.0.0.1:7890`（Clash mixed，HTTP/SOCKS 都收）。git 不读系统代理，
+  需要显式给：
+  ```powershell
+  git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main
+  ```
+- 节点抖动时会报 `schannel: failed to receive handshake` 或 `unexpected eof` —— **重试 1–2 次**
+  通常就好；持续失败再换节点，不要误判为凭据问题。
+- `scripts/mirror-plugin.ps1` 不接受代理参数，先设环境变量再跑：
+  `$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`。
+- 无代理时 `api.github.com` 常不可达；`npm publish` 可直连，不用代理。
+
+## 6. 镜像仓（只读）
 
 自动：`plugin-v*` tag → CI `git subtree split --prefix=packages/dsh-elab-cockpit`
 → `git push --force` 到 `xkk6663/dsh-elab-cockpit:main`（需 secret `PLUGIN_MIRROR_TOKEN`）。
@@ -79,7 +106,7 @@ git push origin v3.0.0 plugin-v0.4.0
 - CI 403 多半是 `PLUGIN_MIRROR_TOKEN` 缺失或 PAT 无镜像仓 `contents:write`。
 - 镜像仓**禁止手工提交**，下次发布会被强推覆盖。
 
-## 6. npm 发布
+## 7. npm 发布
 
 ```powershell
 cd packages/dsh-elab-cockpit
@@ -95,7 +122,7 @@ npm publish                         # 默认 latest
   `icon.svg`、`locale`、`README.md`、`screenshots.json`、`assets`。
 - 回退展示版本：`npm dist-tag add dsh-elab-cockpit@<旧版本> latest`（不是删版本）。
 
-## 7. dsh-market（awesome-dsh-plugin）
+## 8. dsh-market（awesome-dsh-plugin）
 
 - 市场条目 `data/plugins/xkk6663__elab-flow--packages-dsh-elab-cockpit.yml` 只存
   `url/name/category/description`；版本、下载量、截图由**每日探针**从本仓刷新。
@@ -104,17 +131,22 @@ npm publish                         # 默认 latest
   `packages/dsh-elab-cockpit/docs/dsh-market-submission/`。
 - 截图来源：插件根 `screenshots.json`（路径相对包根），新图必须同时进 `assets/`。
 
-## 8. 发布后核对
+## 9. 发布后核对
 
 | 项 | 命令 / 来源 |
 |---|---|
-| 主仓 tag | `git ls-remote --tags origin v3.0.0` |
-| 镜像版本 | GitHub API `xkk6663/dsh-elab-cockpit/contents/package.json` |
+| CI（main / tag） | `https://github.com/xkk6663/elab-flow/actions/workflows/plugin.yml/badge.svg?branch=main`（**不需要 token、不限流**，注意缓存，加 `&cb=<随机数>`） |
+| 主仓 tag | `git ls-remote --tags origin v3.0.0`（`^{}` 行才是提交） |
+| 镜像版本 | `https://raw.githubusercontent.com/xkk6663/dsh-elab-cockpit/main/package.json` |
+| 镜像内容 | `https://raw.githubusercontent.com/xkk6663/dsh-elab-cockpit/main/<被删/改的文件>` |
 | npm | `npm view dsh-elab-cockpit version dist-tags` |
 | 市场 | `awesome-dsh-plugin.com/p/xkk6663/elab-flow--packages-dsh-elab-cockpit/`（探针有延迟） |
 | 面板 | DSH 里面板标题旁版本 / `GET /api/capabilities` 的 `cockpit.version` |
 
-## 9. 回滚
+- **GitHub REST API 未认证时限流（60 次/小时，共享出口 IP 很容易 403）**：核对优先用
+  badge / `raw.githubusercontent.com`，查 `actions/runs` 留给需要查看失败日志时。
+
+## 10. 回滚
 
 - 主仓：`git revert <commit>` + 新 tag；**不要**强推 main。
 - 镜像：`scripts/mirror-plugin.ps1` 指向旧提交（脚本按当前 HEAD 切子树，回滚需先 revert）。
@@ -122,7 +154,7 @@ npm publish                         # 默认 latest
 - 插件降级：用户侧固定旧版本安装；内核 `COCKPIT_VERSION` 与插件 `MIN_KERNEL_VERSION`
   决定兼容提示。
 
-## 10. 纪律
+## 11. 纪律
 
 - 业务层（`services/elab/**`、`cockpit/server.py`）与工具层（`packages/dsh-elab-cockpit/**`）
   不跨层 import；插件只走 loopback HTTP ICD。
