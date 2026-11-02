@@ -79,7 +79,7 @@ function make(opts, provisionerOpts = {}) {
 }
 
 test('默认内核版本可被环境包清单/UI 共用', () => {
-  assert.equal(DEFAULT_KERNEL_VERSION, '2.1.0')
+  assert.equal(DEFAULT_KERNEL_VERSION, '3.0.0')
   // 常量与清单无绑定关系（这里只断言它非空且形状合法）
   assert.match(DEFAULT_KERNEL_VERSION, /^[0-9]+\.[0-9]+(\.[0-9]+)?$/)
   // findPack 至少能被调用（导入路径正确）

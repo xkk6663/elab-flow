@@ -14,6 +14,7 @@ packs/installed/
 skills/*/*/SKILL.md
 .agents/skills/*/SKILL.md
 !.agents/skills/elab-loop/SKILL.md
+!.agents/skills/elab-release/SKILL.md
 
 # Python 字节码
 __pycache__/

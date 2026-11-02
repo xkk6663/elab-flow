@@ -31,6 +31,9 @@ import type {
   SerialDecodeResult,
   SerialDecodedTail,
   SerialMonitorTail,
+  SerialWidget,
+  SerialWidgetRunResult,
+  SerialWidgetsDoc,
   SerialWriteResult,
 } from '../../domain/icd.ts'
 
@@ -218,6 +221,71 @@ export const elabApi = {
     }),
   serialConsole: (limit = 60, sessionId?: string) =>
     request<Record<string, unknown>>(withSession(`/elab/api/serial/console?limit=${limit}`, sessionId)),
+
+  // ── 串口发送组件（M1/M2）：读/存/跑/轮询/取消/暂停 ─────────────
+  /** GET /api/serial/widgets：工程级组件投影（含 rev / warnings / 文件级 error）。 */
+  serialWidgets: (project: string, sessionId?: string) =>
+    request<SerialWidgetsDoc>(
+      withSession(`/elab/api/serial/widgets?project=${encodeURIComponent(project)}`, sessionId),
+    ),
+  /** POST /api/serial/widgets action=save：rev 不匹配 → 409（调用方重读后再存）。 */
+  serialWidgetSave: (opts: {
+    project: string
+    rev: number
+    widget: SerialWidget | Record<string, unknown>
+    sessionId?: string
+  }) =>
+    post<SerialWidgetsDoc>(withSession('/elab/api/serial/widgets', opts.sessionId), {
+      action: 'save', project: opts.project, rev: opts.rev, widget: opts.widget,
+    }),
+  /** POST /api/serial/widgets action=delete。 */
+  serialWidgetDelete: (opts: { project: string; rev: number; id: string; sessionId?: string }) =>
+    post<SerialWidgetsDoc>(withSession('/elab/api/serial/widgets', opts.sessionId), {
+      action: 'delete', project: opts.project, rev: opts.rev, id: opts.id,
+    }),
+  /**
+   * POST /api/serial/widget/run：dry_run=true 只预览；否则执行（异步任务）。
+   * 返回 `state='running'` 时用 serialWidgetJob 轮询到终态。
+   */
+  serialWidgetRun: (opts: {
+    project: string
+    id: string
+    params?: Record<string, unknown>
+    dryRun?: boolean
+    /** true = 按组件 repeat 配置周期跑（组件没配 → 400） */
+    repeat?: boolean
+    confirm?: boolean
+    /** agent 调用时置 true（Host 半据此打 actor='agent'；人 = 默认 false） */
+    agent?: boolean
+    sessionId?: string
+  }) =>
+    post<SerialWidgetRunResult>(
+      withSession('/elab/api/serial/widget/run', opts.sessionId),
+      {
+        project: opts.project,
+        id: opts.id,
+        ...(opts.params !== undefined ? { params: opts.params } : {}),
+        ...(opts.dryRun === true ? { dry_run: true } : {}),
+        ...(opts.repeat === true ? { repeat: true } : {}),
+        ...(opts.confirm === true ? { confirm: true } : {}),
+      },
+      opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
+    ),
+  /** GET /api/serial/widget/job?id=：任务快照；id 缺省 = 当前未结束的任务。 */
+  serialWidgetJob: (jobId = '', sessionId?: string) =>
+    request<SerialWidgetRunResult>(withSession(
+      `/elab/api/serial/widget/job${jobId === '' ? '' : `?id=${encodeURIComponent(jobId)}`}`,
+      sessionId,
+    )),
+  serialWidgetCancel: (jobId: string, sessionId?: string) =>
+    post<{ ok: boolean; id: string; state: string }>(
+      withSession('/elab/api/serial/widget/cancel', sessionId), { id: jobId },
+    ),
+  serialWidgetPause: (jobId: string, paused: boolean, sessionId?: string) =>
+    post<{ ok: boolean; id: string; state: string; paused?: boolean }>(
+      withSession('/elab/api/serial/widget/pause', sessionId), { id: jobId, paused },
+    ),
+
   adapt: (opts: { action: 'probe' | 'write' | 'check'; path: string; name?: string; force?: boolean; sessionId?: string }) =>
     post<AdaptResponse>(withSession('/elab/api/adapt', opts.sessionId), opts),
   discover: (sessionId?: string, refresh = false) => {

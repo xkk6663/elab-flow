@@ -14,7 +14,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { api } from "../api/client";
-import type { Capabilities, SerialChunk, SerialFormat } from "../api/types";
+import type {
+  Capabilities,
+  SerialChunk,
+  SerialFormat,
+  SerialWidget,
+  SerialWidgetParam,
+  SerialWidgetRunResult,
+} from "../api/types";
 import { asciiOf, captureText, hexDump, hexDumpRows, parseAnsi, textOf } from "@elab/cockpit-ui-core";
 import type { SerialRepr } from "@elab/cockpit-ui-core";
 import { Button } from "../primitives/Button";
@@ -98,6 +105,65 @@ function saveHistory(items: string[]): void {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)));
   } catch {
     // 隐私模式/配额满：历史只是便利，不写也不影响发送
+  }
+}
+
+// ── 自定义发送组件（M1）────────────────────────────────────────
+/** 参数默认值（服务端已归一化；前端只做展示初值，不承担校验） */
+function widgetDefaults(w: SerialWidget): Record<string, string | boolean> {
+  const out: Record<string, string | boolean> = {};
+  for (const p of w.params ?? []) {
+    out[p.name] =
+      p.type === "bool"
+        ? Boolean(p.default)
+        : p.default === undefined || p.default === null
+          ? ""
+          : String(p.default);
+  }
+  return out;
+}
+
+function widgetOption(
+  o: string | { label: string; value: string },
+): { label: string; value: string } {
+  return typeof o === "string" ? { label: o, value: o } : o;
+}
+
+/** 参数的输入提示（范围/宽度由服务端 schema 给出，不在前端另立规则） */
+function widgetParamHint(p: SerialWidgetParam): string {
+  if (p.type === "int" || p.type === "float") {
+    const bits: string[] = [];
+    if (p.min !== undefined) bits.push(`≥ ${p.min}`);
+    if (p.max !== undefined) bits.push(`≤ ${p.max}`);
+    if (p.type === "int" && p.render === "hex") bits.push(`HEX ${p.width ?? 2} 位`);
+    return bits.join(" · ");
+  }
+  if (p.type === "hex") {
+    return `HEX ${p.width ?? 1} 字节${p.endian === "le" ? "（小端）" : ""}`;
+  }
+  if (p.type === "string") return `≤ ${p.max_len ?? 256} 字`;
+  if (p.type === "enum") return "下拉选择";
+  return "";
+}
+
+/** 任务是否仍在跑（轮询到终态才停）。 */
+function widgetJobActive(j: SerialWidgetRunResult | null): boolean {
+  return (
+    j !== null &&
+    (j.state === "running" || j.state === "paused" || j.state === "cancelling")
+  );
+}
+
+/** 预览字节 → HEX（服务端返回的 preview_b64 是**唯一**的发送字节） */
+function widgetHex(b64: string | undefined): string {
+  if (!b64) return "";
+  try {
+    return Array.from(b64ToBytes(b64))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ")
+      .toUpperCase();
+  } catch {
+    return "";
   }
 }
 
@@ -187,6 +253,24 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [fileBusy, setFileBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // ── 自定义发送组件（M1）：chips + 参数 + 服务端预览 ───────────
+  const [widgets, setWidgets] = useState<SerialWidget[]>([]);
+  const [widgetWarn, setWidgetWarn] = useState<string[]>([]);
+  const [widgetFileError, setWidgetFileError] = useState<string | null>(null);
+  const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
+  const [widgetParams, setWidgetParams] = useState<Record<string, string | boolean>>({});
+  const [widgetPreview, setWidgetPreview] = useState<SerialWidgetRunResult | null>(null);
+  const [widgetErr, setWidgetErr] = useState<string | null>(null);
+  const [widgetBusy, setWidgetBusy] = useState(false);
+  const [widgetNotice, setWidgetNotice] = useState<string | null>(null);
+  /** M2：异步任务快照 + 轮询 id（run / job 返回同一形状） */
+  const [widgetJob, setWidgetJob] = useState<SerialWidgetRunResult | null>(null);
+  const [widgetJobId, setWidgetJobId] = useState("");
+  const activeWidget = useMemo(
+    () => widgets.find((w) => w.id === activeWidgetId) ?? null,
+    [widgets, activeWidgetId],
+  );
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<{
     key: string;
@@ -196,6 +280,232 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   } | null>(null);
 
   const epoch = stream.snap?.epoch ?? 0;
+
+  // ── 组件：加载 / 选中 / 参数默认值 / 150ms 防抖预览 ────────────
+  useEffect(() => {
+    let cancelled = false;
+    setWidgetNotice(null);
+    if (!project) {
+      setWidgets([]);
+      setWidgetWarn([]);
+      setWidgetFileError(null);
+      setActiveWidgetId(null);
+      return;
+    }
+    api
+      .serialWidgets(project)
+      .then((r) => {
+        if (cancelled) return;
+        setWidgets(r.widgets ?? []);
+        setWidgetWarn(r.warnings ?? []);
+        setWidgetFileError(r.error ?? null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setWidgets([]);
+        setWidgetWarn([]);
+        setWidgetFileError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
+
+  useEffect(() => {
+    if (activeWidgetId && !widgets.some((w) => w.id === activeWidgetId)) {
+      setActiveWidgetId(null);
+    }
+  }, [widgets, activeWidgetId]);
+
+  useEffect(() => {
+    if (!activeWidget) return;
+    setWidgetParams(widgetDefaults(activeWidget));
+    setWidgetPreview(null);
+    setWidgetErr(null);
+  }, [activeWidget]);
+
+  useEffect(() => {
+    if (!project || !activeWidget) {
+      setWidgetPreview(null);
+      setWidgetErr(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      api
+        .serialWidgetRun({
+          project,
+          id: activeWidget.id,
+          params: widgetParams,
+          dryRun: true,
+        })
+        .then((r) => {
+          if (cancelled) return;
+          if (!r.ok) {
+            setWidgetErr(r.error ?? "预览失败");
+            setWidgetPreview(null);
+            return;
+          }
+          setWidgetErr(null);
+          setWidgetPreview(r);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setWidgetErr(e instanceof Error ? e.message : String(e));
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [project, activeWidget, widgetParams]);
+
+  const widgetJobRunning = widgetJobActive(widgetJob);
+
+  /** 刷新页面/换工程后找回仍在跑的任务（run 只等 2s，长任务只能靠轮询）。 */
+  useEffect(() => {
+    if (!project) return;
+    let cancelled = false;
+    api
+      .serialWidgetJob()
+      .then((j) => {
+        if (cancelled || !widgetJobActive(j) || !j.job_id) return;
+        setWidgetJob(j);
+        setWidgetJobId(j.job_id);
+        setWidgetBusy(true);
+      })
+      .catch(() => {
+        // 404 = 没有在跑的任务，是常态；不打扰用户
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
+
+  /** 任务轮询：400ms 一次，直到终态（不新增 SSE topic）。 */
+  useEffect(() => {
+    if (!widgetJobId) return;
+    let cancelled = false;
+    let timer = 0;
+    const tick = async (): Promise<void> => {
+      try {
+        const j = await api.serialWidgetJob(widgetJobId);
+        if (cancelled) return;
+        setWidgetJob(j);
+        if (widgetJobActive(j)) {
+          timer = window.setTimeout(() => void tick(), 400);
+          return;
+        }
+        setWidgetBusy(false);
+        setWidgetNotice(
+          j.ok
+            ? `✓ 组件任务结束：${j.rounds ?? 0} 轮 · ${j.total_bytes ?? 0} B` +
+              ((j.skipped ?? 0) > 0 ? ` · 跳过 ${j.skipped} 拍` : "")
+            : `✗ 组件任务失败：${j.error ?? "未知原因"}`,
+        );
+      } catch (e) {
+        if (cancelled) return;
+        setWidgetBusy(false);
+        setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [widgetJobId]);
+
+  const doWidgetRun = useCallback(
+    async (repeat: boolean) => {
+      if (!project || !activeWidget || running || widgetBusy || widgetJobRunning) return;
+      if (
+        activeWidget.confirm &&
+        !window.confirm(`发送组件「${activeWidget.label}」？该组件被标记为需要确认。`)
+      ) {
+        return;
+      }
+      setWidgetNotice(null);
+      setWidgetBusy(true);
+      try {
+        const r = await api.serialWidgetRun({
+          project,
+          id: activeWidget.id,
+          params: widgetParams,
+          repeat,
+          confirm: activeWidget.confirm === true,
+        });
+        setWidgetJob(r);
+        if (r.job_id) setWidgetJobId(r.job_id);
+        if (widgetJobActive(r)) {
+          setWidgetNotice(
+            `✓ 已启动${r.repeat ? "周期" : ""}任务 —— 波形区会持续刷新，可暂停/停止`,
+          );
+          return;
+        }
+        setWidgetBusy(false);
+        if (!r.ok) {
+          setWidgetNotice(`✗ 组件发送失败：${r.error ?? "未知原因"}`);
+          return;
+        }
+        setWidgetNotice(
+          `✓ 组件「${activeWidget.label}」已发送 ${r.total_bytes ?? 0} B` +
+            (r.via === "monitor" ? "（经监视会话，回显见实时流）" : ""),
+        );
+      } catch (e) {
+        setWidgetBusy(false);
+        setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [project, activeWidget, running, widgetBusy, widgetJobRunning, widgetParams],
+  );
+
+  const doWidgetCancel = useCallback(async () => {
+    const id = widgetJob?.job_id || widgetJobId;
+    if (!id) return;
+    try {
+      await api.serialWidgetCancel(id);
+      setWidgetJob(await api.serialWidgetJob(id));
+    } catch (e) {
+      setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [widgetJob, widgetJobId]);
+
+  const doWidgetPause = useCallback(async () => {
+    const id = widgetJob?.job_id || widgetJobId;
+    if (!id) return;
+    const paused = widgetJob?.state !== "paused";
+    try {
+      await api.serialWidgetPause(id, paused);
+      setWidgetJob(await api.serialWidgetJob(id));
+    } catch (e) {
+      setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [widgetJob, widgetJobId]);
+
+  const widgetPreviewHex = useMemo(
+    () => widgetHex(widgetPreview?.preview_b64),
+    [widgetPreview],
+  );
+
+  /** 任务进度：轮次 / 跳过节拍 / 累计字节（周期任务的主要可观测面）。 */
+  const widgetProgress = useMemo(() => {
+    const j = widgetJob;
+    if (!j || j.state === undefined) return "";
+    const rounds = j.rounds ?? 0;
+    const skipped = j.skipped ?? 0;
+    const bytes = j.total_bytes ?? 0;
+    if (widgetJobActive(j)) {
+      const label = j.state === "paused" ? "已暂停" : j.state === "cancelling" ? "停止中…" : "运行中";
+      return `${label} · 第 ${rounds} 轮${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ""} · ${bytes} B`;
+    }
+    if (j.state === "done") {
+      return `完成 · ${rounds} 轮 · ${bytes} B${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ""}`;
+    }
+    if (j.state === "cancelled") return `已停止 · ${bytes} B`;
+    if (j.state === "failed") return `失败${j.error ? ` · ${j.error}` : ""}`;
+    return "";
+  }, [widgetJob]);
 
   const decoders = caps?.meta?.serial?.decoders ?? [
     { id: "justfloat", label: "JustFloat", channels: "auto" as const },
@@ -317,6 +627,85 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       cancelled = true;
     };
   }, [view, filtered, decoder]);
+
+  // ── 波形多面板 + 通道绑定 ──────────────────────────────────────
+  interface WaveViewport {
+    id: string;
+    name: string;
+    channels: number[];
+    /** 每个面板独立持有的视图（切 tab 不串味） */
+    scaleX: number;
+    offsetX: number;
+  }
+  const [waveViewports, setWaveViewports] = useState<WaveViewport[]>([]);
+  const [activeViewport, setActiveViewport] = useState<string>("");
+  // 每个 viewport 独立的 follow（顶层 autoScroll 驱动默认值）
+  const [viewportFollow, setViewportFollow] = useState<Record<string, boolean>>({});
+
+  // 当解码器解出帧时，初始化 viewport（默认 "全部" 面板绑定全部通道）
+  // ★ 只在"解码通道总数变大"时重建：
+  //   1) 不能用 viewport.channels.length 判断 —— 取消绑定某通道后长度会变，会被误清；
+  //   2) 也不能用"变化"判断 —— 文本协议（FireWater）某些批次可能只解出 1 个通道，
+  //      通道数在 1↔2 之间抖动会反复重建、把用户新建的面板冲掉。
+  const lastTotalCh = useRef(0);
+  useEffect(() => {
+    const totalCh = decodeMeta?.channels ?? (frames[0]?.length ?? 0);
+    if (totalCh === 0) return;
+    const needInit = waveViewports.length === 0;
+    const grew = totalCh > lastTotalCh.current;
+    lastTotalCh.current = Math.max(lastTotalCh.current, totalCh);
+    if (!needInit && !grew) return;
+    const allVp: WaveViewport = {
+      id: "all",
+      name: "全部",
+      channels: Array.from({ length: totalCh }, (_, i) => i),
+      scaleX: 1,
+      offsetX: 0,
+    };
+    setWaveViewports([allVp]);
+    setActiveViewport("all");
+    setViewportFollow({ all: autoScroll });
+  }, [decodeMeta?.channels, frames[0]?.length]);
+
+  // 顶层「跟随」开关：一次性把当前所有面板的 follow 对齐到开关状态。
+  // ★ 不做成 effect：新增面板/通道增长时不该把用户**手动暂停**的面板拉回跟随。
+  const setFollowAll = (v: boolean) => {
+    setAutoScroll(v);
+    setViewportFollow((prev) => {
+      const next = { ...prev };
+      for (const vp of waveViewports) next[vp.id] = v;
+      return next;
+    });
+  };
+
+  const addWaveViewport = () => {
+    const totalCh = decodeMeta?.channels ?? (frames[0]?.length ?? 0);
+    if (totalCh === 0) return;
+    const id = `vp_${Date.now().toString(36)}`;
+    const next: WaveViewport = { id, name: `面板 ${waveViewports.length + 1}`, channels: Array.from({ length: totalCh }, (_, i) => i), scaleX: 1, offsetX: 0 };
+    setWaveViewports((vps) => [...vps, next]);
+    setViewportFollow((f) => ({ ...f, [id]: autoScroll }));
+    setActiveViewport(id);
+  };
+  const removeWaveViewport = (id: string) => {
+    setWaveViewports((vps) => {
+      const rest = vps.filter((v) => v.id !== id);
+      if (rest.length === 0) return vps; // 至少留一个
+      if (activeViewport === id) setActiveViewport(rest[rest.length - 1].id);
+      return rest;
+    });
+    setViewportFollow((f) => { const { [id]: _gone, ...rest } = f; return rest; });
+  };
+  const setViewportChannels = (id: string, channels: number[]) => {
+    setWaveViewports((vps) => vps.map((v) => (v.id === id ? { ...v, channels } : v)));
+  };
+  const setViewportView = (id: string, scaleX: number, offsetX: number) => {
+    setWaveViewports((vps) => {
+      const vp = vps.find((v) => v.id === id);
+      if (!vp || (vp.scaleX === scaleX && vp.offsetX === offsetX)) return vps;
+      return vps.map((v) => (v.id === id ? { ...v, scaleX, offsetX } : v));
+    });
+  };
 
   // ── 跟随滚动 ────────────────────────────────────────────────
   useEffect(() => {
@@ -579,7 +968,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           </span>
         ) : null}
         <span className={s.spacer} />
-        <Switch id="serial-follow" checked={autoScroll} onChange={setAutoScroll} label="跟随" />
+        <Switch id="serial-follow" checked={autoScroll} onChange={setFollowAll} label="跟随" />
         <span className={s.meta} title="当前缓冲：未清空、未被环形挤出的字节 / 批次">
           {bytes} B · {chunks} 批
         </span>
@@ -725,9 +1114,94 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                 ) : null}
               </div>
             ) : null}
-            {frames.length > 0 ? (
-              <WaveChart frames={frames} channels={decodeMeta?.channels ?? frames[0].length} />
+
+            {/* ── 多面板 tab 条 ── */}
+            {frames.length > 0 && waveViewports.length > 0 ? (
+              <div className={s.waveVpBar}>
+                <div className={s.waveVpTabs}>
+                  {waveViewports.map((vp) => (
+                    <div key={vp.id} className={s.waveVpTabRow}>
+                      <button
+                        type="button"
+                        className={`${s.waveVpTab} ${activeViewport === vp.id ? s.waveVpTabActive : ""}`}
+                        onClick={() => setActiveViewport(vp.id)}
+                        title={`切换到 ${vp.name}`}
+                      >
+                        {vp.name}
+                      </button>
+                      {waveViewports.length > 1 ? (
+                        <button
+                          type="button"
+                          className={s.waveVpTabClose}
+                          onClick={() => removeWaveViewport(vp.id)}
+                          title="删除此面板（至少保留一个）"
+                        >×</button>
+                      ) : null}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className={s.waveVpAdd}
+                    onClick={addWaveViewport}
+                    title="新建波形面板：独立缩放/平移，可绑定不同通道"
+                  >+ 新建面板</button>
+                </div>
+
+                {/* 当前面板的通道绑定 + 独立跟随 */}
+                {(() => {
+                  const vp = waveViewports.find((v) => v.id === activeViewport);
+                  if (!vp) return null;
+                  const totalCh = decodeMeta?.channels ?? (frames[0]?.length ?? 0);
+                  return (
+                    <div className={s.waveVpControls}>
+                      <span className={s.waveVpLabel}>通道绑定：</span>
+                      {Array.from({ length: totalCh }, (_, i) => {
+                        const on = vp.channels.includes(i);
+                        return (
+                          <button
+                            key={i}
+                            type="button"
+                            className={`${s.waveChChip} ${on ? s.waveChChipOn : ""}`}
+                            onClick={() => {
+                              const newCh = on
+                                ? vp.channels.filter((x) => x !== i)
+                                : [...vp.channels, i].sort((a, b) => a - b);
+                              if (newCh.length > 0) setViewportChannels(vp.id, newCh);
+                            }}
+                            title={`${on ? "取消" : "绑定"} CH${i}`}
+                          >
+                            CH{i}
+                          </button>
+                        );
+                      })}
+                      <span className={s.waveVpSpacer} />
+                    </div>
+                  );
+                })()}
+              </div>
             ) : null}
+
+            {/* ── 波形图（当前激活面板） ── */}
+            {frames.length > 0 && waveViewports.length > 0 ? (
+              (() => {
+                const vp = waveViewports.find((v) => v.id === activeViewport);
+                if (!vp) return null;
+                const f = viewportFollow[vp.id] ?? autoScroll;
+                return (
+                  <WaveChart
+                    key={vp.id}
+                    frames={frames}
+                    channels={vp.channels}
+                    scaleX={vp.scaleX}
+                    offsetX={vp.offsetX}
+                    onView={(sx, ox) => setViewportView(vp.id, sx, ox)}
+                    follow={f}
+                    onFollowChange={(v) => setViewportFollow((prev) => ({ ...prev, [vp.id]: v }))}
+                  />
+                );
+              })()
+            ) : null}
+
             {decodeMeta ? (
               <div className={s.waveMeta}>
                 {frames.length} 帧 · {decodeMeta.channels} 通道
@@ -738,6 +1212,159 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           </div>
         ) : null}
       </div>
+
+      {/* ── 自定义发送组件（M1）：chips + 参数 + 服务端预览 ── */}
+      {project && (widgets.length > 0 || widgetWarn.length > 0 || widgetFileError) ? (
+        <div className={s.widgetBar}>
+          <span className={s.widgetTitle}>组件</span>
+          {widgets.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              className={activeWidgetId === w.id ? s.widgetChipOn : s.widgetChip}
+              title={`${w.label} · ${w.steps.length} 步${w.group ? ` · ${w.group}` : ""}`}
+              onClick={() =>
+                setActiveWidgetId(activeWidgetId === w.id ? null : w.id)
+              }
+            >
+              {w.label}
+            </button>
+          ))}
+          {widgetFileError ? (
+            <span className={s.widgetErr}>✗ {widgetFileError}</span>
+          ) : null}
+          {widgetWarn.length > 0 ? (
+            <span className={s.widgetErr} title={widgetWarn.join("\n")}>
+              ⚠ {widgetWarn.length} 处配置问题
+            </span>
+          ) : null}
+          <span className={s.spacer} />
+        </div>
+      ) : null}
+
+      {activeWidget ? (
+        <div className={s.widgetPanel}>
+          {(activeWidget.params ?? []).length === 0 ? (
+            <span className={s.meta}>无参数</span>
+          ) : (
+            (activeWidget.params ?? []).map((p) => (
+              <label key={p.name} className={s.widgetField}>
+                <span>{p.label ?? p.name}</span>
+                {p.type === "bool" ? (
+                  <Switch
+                    id={`widget-${activeWidget.id}-${p.name}`}
+                    checked={Boolean(widgetParams[p.name])}
+                    onChange={(v) =>
+                      setWidgetParams((prev) => ({ ...prev, [p.name]: v }))
+                    }
+                  />
+                ) : p.type === "enum" ? (
+                  <select
+                    className={s.select}
+                    value={String(widgetParams[p.name] ?? "")}
+                    onChange={(e) =>
+                      setWidgetParams((prev) => ({
+                        ...prev,
+                        [p.name]: e.currentTarget.value,
+                      }))
+                    }
+                  >
+                    {(p.options ?? []).map((o) => {
+                      const x = widgetOption(o);
+                      return (
+                        <option key={x.value} value={x.value}>
+                          {x.label}
+                        </option>
+                      );
+                    })}
+                  </select>
+                ) : (
+                  <Input
+                    mono
+                    size="sm"
+                    className={s.widgetInput}
+                    value={String(widgetParams[p.name] ?? "")}
+                    placeholder={widgetParamHint(p)}
+                    onChange={(e) =>
+                      setWidgetParams((prev) => ({
+                        ...prev,
+                        [p.name]: e.currentTarget.value,
+                      }))
+                    }
+                  />
+                )}
+              </label>
+            ))
+          )}
+          <span className={s.widgetPreview} title={widgetErr ?? widgetPreviewHex}>
+            {widgetErr
+              ? `✗ ${widgetErr}`
+              : widgetPreview
+                ? `预览 ${widgetPreview.bytes ?? 0} B · ${widgetPreviewHex}`
+                : "预览中…"}
+          </span>
+          {widgetProgress ? (
+            <span className={s.widgetPreview} title={widgetProgress}>
+              {widgetProgress}
+            </span>
+          ) : null}
+          <span className={s.spacer} />
+          {activeWidget.repeat ? (
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              title={`周期发送：每 ${activeWidget.repeat.interval_ms} ms 一轮${
+                activeWidget.repeat.count
+                  ? `，共 ${activeWidget.repeat.count} 轮`
+                  : "，直到手动停止"
+              }`}
+              disabled={running || widgetBusy || !!widgetErr || widgetJobRunning}
+              onClick={() => void doWidgetRun(true)}
+            >
+              ↻ 周期
+            </Button>
+          ) : null}
+          {widgetJobRunning ? (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                type="button"
+                onClick={() => void doWidgetPause()}
+              >
+                {widgetJob?.state === "paused" ? "▶ 继续任务" : "❚❚ 暂停任务"}
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                type="button"
+                onClick={() => void doWidgetCancel()}
+              >
+                ■ 停止任务
+              </Button>
+            </>
+          ) : null}
+          <Button
+            size="sm"
+            variant="primary"
+            type="button"
+            disabled={running || widgetBusy || !!widgetErr || widgetJobRunning}
+            onClick={() => void doWidgetRun(false)}
+          >
+            {widgetBusy ? "执行中…" : "▶ 发送"}
+          </Button>
+        </div>
+      ) : null}
+
+      {widgetNotice ? (
+        <div
+          className={widgetNotice.startsWith("✗") ? s.warn : s.info}
+          role="status"
+        >
+          {widgetNotice}
+        </div>
+      ) : null}
 
       {/* ── 发送面板：与监视会话同一个口（写穿，不重开）── */}
       <form className={s.write} onSubmit={(e) => void doSend(e)}>
@@ -821,16 +1448,105 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   );
 }
 
-/** Canvas 多通道折线：每通道独立归一化（同一屏里量纲不同也能看清形状） */
-function WaveChart({ frames, channels }: { frames: number[][]; channels: number }) {
-  const hostRef = useRef<HTMLCanvasElement>(null);
+/** WaveChart V2 —— 多通道折线 + 缩放 + 平移 + 时间轴 + 跟随
+ *
+ * 缩放/平移状态**由父组件按 viewport 持有**（scaleX/offsetX 走 props），
+ * 这样切 tab 时每个面板各自保留自己的视图，不会被相邻面板「串味」。
+ * 拖拽的临时量仍是内部 ref；跟随状态也由父组件按 viewport 持有。
+ */
+interface WaveChartProps {
+  frames: number[][];
+  /** 要显示的通道索引数组，例如 [0, 2] 只画 CH0/CH2；也可以传数字表示"画前 N 个" */
+  channels: number[] | number;
+  /** X 轴缩放（1 = 全部可见；>1 = 放大） */
+  scaleX: number;
+  /** 最左边可见帧 index（0-based） */
+  offsetX: number;
+  /** 缩放/平移变化回写父组件（按 viewport 保存） */
+  onView: (scaleX: number, offsetX: number) => void;
+  /** 跟随最新帧；外部驱动——顶层 autoScroll 或面板内独立按钮 */
+  follow: boolean;
+  onFollowChange: (v: boolean) => void;
+}
 
+const WAVE_PALETTE = [
+  ["bright-blue", "#4ea1ff"],
+  ["bright-green", "#4c9a2a"],
+  ["bright-red", "#e24b4a"],
+  ["bright-yellow", "#b3701a"],
+  ["bright-magenta", "#b060cc"],
+  ["bright-cyan", "#0891b2"],
+  ["blue", "#3b82f6"],
+  ["green", "#22c55e"],
+] as const;
+
+function resolvedChannels(ch: number[] | number, frameChannels: number): number[] {
+  if (typeof ch === "number") {
+    return Array.from({ length: Math.min(ch, frameChannels) }, (_, i) => i);
+  }
+  return ch.filter((i) => i >= 0 && i < frameChannels);
+}
+
+function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollowChange }: WaveChartProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragRef = useRef<{ startClientX: number; startOffset: number } | null>(null);
+  const dragActive = useRef(false);
+  // ── 取消跟随 = 定格画面 ──────────────────────────────────────
+  // 波形是"最近 N 字节"的滚动解码窗口：只钉住 offsetX 没用 —— 窗口本身
+  // 在滑，同一个 index 已经对应到新数据，曲线看起来就一直在走。
+  // 所以 follow=false 时留下**这一刻的帧快照**，恢复跟随才换回实时帧。
+  const [frozen, setFrozen] = useState<number[][] | null>(null);
   useEffect(() => {
-    const canvas = hostRef.current;
-    if (!canvas || frames.length === 0) return;
+    if (frames.length === 0) {
+      setFrozen(null);
+      return;
+    }
+    if (follow) {
+      setFrozen(null);
+      return;
+    }
+    setFrozen((cur) => cur ?? frames);
+  }, [follow, frames]);
+  const shown = follow ? frames : (frozen ?? frames);
+
+  const frameChannels = shown[0]?.length ?? 0;
+  const shownCh = resolvedChannels(channels, frameChannels);
+
+  // ── 当 frames 更新时自动 follow 到尾 ──────────────────────────
+  const lastFramesLen = useRef(0);
+  useEffect(() => {
+    if (shown.length === 0) {
+      onView(scaleX, 0);
+      return;
+    }
+    const prev = lastFramesLen.current;
+    lastFramesLen.current = shown.length;
+    // 只有在 follow=true 且帧增加时才跳；帧清空（clear）也跳回 0
+    if (follow) {
+      // 缩放后一屏可见的帧数
+      const canvas = canvasRef.current;
+      const w = canvas?.clientWidth ?? 480;
+      const visible = Math.max(20, Math.ceil(w / scaleX));
+      const maxOffset = Math.max(0, shown.length - visible);
+      onView(scaleX, maxOffset);
+    } else if (shown.length > 0 && prev === 0) {
+      // 从空变成有帧，且 follow=false —— 保持 offsetX 合法
+      const canvas = canvasRef.current;
+      const w = canvas?.clientWidth ?? 480;
+      const visible = Math.max(20, Math.ceil(w / scaleX));
+      onView(scaleX, Math.min(offsetX, Math.max(0, shown.length - visible)));
+    }
+    // onView/offsetX 故意不进依赖：只在帧数或缩放/跟随变化时重算
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown.length, follow, scaleX]);
+
+  // ── 绘制（frames / scaleX / offsetX 变化都触发） ──────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || shown.length === 0) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth || 480;
-    const h = canvas.clientHeight || 200;
+    const h = canvas.clientHeight || 220;
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
     const ctx = canvas.getContext("2d");
@@ -839,76 +1555,202 @@ function WaveChart({ frames, channels }: { frames: number[][]; channels: number 
     ctx.clearRect(0, 0, w, h);
 
     const css = getComputedStyle(canvas);
-    const cvar = (name: string) => css.getPropertyValue(name).trim();
+    const cvar = (n: string) => css.getPropertyValue(n).trim();
     const border = cvar("--elab-border") || "rgba(128,128,128,0.3)";
-    const palette = [
-      "--elab-ansi-bright-blue",
-      "--elab-ansi-bright-green",
-      "--elab-ansi-bright-red",
-      "--elab-ansi-bright-yellow",
-      "--elab-ansi-bright-magenta",
-      "--elab-ansi-bright-cyan",
-      "--elab-ansi-blue",
-      "--elab-ansi-green",
-    ];
-    const colors = palette.map((p, i) => cvar(p) || ["#4ea1ff", "#4c9a2a", "#e24b4a", "#b3701a", "#b060cc", "#0891b2"][i % 6]);
+    const axisLabel = cvar("--elab-fg-faint") || "rgba(128,128,128,0.6)";
+    const palette: string[] = WAVE_PALETTE.map(
+      ([tok, fb]) => cvar(`--elab-ansi-${tok}`) || fb,
+    );
 
-    // 网格
+    // ── 布局：顶部一行标签 / 底部一行帧号，绘图区夹在中间 ──
+    const padL = 8;
+    const padR = 8;
+    const padT = 16;
+    const padB = 18;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    if (plotW <= 4 || plotH <= 4) return;
+    const plotTop = padT;
+    const plotBottom = padT + plotH;
+
+    // ── 可视帧范围 ──
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const startIdx = Math.max(0, Math.min(offsetX, shown.length - 1));
+    const endIdx = Math.min(shown.length, startIdx + visibleCount);
+    const slice = shown.slice(startIdx, endIdx);
+    if (slice.length === 0) return;
+    // 帧 → x 像素（与折线用同一映射，网格才不会错位）
+    const xOf = (i: number) =>
+      padL + (slice.length <= 1 ? plotW / 2 : (i / (slice.length - 1)) * plotW);
+
+    // ── 水平网格（4 等分） ──
     ctx.strokeStyle = border;
     ctx.lineWidth = 1;
     for (let i = 1; i < 4; i++) {
-      const y = (h * i) / 4;
+      const y = plotTop + (plotH * i) / 4;
       ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
       ctx.stroke();
     }
+    // ── 垂直时间轴网格 + 帧号 label ──
+    const stepSec = Math.max(10, Math.round(slice.length / 6));
+    ctx.fillStyle = axisLabel;
+    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
+    ctx.textBaseline = "top";
+    for (let i = 0; i < slice.length; i += stepSec) {
+      const x = xOf(i);
+      if (x > w - padR) break;
+      ctx.strokeStyle = border;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      ctx.textAlign = "center";
+      // 首尾帧号夹在画布内，否则画布边缘会把文字裁掉
+      const label = `${startIdx + i}`;
+      const half = ctx.measureText(label).width / 2;
+      const lx = Math.min(w - padR - half, Math.max(padL + half, x));
+      ctx.fillText(label, lx, plotBottom + 3);
+    }
 
-    const n = frames.length;
-    for (let ch = 0; ch < channels; ch++) {
-      const values = frames.map((f) => (ch < f.length ? f[ch] : 0));
+    // ── 通道折线（各通道独立归一化） ──
+    for (const ch of shownCh) {
+      const values = slice.map((f) => (ch < f.length ? f[ch] : NaN));
       let lo = Infinity;
       let hi = -Infinity;
       for (const v of values) {
+        if (!Number.isFinite(v)) continue;
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
       if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-      if (hi === lo) {
-        hi = lo + 1;
-        lo -= 1;
-      }
-      ctx.strokeStyle = colors[ch % colors.length];
+      if (hi === lo) { hi = lo + 1; lo -= 1; }
+      ctx.strokeStyle = palette[ch % palette.length];
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      for (let i = 0; i < n; i++) {
-        const x = n === 1 ? w / 2 : (i / (n - 1)) * w;
-        const y = h - ((values[i] - lo) / (hi - lo)) * h;
-        if (i === 0) ctx.moveTo(x, y);
+      let started = false;
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i])) { started = false; continue; }
+        const x = xOf(i);
+        const y = plotBottom - ((values[i] - lo) / (hi - lo)) * plotH;
+        if (!started) { ctx.moveTo(x, y); started = true; }
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
     }
-  }, [frames, channels]);
+
+    // ── 顶部左右标签：起始帧 / 总帧 + 缩放 ──
+    ctx.fillStyle = axisLabel;
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(`帧 ${startIdx} → ${endIdx - 1}`, padL, 2);
+    ctx.textAlign = "right";
+    ctx.fillText(`共 ${shown.length} 帧 · 窗口 ${endIdx - startIdx} · ×${scaleX.toFixed(1)}`, w - padR, 2);
+  }, [shown, scaleX, offsetX, shownCh]);
+
+  // ── 交互事件 ──────────────────────────────────────────────────
+  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const xInCanvas = e.clientX - rect.left;
+    const padL = 8;
+    const plotW = rect.width - padL - 8;
+    const frameAtCursor = Math.round(offsetX + Math.max(0, xInCanvas - padL) / scaleX);
+    // zoom
+    const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2));
+    const visibleCount = Math.max(2, Math.round(plotW / newScale));
+    let newOffset = frameAtCursor - Math.round((xInCanvas - padL) / newScale);
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
+    onView(newScale, newOffset);
+    if (follow) onFollowChange(false);
+  };
+
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    dragRef.current = { startClientX: e.clientX, startOffset: offsetX };
+    dragActive.current = true;
+    e.preventDefault();
+  };
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!dragActive.current || !dragRef.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const padL = 8;
+    const plotW = rect.width - padL - 8;
+    const dx = e.clientX - dragRef.current.startClientX;
+    const offsetDelta = Math.round(-dx / scaleX);
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    let newOffset = dragRef.current.startOffset + offsetDelta;
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
+    if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset);
+    if (follow) onFollowChange(false);
+  };
+  const endDrag = () => { dragActive.current = false; dragRef.current = null; };
+
+  const canvasReady = shown.length > 0;
 
   return (
     <div className={s.waveBox}>
-      <canvas ref={hostRef} className={s.canvas} />
-      <div className={s.legend}>
-        {Array.from({ length: Math.max(0, channels) }, (_, i) => (
-          <span key={i} className={s.legendItem}>
-            <span
-              className={s.swatch}
-              style={{
-                background: `var(--elab-ansi-${
-                  ["bright-blue", "bright-green", "bright-red", "bright-yellow", "bright-magenta", "bright-cyan", "blue", "green"][i % 8]
-                })`,
-              }}
-            />
-            CH{i}
-          </span>
-        ))}
+      {/* 顶部工具栏：通道图例 + 缩放按钮 + 跟随 */}
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+        <div className={s.legend} style={{ flex: "1 1 auto" }}>
+          {shownCh.map((ch) => (
+            <span key={ch} className={s.legendItem}>
+              <span className={s.swatch} style={{ background: `var(--elab-ansi-${WAVE_PALETTE[ch % 8][0]})` }} />
+              CH{ch}
+            </span>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: "4px" }}>
+          <button
+            type="button"
+            onClick={() => onView(Math.max(1, scaleX / 1.2), offsetX)}
+            title="缩小（向后看更多帧）"
+            className={s.waveToolBtn}
+            disabled={!canvasReady}
+          >−</button>
+          <button
+            type="button"
+            onClick={() => onView(Math.min(20, scaleX * 1.2), offsetX)}
+            title="放大（看更精细的局部）"
+            className={s.waveToolBtn}
+            disabled={!canvasReady}
+          >+</button>
+          <button
+            type="button"
+            onClick={() => onView(1, 0)}
+            title="重置（全部可见、回到开头）"
+            className={s.waveToolBtn}
+            disabled={!canvasReady}
+          >⤾</button>
+          <button
+            type="button"
+            onClick={() => onFollowChange(!follow)}
+            title={follow
+              ? "正在跟随最新帧，点击暂停（画面定格在当前窗口，数据仍继续接收）"
+              : "画面已定格，点击恢复跟随最新帧"}
+            className={s.waveToolBtn}
+            style={follow ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : undefined}
+            disabled={!canvasReady}
+          >
+            {follow ? "❚❚ 暂停跟随" : "▶ 恢复跟随"}
+          </button>
+        </div>
       </div>
+
+      <canvas
+        ref={canvasRef}
+        className={s.canvas}
+        style={{ cursor: canvasReady ? (dragActive.current ? "grabbing" : "grab") : "default" }}
+        onWheel={onWheel}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={endDrag}
+        onMouseLeave={endDrag}
+      />
     </div>
   );
 }

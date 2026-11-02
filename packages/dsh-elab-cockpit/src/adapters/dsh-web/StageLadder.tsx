@@ -216,25 +216,9 @@ function Row(props: {
 export function StageLadder(props: StageLadderProps): ReactNode {
   const { steps, availability, focusStep, running } = props
 
-  if (steps.length === 0) {
-    return (
-      <div
-        role="list"
-        aria-label="\u6d41\u6c34\u7ebf\u72b6\u6001"
-        style={{
-          padding: '12px 8px',
-          fontSize: '12px',
-          color: 'var(--elab-fg-muted)',
-          lineHeight: 1.6,
-        }}
-      >
-        <div>{'\u8fd8\u6ca1\u6709\u8dd1\u8fc7\u95ed\u73af\u3002'}</div>
-        <div style={{ marginTop: '4px', opacity: 0.8 }}>
-          {'\u70b9\u4e0b\u65b9\u300c\u25b6 \u6784\u5efa / \u70e7\u5f55 / \u8c03\u8bd5 / \u4e32\u53e3\u300d\u5355\u72ec\u542f\u52a8\u5404\u81ea\u529f\u80fd\uff1b\u4e0a\u65b9\u300c\u4e09\u8fde / \u95ed\u73af\u300d\u4e00\u952e\u8dd1\u3002'}
-        </div>
-      </div>
-    )
-  }
+  // 空态**不再**铺一段说明文案：窄栏高度是稀缺资源，说明文字长期占 3 行，
+  // 把真正的操作区（档位/单步/串口）挤到看不见。还没跑过闭环时就该是空的。
+  if (steps.length === 0) return null
 
   return (
     <div role="list" aria-label="\u6d41\u6c34\u7ebf\u72b6\u6001" style={{ flex: '0 0 auto' }}>

@@ -807,6 +807,142 @@ export function registerElabTools(register, deps) {
         },
     }));
     add(makeTool({
+        name: 'elab_serial_widget',
+        description: '工程级「串口发送组件」（参数 + send/delay/wait 序列 + 周期发送）。' +
+            'action=list 列组件；preview 只渲染字节；run 执行（写硬件！需要 allowAgentWrite；' +
+            '返回 running 时用 status 轮询到终态）；status 查任务（job_id 缺省 = 当前任务）；' +
+            'cancel/pause 停止/暂停（人的停止永远优先，agent 也可主动让路）；save/delete 改配置（需要 allowAgentWrite）。' +
+            '组件配置在 projects/<name>.widgets.json，写操作带 rev 乐观锁（冲突时重读再存）。',
+        parameters: {
+            action: {
+                type: 'string',
+                required: true,
+                description: 'list / preview / run / status / cancel / pause / resume / save / delete',
+            },
+            project: { type: 'string', description: '工程名（list/preview/run/save/delete 必填）' },
+            id: { type: 'string', description: '组件 id（preview/run/save/delete 必填）' },
+            params: { type: 'string', description: '参数 JSON，如 {"n":3}（缺省 = 组件默认值）' },
+            repeat: { type: 'boolean', description: 'run 时 true = 按组件 repeat 配置周期跑' },
+            confirm: { type: 'boolean', description: 'run 时 true = 已确认（组件 confirm=true 必须）' },
+            job_id: { type: 'string', description: 'status/cancel/pause 的任务 id；缺省 = 当前任务' },
+            widget: { type: 'string', description: 'save 时组件定义 JSON（字符串）' },
+            rev: { type: 'number', description: 'save/delete 时的乐观锁版本（来自 list 的 rev）' },
+        },
+        output: jsonOutput,
+        presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 串口发送组件' }),
+        async execute(args) {
+            const action = args.action;
+            const project = args.project ?? '';
+            const needProject = ['list', 'preview', 'run', 'save', 'delete'].includes(action);
+            if (needProject && project === '') {
+                return { ok: false, code: 'missing-project', note: '该 action 需要 project（工程名）' };
+            }
+            if (['run', 'save', 'delete'].includes(action) && !deps.allowAgentWrite()) {
+                return {
+                    ok: false,
+                    code: 'agent-write-disabled',
+                    nextAction: '组件发送/改配置会写硬件或工程文件，需要用户在设置里开启 allowAgentWrite；'
+                        + '只读请用 action=list / preview / status',
+                };
+            }
+            let params;
+            if (args.params !== undefined && args.params.trim() !== '') {
+                try {
+                    const parsed = JSON.parse(args.params);
+                    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                        params = parsed;
+                    }
+                    else {
+                        return { ok: false, code: 'bad-params', note: 'params 必须是 JSON 对象（如 {"n":3}）' };
+                    }
+                }
+                catch {
+                    return { ok: false, code: 'bad-params', note: 'params 不是合法 JSON' };
+                }
+            }
+            try {
+                if (action === 'list') {
+                    return await cockpit(deps, `/api/serial/widgets?project=${encodeURIComponent(project)}`);
+                }
+                if (action === 'status') {
+                    const q = args.job_id !== undefined && args.job_id !== '' ? `?id=${encodeURIComponent(args.job_id)}` : '';
+                    return await cockpit(deps, `/api/serial/widget/job${q}`);
+                }
+                if (action === 'preview') {
+                    return await cockpit(deps, '/api/serial/widget/run', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            project, id: args.id ?? '',
+                            ...(params !== undefined ? { params } : {}),
+                            dry_run: true,
+                        }),
+                    });
+                }
+                if (action === 'run') {
+                    return await cockpit(deps, '/api/serial/widget/run', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'x-elab-actor': 'agent' },
+                        body: JSON.stringify({
+                            project, id: args.id ?? '',
+                            ...(params !== undefined ? { params } : {}),
+                            ...(args.repeat === true ? { repeat: true } : {}),
+                            ...(args.confirm === true ? { confirm: true } : {}),
+                            actor: 'agent',
+                        }),
+                    });
+                }
+                if (action === 'cancel' || action === 'pause' || action === 'resume') {
+                    let jobId = args.job_id ?? '';
+                    if (jobId === '') {
+                        const cur = await cockpit(deps, '/api/serial/widget/job');
+                        jobId = cur.job_id ?? '';
+                        if (jobId === '')
+                            return { ok: false, note: '当前没有组件任务' };
+                    }
+                    const path = action === 'cancel' ? '/api/serial/widget/cancel' : '/api/serial/widget/pause';
+                    const body = action === 'cancel' ? { id: jobId } : { id: jobId, paused: action === 'pause' };
+                    return await cockpit(deps, path, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                }
+                if (action === 'save') {
+                    if (args.widget === undefined || args.widget === '') {
+                        return { ok: false, code: 'missing-widget', note: 'save 需要 widget（组件定义 JSON）' };
+                    }
+                    return await cockpit(deps, '/api/serial/widgets', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'save', project, rev: args.rev ?? 0,
+                            widget: JSON.parse(args.widget),
+                        }),
+                    });
+                }
+                if (action === 'delete') {
+                    return await cockpit(deps, '/api/serial/widgets', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'delete', project, rev: args.rev ?? 0, id: args.id ?? '' }),
+                    });
+                }
+                return { ok: false, code: 'unknown-action', note: `未知 action：${action}` };
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    code: 'widget-request-failed',
+                    note: error instanceof Error ? error.message : String(error),
+                    nextAction: action === 'save' || action === 'delete'
+                        ? 'rev 冲突或组件不合法：先 action=list 重读，再按最新 rev 重试'
+                        : undefined,
+                };
+            }
+        },
+    }));
+    add(makeTool({
         name: 'elab_adapt',
         description: '把一个工程目录接入 elab（生成 projects/<name>.yaml）。write=false 只读探测并给出报告；write=true 落盘（需要 allowAgentWrite）。',
         parameters: {

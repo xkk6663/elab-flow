@@ -6,7 +6,7 @@
 
 业务工程源码**零改动** · Python **仅标准库** · 驾驶舱前端产物已入仓（运行时不需要 Node）
 
-**本期新增**：串口工作区（行 / 字节 / 终端 / 波形四视图 + 发送面板 + 协议解码 + 录制导出 + **录制回放**）· **共享解码**（agent 选定 decoder，人与 agent 看同一份帧）· DSH 插件面板（每通道独立启动按钮 + 日志导出 + 适配漂移复探测）· `cockpit/profiles/*.yaml` 槽位装配 · 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md)
+**本期新增**：**CLI 终端闭环实机教程**（一条命令跑完 5 阶段，终端按输出类型分色，编译/烧录/监视/日志一眼分清）· **真机波形面板教程**（多面板 / 通道绑定 / 跟随暂停）· 串口工作区四视图 · 共享解码 · DSH 插件面板 · 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md) 与两篇实机教程（[终端闭环](docs/tutorials/cli-terminal-usage.md) / [波形面板](docs/tutorials/wave-panel-usage.md)）
 
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
@@ -14,11 +14,11 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 
-[项目定位](#position) · [架构与仓库依赖](#arch) · [快速上手](#quickstart) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
+[项目定位](#position) · [架构与仓库依赖](#arch) · [快速上手](#quickstart) · [终端闭环](#cli) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
 
-<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱" width="100%">
+<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱（真机）" width="100%">
 
-*闭环驾驶舱：工程轨（boot 子工程嵌套）→ 阶段轨 → 证据轨*
+*闭环驾驶舱实机（STM32F411CEU6 + CMSIS-DAP）：左工程轨（boot 子工程嵌套）→ 中阶段轨 / 证据轨 → 右串口工作区（波形页 · FireWater 双通道 · COM10 实时）*
 
 </div>
 
@@ -87,7 +87,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 ```text
 主仓 xkk6663/elab-flow ── 唯一事实源（可写）
  ├─ tag plugin-v* → CI subtree split --force → 镜像仓 xkk6663/dsh-elab-cockpit（只读）
- ├─ npm publish（手动） ─────────────────────→ npm dsh-elab-cockpit@0.3.x（安装入口）
+ ├─ npm publish（手动） ─────────────────────→ npm dsh-elab-cockpit@0.4.x（安装入口）
  └─ PR → awesome-dsh-plugin 目录仓 → 每日构建 → 市场网页
                                                 （条目指向主仓子包路径，非镜像仓）
 芯片包：本仓 market/index.json + 外置包仓（如 elab-pack-artery-at32，按 commit + sha256 固定）
@@ -106,7 +106,7 @@ cd elab-flow
 
 ./elab pkg bootstrap      # ① 安装内置包 st/stm32（生成平台 skill）
 ./elab doctor             # ② 环境体检，先全绿再往下
-./elab loop -p at32_test  # ③ 一键闭环：体检→编译→烧录→断到 main→串口判据
+./elab loop -p f411 -v    # ③ 一键闭环：体检→编译→烧录→断到 main→串口判据
 python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 ```
 
@@ -116,6 +116,53 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 - **DSH 插件**：安装 [`dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit)
   （源码在本仓 `packages/dsh-elab-cockpit`；开发期用 Junction 把该目录链接进 DSH profile 的
   `node_modules`），重载窗口后右栏出现 elab 面板
+
+<a id="cli"></a>
+
+## 终端闭环：一条命令，5 个阶段
+
+CLI 是最轻的入口 —— **开一个终端，敲一条命令，从体检到串口判据全跑完**。
+每行输出都按类型着色，编译 / 烧录 / 监视 / 日志不会混成一片灰字。
+
+```powershell
+# PowerShell 前置（elab.cmd 在仓库根可直接跑）
+$env:PYTHONPATH = "services"
+$env:ELAB_ROOT  = "."
+
+.\elab.cmd loop -p f411 -v
+```
+
+<img src="docs/tutorials/assets/cli-terminal/06-full-loop.png" alt="elab loop 完整闭环终端输出" width="100%">
+
+*一次运行的全部输出：5 个阶段头分色，阶段内部按输出类型再分色（真机 STM32F411CEU6）*
+
+| 阶段 | 终端里的样子 |
+|---|---|
+| `[1/5] doctor` | `[OK  ]` 绿 / `[info]` 蓝；`drift.*`、`convention.*` 三方对账 |
+| `[2/5] build` | Ninja 进度 `[n/53]` 亮蓝 · gcc `warning:` 黄 · RAM/FLASH 百分比 + 条形图 |
+| `[3/5] flash` | OpenOCD 探测橙色 · `** Programming Started **` / `** Verified OK **` 高亮 |
+| `[4/5] debug` | 断到 `main` 的行号、`pc` / 寄存器 |
+| `[5/5] monitor` | `[serial] +` 蓝前缀 · `[alive] tick=N` 心跳紫色加粗 |
+
+五个阶段的实机终端画面（同一台 F411，同一次烧录）：
+
+| 体检（工具链 / 芯片 / 漂移） | 构建（ninja + 内存报告） |
+|---|---|
+| <img src="docs/tutorials/assets/cli-terminal/01-doctor.png" width="440"> | <img src="docs/tutorials/assets/cli-terminal/02-build.png" width="440"> |
+| **烧录（CMSIS-DAP + 双镜像 verify）** | **调试（断到 main.c:84）** |
+| <img src="docs/tutorials/assets/cli-terminal/03-flash.png" width="440"> | <img src="docs/tutorials/assets/cli-terminal/04-debug.png" width="440"> |
+
+串口阶段把固件真实输出直接打回终端 —— 波形行（`0.661,-0.661`）和心跳行（`[alive] tick=N`）
+在同一屏里，判据命中即退出：
+
+<img src="docs/tutorials/assets/cli-terminal/05-monitor.png" alt="串口闭环判据" width="100%">
+
+收尾汇总就是五个绿勾：
+
+<img src="docs/tutorials/assets/cli-terminal/07-summary.png" alt="闭环汇总" width="100%">
+
+> 完整逐条讲解（每个标签的含义、颜色规则、子命令独立跑法）见
+> **[elab CLI 终端闭环上手教程](docs/tutorials/cli-terminal-usage.md)**。
 
 <a id="flow"></a>
 
@@ -141,7 +188,7 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
    人工接管的文件绝不覆盖。agent 走 `elab_adapt`（`write=false` 先看只读报告）。
 3. **跑闭环**：`elab loop -p <name>`（doctor → build → flash → debug --verify → monitor），
    每步都留可 grep 的证据行；也可 `elab run -p <name> --steps build` 只跑一步。
-   - **CLI**：上面两条命令。
+   - **CLI**：上面两条命令，见[终端闭环](#cli)。
    - **独立驾驶舱**：「▶ 跑全闭环」/ 阶段轨「单步执行」，见[下节 6 步表](#cockpit)。
    - **DSH 面板**：顶部三档 **编译 / 三连 / 闭环**；每个通道另有 **▶构建 / ▶烧录 / ▶调试 / ▶串口**。
    - **agent**：`elab_build` / `elab_triple` / `elab_loop` / `elab_step`（返回 run id，进度面板实时可见）。
@@ -155,6 +202,10 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 <a id="cockpit"></a>
 
 ## 闭环驾驶舱
+
+<img src="assets/cockpit-main.png" alt="驾驶舱三列布局（真机）" width="100%">
+
+*左：工程轨（`f411` 下嵌套 `f411_boot` 子工程，OTA 双槽标记）；中：阶段轨 + 证据轨；右：串口工作区*
 
 | 步骤 | 操作 | 你会看到 |
 |---|---|---|
@@ -206,7 +257,7 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 | **串口** | `elab_serial` | 写串口（`utf8/ascii/gbk/hex` + 行尾） |
 | | `elab_serial_monitor` | 会话 `open / close / decoder / clear / pause / resume`（带租约） |
 | | `elab_serial_read` | 增量读原始字节批次（`seq / dir / t / len / gap`） |
-| | `elab_serial_wait` | 等匹配内容出现 / 超时（“发命令后等 OK”这类时序断言） |
+| | `elab_serial_wait` | 等匹配内容出现 / 超时（"发命令后等 OK"这类时序断言） |
 | | `elab_serial_decode` | 无状态解码（JustFloat / FireWater）；`apply=true` 同时落到会话 |
 | | `elab_serial_decoded` | 增量读**会话共享解码帧**（与面板波形页同一份数据） |
 | | `elab_serial_capture` | 开始 / 停止字节录制，返回证据文件路径与统计 |
@@ -243,6 +294,30 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 | **终端** | 流式 ANSI：SGR 颜色、`\r` 覆写、`\b`、UTF-8/GBK 增量解码（跨批保持状态） | 彩色固件日志 |
 | **波形** | **JustFloat / FireWater** 协议解码 → Canvas 多通道折线（半帧留待下一批续解） | 看传感器数值曲线 |
 
+### 真机波形（STM32F411CEU6 · COM10 @ 115200 · FireWater 双通道）
+
+> 固件每 10ms 输出一行 `a,b\r\n`（100 Hz 采样、0.5 Hz 正弦），另插 `[alive] tick=N` 心跳。
+> 下图全部是同一次真机运行的界面原始截图。
+
+| 默认「全部」面板（CH0 / CH1 同时绑定） | 多面板（「全部」+「面板 2」独立视图） |
+|---|---|
+| <img src="assets/cockpit-serial.png" width="440"> | <img src="docs/tutorials/assets/wave-panel/06-all-panel.png" width="440"> |
+| **放大（×2.5，只看 CH0）** | **暂停跟随（视口停在第 0 帧，可回头查）** |
+| <img src="docs/tutorials/assets/wave-panel/04-zoom.png" width="440"> | <img src="docs/tutorials/assets/wave-panel/05-pause-v3.png" width="440"> |
+
+界面上能直接读到的信息：
+
+| 位置 | 含义 |
+|---|---|
+| `通道绑定：CH0 CH1` | 蓝色高亮 = 该面板正在画这个通道；灰框 = 已关闭 |
+| `帧 3860 → 4576` | 当前视口左右边界对应的帧号 |
+| `共 4593 帧 · 窗口 717 · ×1.0` | 缓冲区总帧数 / 视口帧数 / 缩放倍数 |
+| `4593 帧 · 2 通道 · 跳过 57` | 解码统计；`跳过` 是协议外字节数 |
+| 红色条 `环形缓冲已挤出` | 缓冲挤出只报告、不抹平；完整留档用「导出」或闭环 monitor 事件 |
+
+> 手把手操作（选解码器 → 新建面板 → 绑定通道 → 缩放 → 暂停）见
+> **[波形面板使用教程](docs/tutorials/wave-panel-usage.md)**。
+
 ### 会话与发送
 
 | 操作 | 行为 |
@@ -255,26 +330,8 @@ python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
 | **端口 / 波特率** | 工具栏下拉手动选口（`auto` = USB 优先、排蓝牙、有歧义就报错）；选择跨刷新保留；监视运行中锁死（换口需先关监视） |
 | **发送面板** | 文本 / ASCII / GBK / HEX + 行尾 无 / LF / CR / CRLF；HEX 严格校验；与监视同口写穿（TX 与 RX 同构入面） |
 
-> 界面上：驾驶舱「串口」页与 DSH 面板「串口」页是**同一套工作区**（窄栏版布局对齐，
+> 驾驶舱「串口」页与 DSH 面板「串口」页是**同一套工作区**（窄栏版布局对齐，
 > 单条工具栏 + 搜索 subbar + 发送面板）。
-
-### 界面演示（模拟串口 · agent 与人协同）
-
-> 无实板：用 `pyserial` 的 `socket://127.0.0.1:5599` 接一台模拟设备，行 / 字节 / 终端 /
-> 波形 / 发送 / 录制**全部走真实内核数据面**（未改内核，仅让端口枚举看见该 URL 口）。
->
-> 演示分工：agent 先开会话（`opened_by=agent`，租约 120 s）并选定共享解码器 → 人重载页面
-> 接入、接管会话并发送 `status` → agent 切回文本、交还会话 → 人录制并停止。
-> 因此「行」页显示 `会话 agent · 租约`，发送页显示 `会话 我`；两侧看到的是**同一份帧**。
-
-| 行（agent 会话 + 租约 + ANSI 启动日志） | 字节（HEX / ASCII，逐字节着色） |
-|---|---|
-| <img src="docs/assets/serial/01-lines.png" width="440"> | <img src="docs/assets/serial/02-bytes.png" width="440"> |
-| **终端（流式 ANSI 颜色）** | **波形（JustFloat 4 通道 · 共享解码）** |
-| <img src="docs/assets/serial/03-terminal.png" width="440"> | <img src="docs/assets/serial/04-wave.png" width="440"> |
-| **人接管后发送 `status`（TX 与 RX 同面）** | **录制停止（JSONL 路径 / 批数 / 字节数）** |
-| <img src="docs/assets/serial/05-send.png" width="440"> | <img src="docs/assets/serial/06-capture.png" width="440"> |
-
 
 <a id="serial-shared"></a>
 
@@ -381,21 +438,23 @@ boot / APP / 上位机 / 驾驶舱可视化 / 异常注入 / 双槽回滚全链�
 | | AT32_TEST | STM32_TEST | at32f421g8u7 ★ | F411 + F411_BOOT ★ |
 |---|---|---|---|---|
 | 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） | A 类 + 组合工程（boot 子工程） |
-| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% | ✅ app+boot 级联 |
+| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% | ✅ app 53 目标 + boot 32 目标级联 |
 | 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 | ✅ 643 文件 |
-| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` | ✅ 双镜像 + boot 冻结台账 |
-| 串口 | — | — | ✅ `[alive]` 命中 | ✅ 心跳 + OTA 四工具全 PASS |
+| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` | ✅ 双镜像 + boot 冻结台账 · 断到 `main.c:84` |
+| 串口 | — | — | ✅ `[alive]` 命中 | ✅ `[alive] tick=0` 命中 · 心跳 + OTA 四工具全 PASS |
 
 - **质量门**：内核单测 + 集成（真起服务、真编译）全绿；插件 94 项测试（含分层边界与样式门禁）全绿
 - **云端**：GitHub Actions `ubuntu-latest` 三工程 `doctor --deep` + `build` 全绿；前端产物可复现零差异
 
 ```text
-$ ./elab loop -p at32_test --clean
-[1/4] doctor   ✓ 全绿
-[2/4] build    ✓ FLASH 4840/65536 B (7.39%)  RAM 1576/16384 B (9.62%)  guard ✓ untouched=True
-[3/4] flash    ✓ ** Programming Finished ** → ** Verified OK **
-[4/4] debug    ✓ Breakpoint 1, main () at .../main.c:78
-[elab] ✓✓ 闭环完成
+$ ./elab loop -p f411 -v
+[1/5] doctor   ✓ 工具链 / 芯片 / 漂移 / 工程约定 全绿（drift.* 三方对账）
+[2/5] build    ✓ app 53 目标 + boot 32 目标
+               RAM 21864/131072 B (16.68%)  FLASH 44320/458752 B (9.66%)  guard ✓ untouched=True
+[3/5] flash    ✓ boot + app 双镜像 → ** Programming Finished ** → ** Verified OK ** ×2
+[4/5] debug    ✓ Breakpoint 1, main () at .../main.c:84 · pc=0x8017214
+[5/5] monitor  ✓ [alive] tick=0（close_on 命中 · 3.5s / 2201 B / 155 行）
+[elab] ✓✓ 闭环完成：f411
 ```
 
 <a id="constraints"></a>
@@ -420,6 +479,8 @@ $ ./elab loop -p at32_test --clean
 
 | 目标 | 入口 |
 |---|---|
+| **终端闭环上手教程**（真机 5 阶段、终端分色规则、子命令独立跑） | [docs/tutorials/cli-terminal-usage.md](docs/tutorials/cli-terminal-usage.md) |
+| **波形面板使用教程**（选解码器、多面板、通道绑定、缩放暂停） | [docs/tutorials/wave-panel-usage.md](docs/tutorials/wave-panel-usage.md) |
 | **分类索引**（architecture / design / reports / requirements） | [docs/README.md](docs/README.md) |
 | 版本发布说明 | [CHANGELOG.md](CHANGELOG.md) |
 | **需求逐项对照与后续改进**（驾驶舱 R1–R10 / 插件目标 / 串口 P1–P3.5 / 市场 R1–R4 + backlog） | [docs/requirements/需求对照与改进.md](docs/requirements/需求对照与改进.md) |

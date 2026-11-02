@@ -371,7 +371,7 @@ function reduce(s, e) {
 }
 
 // src/domain/envpack.ts
-var DEFAULT_KERNEL_VERSION = "2.1.0";
+var DEFAULT_KERNEL_VERSION = "3.0.0";
 
 // src/domain/kernel-meta.ts
 var current = null;
@@ -1117,6 +1117,54 @@ var elabApi = {
     ...opts.maxBytes !== void 0 ? { max_bytes: opts.maxBytes } : {}
   }),
   serialConsole: (limit = 60, sessionId) => request(withSession(`/elab/api/serial/console?limit=${limit}`, sessionId)),
+  // ── 串口发送组件（M1/M2）：读/存/跑/轮询/取消/暂停 ─────────────
+  /** GET /api/serial/widgets：工程级组件投影（含 rev / warnings / 文件级 error）。 */
+  serialWidgets: (project, sessionId) => request(
+    withSession(`/elab/api/serial/widgets?project=${encodeURIComponent(project)}`, sessionId)
+  ),
+  /** POST /api/serial/widgets action=save：rev 不匹配 → 409（调用方重读后再存）。 */
+  serialWidgetSave: (opts) => post(withSession("/elab/api/serial/widgets", opts.sessionId), {
+    action: "save",
+    project: opts.project,
+    rev: opts.rev,
+    widget: opts.widget
+  }),
+  /** POST /api/serial/widgets action=delete。 */
+  serialWidgetDelete: (opts) => post(withSession("/elab/api/serial/widgets", opts.sessionId), {
+    action: "delete",
+    project: opts.project,
+    rev: opts.rev,
+    id: opts.id
+  }),
+  /**
+   * POST /api/serial/widget/run：dry_run=true 只预览；否则执行（异步任务）。
+   * 返回 `state='running'` 时用 serialWidgetJob 轮询到终态。
+   */
+  serialWidgetRun: (opts) => post(
+    withSession("/elab/api/serial/widget/run", opts.sessionId),
+    {
+      project: opts.project,
+      id: opts.id,
+      ...opts.params !== void 0 ? { params: opts.params } : {},
+      ...opts.dryRun === true ? { dry_run: true } : {},
+      ...opts.repeat === true ? { repeat: true } : {},
+      ...opts.confirm === true ? { confirm: true } : {}
+    },
+    opts.agent === true ? { "x-elab-actor": "agent" } : void 0
+  ),
+  /** GET /api/serial/widget/job?id=：任务快照；id 缺省 = 当前未结束的任务。 */
+  serialWidgetJob: (jobId = "", sessionId) => request(withSession(
+    `/elab/api/serial/widget/job${jobId === "" ? "" : `?id=${encodeURIComponent(jobId)}`}`,
+    sessionId
+  )),
+  serialWidgetCancel: (jobId, sessionId) => post(
+    withSession("/elab/api/serial/widget/cancel", sessionId),
+    { id: jobId }
+  ),
+  serialWidgetPause: (jobId, paused, sessionId) => post(
+    withSession("/elab/api/serial/widget/pause", sessionId),
+    { id: jobId, paused }
+  ),
   adapt: (opts) => post(withSession("/elab/api/adapt", opts.sessionId), opts),
   discover: (sessionId, refresh = false) => {
     const q = new URLSearchParams();
@@ -1798,23 +1846,7 @@ function Row(props) {
 }
 function StageLadder(props) {
   const { steps, availability, focusStep, running } = props;
-  if (steps.length === 0) {
-    return /* @__PURE__ */ react_default.createElement(
-      "div",
-      {
-        role: "list",
-        "aria-label": "\\u6d41\\u6c34\\u7ebf\\u72b6\\u6001",
-        style: {
-          padding: "12px 8px",
-          fontSize: "12px",
-          color: "var(--elab-fg-muted)",
-          lineHeight: 1.6
-        }
-      },
-      /* @__PURE__ */ react_default.createElement("div", null, "\u8FD8\u6CA1\u6709\u8DD1\u8FC7\u95ED\u73AF\u3002"),
-      /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "4px", opacity: 0.8 } }, "\u70B9\u4E0B\u65B9\u300C\u25B6 \u6784\u5EFA / \u70E7\u5F55 / \u8C03\u8BD5 / \u4E32\u53E3\u300D\u5355\u72EC\u542F\u52A8\u5404\u81EA\u529F\u80FD\uFF1B\u4E0A\u65B9\u300C\u4E09\u8FDE / \u95ED\u73AF\u300D\u4E00\u952E\u8DD1\u3002")
-    );
-  }
+  if (steps.length === 0) return null;
   return /* @__PURE__ */ react_default.createElement("div", { role: "list", "aria-label": "\\u6d41\\u6c34\\u7ebf\\u72b6\\u6001", style: { flex: "0 0 auto" } }, steps.map((step) => /* @__PURE__ */ react_default.createElement(
     Row,
     {
@@ -2498,6 +2530,32 @@ function saveHistory(items) {
   } catch {
   }
 }
+function coerceWidgetParams(w, raw) {
+  const out = {};
+  for (const p of w.params) {
+    const v = raw[p.name] ?? "";
+    if (p.type === "int") {
+      const n = Number.parseInt(v, 10);
+      out[p.name] = Number.isNaN(n) ? v : n;
+    } else if (p.type === "float") {
+      const n = Number(v);
+      out[p.name] = Number.isNaN(n) ? v : n;
+    } else if (p.type === "bool") {
+      out[p.name] = v === "true" || v === "1";
+    } else {
+      out[p.name] = v;
+    }
+  }
+  return out;
+}
+function widgetHex(b64) {
+  if (b64 === void 0 || b64 === "") return "";
+  try {
+    return Array.from(b64ToBytes(b64)).map((b) => b.toString(16).padStart(2, "0")).join(" ").toUpperCase();
+  } catch {
+    return "";
+  }
+}
 var BYTE_COLORS = {
   ctl: "var(--elab-ansi-bright-yellow)",
   del: "var(--elab-ansi-bright-red)",
@@ -2593,6 +2651,88 @@ var metaStyle = {
   fontSize: "var(--elab-fs-xs)",
   color: "var(--elab-fg-faint)",
   fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap"
+};
+var widgetInputStyle = {
+  flex: "0 0 auto",
+  height: "20px",
+  padding: "0 4px",
+  fontFamily: "var(--elab-font-mono)",
+  fontSize: "var(--elab-fs-xs)",
+  color: "var(--elab-fg-primary)",
+  background: "var(--elab-bg-surface)",
+  border: "1px solid var(--elab-border)",
+  borderRadius: "var(--elab-radius-sm)",
+  width: "6.5em"
+};
+var widgetBarStyle = {
+  flex: "0 0 auto",
+  display: "flex",
+  alignItems: "center",
+  gap: "4px",
+  padding: "4px 12px",
+  borderTop: "1px solid var(--elab-border)",
+  background: "var(--elab-bg-surface)",
+  flexWrap: "wrap",
+  minWidth: 0
+};
+var widgetTitleStyle = {
+  flex: "0 0 auto",
+  fontSize: "var(--elab-fs-xs)",
+  color: "var(--elab-fg-faint)",
+  letterSpacing: "0.04em",
+  marginRight: "2px"
+};
+var widgetChipStyle = {
+  flex: "0 0 auto",
+  padding: "2px 8px",
+  fontFamily: "var(--elab-font-mono)",
+  fontSize: "var(--elab-fs-xs)",
+  lineHeight: 1.4,
+  background: "var(--elab-bg-code)",
+  color: "var(--elab-fg-secondary)",
+  border: "1px solid var(--elab-border)",
+  borderRadius: "var(--elab-radius-sm)",
+  cursor: "pointer",
+  whiteSpace: "nowrap"
+};
+var widgetChipOnStyle = {
+  ...widgetChipStyle,
+  background: "var(--elab-btn-primary-bg)",
+  color: "var(--elab-fg-primary)",
+  borderColor: "var(--elab-accent)",
+  fontWeight: 600
+};
+var widgetErrStyle = {
+  flex: "0 0 auto",
+  fontSize: "var(--elab-fs-xs)",
+  color: "var(--elab-status-fail)",
+  cursor: "help"
+};
+var widgetPanelStyle = {
+  flex: "0 0 auto",
+  display: "flex",
+  alignItems: "center",
+  gap: "6px",
+  flexWrap: "wrap",
+  padding: "5px 12px",
+  borderTop: "1px dashed var(--elab-border)",
+  background: "color-mix(in srgb, var(--elab-btn-primary-bg) 35%, transparent)",
+  minWidth: 0
+};
+var widgetPreviewStyle = {
+  flex: "0 1 auto",
+  minWidth: 0,
+  fontFamily: "var(--elab-font-mono)",
+  fontSize: "var(--elab-fs-xs)",
+  color: "var(--elab-fg-faint)",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap"
+};
+var widgetLabelStyle = {
+  fontSize: "var(--elab-fs-xs)",
+  color: "var(--elab-fg-dimmed)",
   whiteSpace: "nowrap"
 };
 var waveBadge = {
@@ -2694,6 +2834,14 @@ function SerialPane(props) {
   const [replay, setReplay] = useState(null);
   const [replayErr, setReplayErr] = useState(null);
   const replayRef = useRef(null);
+  const [widgetDoc, setWidgetDoc] = useState(null);
+  const [widgetId, setWidgetId] = useState("");
+  const [widgetParams, setWidgetParams] = useState({});
+  const [widgetPreview, setWidgetPreview] = useState("");
+  const [widgetErr, setWidgetErr] = useState(null);
+  const [widgetBusy, setWidgetBusy] = useState(false);
+  const [widgetJob, setWidgetJob] = useState(null);
+  const [widgetJobId, setWidgetJobId] = useState("");
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
   const scrollRef = useRef(null);
   const followRef = useRef(true);
@@ -2819,16 +2967,67 @@ function SerialPane(props) {
       cancelled = true;
     };
   }, [view, sharedActive, filtered, decoder, props.sessionId, api, replayMode]);
+  const [waveViewports, setWaveViewports] = useState([]);
+  const [activeViewport, setActiveViewport] = useState("");
+  const [viewportFollow, setViewportFollow] = useState({});
+  const lastTotalChDsh = useRef(0);
+  useEffect(() => {
+    const totalCh = shownChannels;
+    if (totalCh === 0) return;
+    const needInit = waveViewports.length === 0;
+    const grew = totalCh > lastTotalChDsh.current;
+    lastTotalChDsh.current = Math.max(lastTotalChDsh.current, totalCh);
+    if (!needInit && !grew) return;
+    const allVp = { id: "all", name: "\u5168\u90E8", channels: Array.from({ length: totalCh }, (_, i) => i), scaleX: 1, offsetX: 0 };
+    setWaveViewports([allVp]);
+    setActiveViewport("all");
+    setViewportFollow({ all: follow });
+  }, [shownChannels]);
+  const setFollowAll = (v) => {
+    setFollow(v);
+    setViewportFollow((prev) => {
+      const next = { ...prev };
+      for (const vp of waveViewports) next[vp.id] = v;
+      return next;
+    });
+  };
+  const addWaveViewport = () => {
+    const totalCh = shownChannels;
+    if (totalCh === 0) return;
+    const id = `vp_${Date.now().toString(36)}`;
+    setWaveViewports((vps) => [
+      ...vps,
+      { id, name: `\u9762\u677F ${vps.length + 1}`, channels: Array.from({ length: totalCh }, (_, i) => i), scaleX: 1, offsetX: 0 }
+    ]);
+    setViewportFollow((f) => ({ ...f, [id]: follow }));
+    setActiveViewport(id);
+  };
+  const removeWaveViewport = (id) => {
+    setWaveViewports((vps) => {
+      const rest = vps.filter((v) => v.id !== id);
+      if (rest.length === 0) return vps;
+      if (activeViewport === id) setActiveViewport(rest[rest.length - 1].id);
+      return rest;
+    });
+    setViewportFollow((f) => {
+      const { [id]: _gone, ...rest } = f;
+      return rest;
+    });
+  };
+  const setViewportChannels = (id, channels) => {
+    setWaveViewports((vps) => vps.map((v) => v.id === id ? { ...v, channels } : v));
+  };
+  const setViewportView = (id, scaleX, offsetX) => {
+    setWaveViewports((vps) => {
+      const vp = vps.find((v) => v.id === id);
+      if (!vp || vp.scaleX === scaleX && vp.offsetX === offsetX) return vps;
+      return vps.map((v) => v.id === id ? { ...v, scaleX, offsetX } : v);
+    });
+  };
   useEffect(() => {
     const el = scrollRef.current;
-    if (el !== null && followRef.current) el.scrollTop = el.scrollHeight;
-  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, shownFrames.length, props.runLinesVersion]);
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (el === null) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    if (atBottom !== follow) setFollow(atBottom);
-  };
+    if (el !== null && view !== "wave" && followRef.current) el.scrollTop = el.scrollHeight;
+  }, [follow, view, monitorLines, runLines, byteBlocks, shownTerm, shownFrames, props.runLinesVersion]);
   const doCapture = useCallback(async () => {
     setNotice(null);
     const cap2 = stream.snap?.capture;
@@ -2967,6 +3166,178 @@ function SerialPane(props) {
     },
     [running, writable, sendFormat, eol, stream]
   );
+  const widgets = useMemo(() => widgetDoc?.widgets ?? [], [widgetDoc]);
+  const activeWidget = useMemo(
+    () => widgets.find((w) => w.id === widgetId) ?? null,
+    [widgets, widgetId]
+  );
+  const jobActive = widgetJob !== null && (widgetJob.state === "running" || widgetJob.state === "paused" || widgetJob.state === "cancelling");
+  const widgetProgress = (() => {
+    if (widgetJob === null) return "";
+    const rounds = widgetJob.rounds ?? 0;
+    const skipped = widgetJob.skipped ?? 0;
+    const bytes = widgetJob.total_bytes ?? 0;
+    const st = widgetJob.state ?? "";
+    if (jobActive) {
+      const skip = skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${skipped} \u62CD` : "";
+      const label = st === "paused" ? "\u5DF2\u6682\u505C" : st === "cancelling" ? "\u505C\u6B62\u4E2D\u2026" : "\u8FD0\u884C\u4E2D";
+      return `${label} \xB7 \u7B2C ${rounds} \u8F6E${skip} \xB7 ${bytes} B`;
+    }
+    if (st === "done") return `\u5B8C\u6210 \xB7 ${rounds} \u8F6E \xB7 ${bytes} B${skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${skipped} \u62CD` : ""}`;
+    if (st === "cancelled") return `\u5DF2\u505C\u6B62 \xB7 ${bytes} B`;
+    if (st === "failed") return `\u5931\u8D25${widgetJob.error ? ` \xB7 ${widgetJob.error}` : ""}`;
+    return "";
+  })();
+  useEffect(() => {
+    if (project === "") {
+      setWidgetDoc(null);
+      setWidgetId("");
+      return;
+    }
+    let alive = true;
+    void api.serialWidgets(project).then((d) => {
+      if (!alive) return;
+      setWidgetDoc(d);
+      setWidgetErr(d.error);
+      setWidgetId((cur) => d.widgets.some((w) => w.id === cur) ? cur : "");
+    }).catch((e) => {
+      if (alive) setWidgetErr(e instanceof Error ? e.message : String(e));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api, project]);
+  useEffect(() => {
+    if (activeWidget === null) {
+      setWidgetParams({});
+      return;
+    }
+    const next = {};
+    for (const p of activeWidget.params) {
+      next[p.name] = p.type === "bool" ? p.default === true ? "true" : "false" : String(p.default ?? "");
+    }
+    setWidgetParams(next);
+  }, [activeWidget?.id]);
+  useEffect(() => {
+    if (activeWidget === null || project === "") {
+      setWidgetPreview("");
+      return;
+    }
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      void api.serialWidgetRun({
+        project,
+        id: activeWidget.id,
+        params: coerceWidgetParams(activeWidget, widgetParams),
+        dryRun: true
+      }).then((r) => {
+        if (!alive) return;
+        if (!r.ok) {
+          setWidgetPreview("");
+          setWidgetErr(r.error ?? "\u9884\u89C8\u5931\u8D25");
+          return;
+        }
+        setWidgetErr(null);
+        setWidgetPreview(`\u9884\u89C8 ${r.bytes ?? 0} B \xB7 ${widgetHex(r.preview_b64)}`);
+      }).catch((e) => {
+        if (alive) setWidgetErr(e instanceof Error ? e.message : String(e));
+      });
+    }, 150);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, project, activeWidget, widgetParams]);
+  useEffect(() => {
+    if (project === "") return;
+    let alive = true;
+    void api.serialWidgetJob().then((j) => {
+      if (!alive) return;
+      const active = j.state === "running" || j.state === "paused" || j.state === "cancelling";
+      if (!active || j.job_id === void 0 || j.job_id === "") return;
+      setWidgetJob(j);
+      setWidgetJobId(j.job_id);
+      setWidgetBusy(true);
+    }).catch(() => {
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api, project]);
+  useEffect(() => {
+    if (widgetJobId === "") return;
+    let alive = true;
+    let timer = 0;
+    const isActive = (s) => s === "running" || s === "paused" || s === "cancelling";
+    const tick = async () => {
+      try {
+        const j = await api.serialWidgetJob(widgetJobId);
+        if (!alive) return;
+        setWidgetJob(j);
+        if (isActive(j.state)) {
+          timer = window.setTimeout(() => void tick(), 400);
+        } else {
+          setWidgetBusy(false);
+          if (!j.ok) setWidgetErr(j.error ?? "\u6267\u884C\u5931\u8D25");
+        }
+      } catch (e) {
+        if (!alive) return;
+        setWidgetBusy(false);
+        setWidgetErr(e instanceof Error ? e.message : String(e));
+      }
+    };
+    void tick();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, widgetJobId]);
+  const doWidgetRun = useCallback(async (repeat) => {
+    if (activeWidget === null || running || !writable || widgetBusy || jobActive) return;
+    if (activeWidget.confirm && !window.confirm(`\u7EC4\u4EF6\u300C${activeWidget.label}\u300D\u9700\u8981\u786E\u8BA4\u540E\u6267\u884C\uFF0C\u7EE7\u7EED\uFF1F`)) return;
+    setWidgetErr(null);
+    setWidgetBusy(true);
+    try {
+      const r = await api.serialWidgetRun({
+        project,
+        id: activeWidget.id,
+        params: coerceWidgetParams(activeWidget, widgetParams),
+        repeat,
+        confirm: activeWidget.confirm
+      });
+      setWidgetJob(r);
+      if (r.job_id !== void 0 && r.job_id !== "") setWidgetJobId(r.job_id);
+      const stillActive = r.state === "running" || r.state === "paused" || r.state === "cancelling";
+      if (!stillActive) {
+        setWidgetBusy(false);
+        if (!r.ok) setWidgetErr(r.error ?? "\u6267\u884C\u5931\u8D25");
+      }
+    } catch (e) {
+      setWidgetBusy(false);
+      setWidgetErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [activeWidget, running, writable, widgetBusy, jobActive, api, project, widgetParams]);
+  const doWidgetCancel = useCallback(async () => {
+    const id = widgetJob?.job_id ?? widgetJobId;
+    if (id === "") return;
+    try {
+      await api.serialWidgetCancel(id);
+      setWidgetJob(await api.serialWidgetJob(id));
+    } catch (e) {
+      setWidgetErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, widgetJob, widgetJobId]);
+  const doWidgetPause = useCallback(async () => {
+    const id = widgetJob?.job_id ?? widgetJobId;
+    if (id === "") return;
+    const paused = widgetJob?.state !== "paused";
+    try {
+      await api.serialWidgetPause(id, paused);
+      setWidgetJob(await api.serialWidgetJob(id));
+    } catch (e) {
+      setWidgetErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, widgetJob, widgetJobId]);
   const doReplay = useCallback(async (e) => {
     const file = e.currentTarget.files?.[0];
     e.currentTarget.value = "";
@@ -3212,7 +3583,7 @@ function SerialPane(props) {
       "button",
       {
         type: "button",
-        onClick: () => setFollow((v) => !v),
+        onClick: () => setFollowAll(!follow),
         title: follow ? "\u6B63\u5728\u8DDF\u968F\u6700\u65B0\u8F93\u51FA\uFF1B\u70B9\u51FB\u6682\u505C" : "\u5DF2\u6682\u505C\u8DDF\u968F\uFF1B\u70B9\u51FB\u6062\u590D",
         style: {
           ...chip,
@@ -3238,7 +3609,6 @@ function SerialPane(props) {
     "div",
     {
       ref: scrollRef,
-      onScroll,
       style: {
         flex: "1 1 auto",
         minHeight: 0,
@@ -3320,8 +3690,161 @@ function SerialPane(props) {
         stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"
       ),
       /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, `${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \xB7 \u5185\u6838\u53EA\u89E3 RX\uFF08\u8BBE\u5907\u8F93\u51FA\uFF09`)
-    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709\u89E3\u51FA\u5B8C\u6574\u5E27\uFF1A\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u89E3\u7801 ${replay?.chunks.length ?? 0} \u6279 \u2014\u2014 \u5F55\u5236\u91CC\u53EF\u80FD\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u5207\u65B9\u5411\u53EA\u770B RX \u6216\u6362\u89E3\u7801\u5668\u3002` : sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 ? /* @__PURE__ */ react_default.createElement(WaveChart, { frames: shownFrames, channels: shownChannels }) : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
-  ), /* @__PURE__ */ react_default.createElement(
+    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709\u89E3\u51FA\u5B8C\u6574\u5E27\uFF1A\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u89E3\u7801 ${replay?.chunks.length ?? 0} \u6279 \u2014\u2014 \u5F55\u5236\u91CC\u53EF\u80FD\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u5207\u65B9\u5411\u53EA\u770B RX \u6216\u6362\u89E3\u7801\u5668\u3002` : sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 && waveViewports.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px", marginBottom: "8px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } }, waveViewports.map((vp) => /* @__PURE__ */ react_default.createElement("div", { key: vp.id, style: { display: "inline-flex", alignItems: "center", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", overflow: "hidden" } }, /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => setActiveViewport(vp.id),
+        style: {
+          padding: "3px 8px",
+          fontSize: "var(--elab-fs-xs)",
+          /* 选中态用「浅色强调底 + 恒可读文字」：宿主 brand-primary 是近白，
+             拿它当填充会把白字吃掉（实测波形页签变成一块白板）。 */
+          background: activeViewport === vp.id ? "var(--elab-btn-primary-bg)" : "var(--elab-bg-surface)",
+          color: activeViewport === vp.id ? "var(--elab-fg-primary)" : "var(--elab-fg-secondary)",
+          fontWeight: activeViewport === vp.id ? 600 : 400,
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "inherit"
+        },
+        title: `\u5207\u6362\u5230 ${vp.name}`
+      },
+      vp.name
+    ), waveViewports.length > 1 ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => removeWaveViewport(vp.id),
+        style: { padding: "3px 6px", fontSize: 12, background: "transparent", color: "var(--elab-fg-dimmed)", border: "none", borderLeft: "1px solid var(--elab-border)", cursor: "pointer", lineHeight: 1 },
+        title: "\u5220\u9664\u6B64\u9762\u677F\uFF08\u81F3\u5C11\u4FDD\u7559\u4E00\u4E2A\uFF09"
+      },
+      "\xD7"
+    ) : null)), /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: addWaveViewport,
+        style: { padding: "3px 8px", fontSize: "var(--elab-fs-xs)", background: "transparent", color: "var(--elab-accent)", border: "1px dashed var(--elab-accent)", borderRadius: "var(--elab-radius-sm)", cursor: "pointer", fontFamily: "inherit" },
+        title: "\u65B0\u5EFA\u6CE2\u5F62\u9762\u677F\uFF1A\u72EC\u7ACB\u7F29\u653E/\u5E73\u79FB\uFF0C\u53EF\u7ED1\u5B9A\u4E0D\u540C\u901A\u9053"
+      },
+      "+ \u65B0\u5EFA\u9762\u677F"
+    )), (() => {
+      const vp = waveViewports.find((v) => v.id === activeViewport);
+      if (!vp) return null;
+      const totalCh = shownChannels;
+      if (totalCh === 0) return null;
+      return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap", fontSize: "var(--elab-fs-xs)" } }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, "\u901A\u9053\u7ED1\u5B9A\uFF1A"), Array.from({ length: totalCh }, (_, i) => {
+        const on = vp.channels.includes(i);
+        return /* @__PURE__ */ react_default.createElement(
+          "button",
+          {
+            key: i,
+            type: "button",
+            onClick: () => {
+              const newCh = on ? vp.channels.filter((x) => x !== i) : [...vp.channels, i].sort((a, b) => a - b);
+              if (newCh.length > 0) setViewportChannels(vp.id, newCh);
+            },
+            style: {
+              padding: "2px 6px",
+              fontSize: "var(--elab-fs-xs)",
+              background: on ? "var(--elab-btn-primary-bg)" : "var(--elab-bg-surface)",
+              color: on ? "var(--elab-fg-primary)" : "var(--elab-fg-dimmed)",
+              fontWeight: on ? 600 : 400,
+              border: `1px solid ${on ? "var(--elab-accent)" : "var(--elab-border)"}`,
+              borderRadius: "var(--elab-radius-sm)",
+              cursor: "pointer",
+              fontFamily: "inherit"
+            },
+            title: `${on ? "\u53D6\u6D88" : "\u7ED1\u5B9A"} CH${i}`
+          },
+          "CH",
+          i
+        );
+      }));
+    })()) : null, shownFrames.length > 0 && waveViewports.length > 0 ? (() => {
+      const vp = waveViewports.find((v) => v.id === activeViewport);
+      if (!vp) return null;
+      const f = viewportFollow[vp.id] ?? follow;
+      return /* @__PURE__ */ react_default.createElement(
+        WaveChart,
+        {
+          frames: shownFrames,
+          channels: vp.channels,
+          scaleX: vp.scaleX,
+          offsetX: vp.offsetX,
+          onView: (sx, ox) => setViewportView(vp.id, sx, ox),
+          follow: f,
+          onFollowChange: (v) => setViewportFollow((prev) => ({ ...prev, [vp.id]: v }))
+        }
+      );
+    })() : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
+  ), widgetDoc !== null && project !== "" && (widgets.length > 0 || widgetDoc.warnings.length > 0 || widgetDoc.error !== null) ? /* @__PURE__ */ react_default.createElement("div", { style: widgetBarStyle }, /* @__PURE__ */ react_default.createElement("span", { style: widgetTitleStyle }, "\u7EC4\u4EF6"), widgets.map((w) => /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      key: w.id,
+      type: "button",
+      title: `${w.label} \xB7 ${w.steps.length} \u6B65${w.group ? ` \xB7 ${w.group}` : ""}`,
+      onClick: () => setWidgetId(widgetId === w.id ? "" : w.id),
+      style: widgetId === w.id ? widgetChipOnStyle : widgetChipStyle
+    },
+    w.label
+  )), widgetDoc.error !== null ? /* @__PURE__ */ react_default.createElement("span", { style: widgetErrStyle }, `\u2717 ${widgetDoc.error}`) : null, widgetDoc.warnings.length > 0 ? /* @__PURE__ */ react_default.createElement("span", { style: widgetErrStyle, title: widgetDoc.warnings.join("\n") }, `\u26A0 ${widgetDoc.warnings.length} \u5904\u914D\u7F6E\u95EE\u9898`) : null) : null, activeWidget !== null ? /* @__PURE__ */ react_default.createElement("div", { style: widgetPanelStyle }, activeWidget.params.length === 0 ? /* @__PURE__ */ react_default.createElement("span", { style: widgetLabelStyle }, "\u65E0\u53C2\u6570") : activeWidget.params.map((p) => /* @__PURE__ */ react_default.createElement("label", { key: p.name, style: { display: "inline-flex", alignItems: "center", gap: "3px" }, title: p.name }, /* @__PURE__ */ react_default.createElement("span", { style: widgetLabelStyle }, p.label ?? p.name), p.type === "bool" ? /* @__PURE__ */ react_default.createElement(
+    "input",
+    {
+      type: "checkbox",
+      checked: widgetParams[p.name] === "true",
+      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.checked ? "true" : "false" })),
+      style: { width: "14px", height: "14px", cursor: "pointer" }
+    }
+  ) : p.type === "enum" ? /* @__PURE__ */ react_default.createElement(
+    "select",
+    {
+      value: widgetParams[p.name] ?? "",
+      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value })),
+      style: selectStyle
+    },
+    (p.options ?? []).map((o) => /* @__PURE__ */ react_default.createElement("option", { key: o.value, value: o.value }, o.label))
+  ) : /* @__PURE__ */ react_default.createElement(
+    "input",
+    {
+      type: p.type === "int" || p.type === "float" ? "number" : "text",
+      value: widgetParams[p.name] ?? "",
+      min: p.min,
+      max: p.max,
+      step: p.step ?? (p.type === "float" ? "any" : void 0),
+      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value })),
+      style: { ...widgetInputStyle, width: p.type === "string" ? "7em" : "5.5em" }
+    }
+  ))), /* @__PURE__ */ react_default.createElement("span", { style: widgetPreviewStyle, title: widgetErr ?? widgetPreview }, widgetErr !== null ? `\u2717 ${widgetErr}` : widgetPreview !== "" ? widgetPreview : "\u9884\u89C8\u4E2D\u2026"), widgetProgress !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: widgetPreviewStyle, title: widgetProgress }, widgetProgress) : null, /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto" } }), activeWidget.repeat ? /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: running || !writable || widgetBusy || jobActive,
+      onClick: () => void doWidgetRun(true),
+      title: `\u5468\u671F\u53D1\u9001\uFF1A\u6BCF ${activeWidget.repeat.interval_ms} ms \u4E00\u8F6E\uFF0C${activeWidget.repeat.count > 0 ? `\u5171 ${activeWidget.repeat.count} \u8F6E` : "\u76F4\u5230\u624B\u52A8\u505C\u6B62"}\uFF1B\u4E0A\u4E00\u8F6E\u8D85\u65F6\u53EA\u8BB0\u8DF3\u8FC7\u3001\u4E0D\u8865\u53D1`,
+      style: {
+        ...chip,
+        opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
+        cursor: running || !writable || widgetBusy || jobActive ? "not-allowed" : "pointer"
+      }
+    },
+    "\u21BB \u5468\u671F"
+  ) : null, jobActive ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void doWidgetPause(), style: chip, title: "\u6682\u505C/\u6062\u590D\uFF08\u8282\u62CD\u7167\u5E38\u8D70\uFF0C\u505C\u6389\u7684\u8BB0\u8DF3\u8FC7\uFF09" }, widgetJob?.state === "paused" ? "\u25B6 \u7EE7\u7EED\u4EFB\u52A1" : "\u275A\u275A \u6682\u505C\u4EFB\u52A1"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void doWidgetCancel(), style: chip, title: "\u505C\u6B62\uFF081s \u5185\u9000\u51FA\uFF0C\u4E0D\u518D\u53D1\u540E\u7EED\u6B65\u9AA4\uFF09" }, "\u25A0 \u505C\u6B62\u4EFB\u52A1")) : null, /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: running || !writable || widgetBusy || jobActive,
+      onClick: () => void doWidgetRun(false),
+      title: activeWidget.confirm ? "\u8BE5\u7EC4\u4EF6\u9700\u8981\u786E\u8BA4\u540E\u6267\u884C" : "\u6267\u884C\u7EC4\u4EF6\uFF08send/delay/wait \u5E8F\u5217\uFF09",
+      style: {
+        ...chip,
+        fontWeight: 600,
+        opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
+        cursor: running || !writable || widgetBusy || jobActive ? "not-allowed" : "pointer"
+      }
+    },
+    "\u25B6 \u53D1\u9001"
+  )) : null, /* @__PURE__ */ react_default.createElement(
     "form",
     {
       onSubmit: (e) => void doSend(e),
@@ -3462,15 +3985,66 @@ function SerialPane(props) {
     `\u76D1\u89C6\u672A\u542F\u52A8\uFF08${port || "auto"}@${baud}\uFF09\u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u25B6 \u4E32\u53E3\u300D\u542F\u52A8\u3002`
   ) : null);
 }
+var WAVE_TOKENS = [
+  "bright-blue",
+  "bright-green",
+  "bright-red",
+  "bright-yellow",
+  "bright-magenta",
+  "bright-cyan",
+  "blue",
+  "green"
+];
+function resolvedChannelsDsh(ch, frameChannels) {
+  if (typeof ch === "number") return Array.from({ length: Math.min(ch, frameChannels) }, (_, i) => i);
+  return ch.filter((i) => i >= 0 && i < frameChannels);
+}
 function WaveChart(props) {
-  const { frames, channels } = props;
-  const hostRef = useRef(null);
+  const { frames, channels, scaleX, offsetX, onView, follow, onFollowChange } = props;
+  const canvasRef = useRef(null);
+  const dragRef = useRef(null);
+  const dragActive = useRef(false);
+  const [frozen, setFrozen] = useState(null);
   useEffect(() => {
-    const canvas = hostRef.current;
-    if (canvas === null || frames.length === 0) return;
+    if (frames.length === 0) {
+      setFrozen(null);
+      return;
+    }
+    if (follow) {
+      setFrozen(null);
+      return;
+    }
+    setFrozen((cur) => cur ?? frames);
+  }, [follow, frames]);
+  const shown = follow ? frames : frozen ?? frames;
+  const frameChannels = shown[0]?.length ?? 0;
+  const shownCh = resolvedChannelsDsh(channels, frameChannels);
+  const lastFramesLen = useRef(0);
+  useEffect(() => {
+    if (shown.length === 0) {
+      onView(scaleX, 0);
+      return;
+    }
+    const prev = lastFramesLen.current;
+    lastFramesLen.current = shown.length;
+    if (follow) {
+      const canvas = canvasRef.current;
+      const w = canvas?.clientWidth ?? 480;
+      const visible = Math.max(20, Math.ceil(w / scaleX));
+      onView(scaleX, Math.max(0, shown.length - visible));
+    } else if (prev === 0) {
+      const canvas = canvasRef.current;
+      const w = canvas?.clientWidth ?? 480;
+      const visible = Math.max(20, Math.ceil(w / scaleX));
+      onView(scaleX, Math.min(offsetX, Math.max(0, shown.length - visible)));
+    }
+  }, [shown.length, follow, scaleX]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null || shown.length === 0) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth || 480;
-    const h = canvas.clientHeight || 200;
+    const h = canvas.clientHeight || 220;
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
     const ctx = canvas.getContext("2d");
@@ -3478,35 +4052,52 @@ function WaveChart(props) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     const css = getComputedStyle(canvas);
-    const cvar = (name) => css.getPropertyValue(name).trim();
-    const border = cvar("--elab-border") || cvar("--elab-fg-dimmed");
-    const palette = [
-      "--elab-ansi-bright-blue",
-      "--elab-ansi-bright-green",
-      "--elab-ansi-bright-red",
-      "--elab-ansi-bright-yellow",
-      "--elab-ansi-bright-magenta",
-      "--elab-ansi-bright-cyan",
-      "--elab-ansi-blue",
-      "--elab-ansi-green"
-    ];
-    const fallback = cvar("--elab-fg-primary");
-    const colors = palette.map((p) => cvar(p) || fallback);
+    const cvar = (n) => css.getPropertyValue(n).trim();
+    const border = cvar("--elab-border") || "transparent";
+    const axisLabel = cvar("--elab-fg-faint") || "gray";
+    const palette = WAVE_TOKENS.map((tok) => cvar(`--elab-ansi-${tok}`) || axisLabel);
+    const padL = 8, padR = 8, padT = 16, padB = 18;
+    const plotW = w - padL - padR, plotH = h - padT - padB;
+    if (plotW <= 4 || plotH <= 4) return;
+    const plotTop = padT, plotBottom = padT + plotH;
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const startIdx = Math.max(0, Math.min(offsetX, shown.length - 1));
+    const endIdx = Math.min(shown.length, startIdx + visibleCount);
+    const slice = shown.slice(startIdx, endIdx);
+    if (slice.length === 0) return;
+    const xOf = (i) => padL + (slice.length <= 1 ? plotW / 2 : i / (slice.length - 1) * plotW);
     ctx.strokeStyle = border;
     ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i += 1) {
-      const y = h * i / 4;
+    for (let i = 1; i < 4; i++) {
+      const y = plotTop + plotH * i / 4;
       ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
       ctx.stroke();
     }
-    const n = frames.length;
-    for (let ch = 0; ch < channels; ch += 1) {
-      const values = frames.map((f) => ch < f.length ? f[ch] : 0);
-      let lo = Infinity;
-      let hi = -Infinity;
+    const stepSec = Math.max(10, Math.round(slice.length / 6));
+    ctx.fillStyle = axisLabel;
+    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
+    ctx.textBaseline = "top";
+    for (let i = 0; i < slice.length; i += stepSec) {
+      const x = xOf(i);
+      if (x > w - padR) break;
+      ctx.strokeStyle = border;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      ctx.textAlign = "center";
+      const label = `${startIdx + i}`;
+      const half = ctx.measureText(label).width / 2;
+      const lx = Math.min(w - padR - half, Math.max(padL + half, x));
+      ctx.fillText(label, lx, plotBottom + 3);
+    }
+    for (const ch of shownCh) {
+      const values = slice.map((f) => ch < f.length ? f[ch] : NaN);
+      let lo = Infinity, hi = -Infinity;
       for (const v of values) {
+        if (!Number.isFinite(v)) continue;
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
@@ -3515,35 +4106,84 @@ function WaveChart(props) {
         hi = lo + 1;
         lo -= 1;
       }
-      ctx.strokeStyle = colors[ch % colors.length];
+      ctx.strokeStyle = palette[ch % palette.length];
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      for (let i = 0; i < n; i += 1) {
-        const x = n === 1 ? w / 2 : i / (n - 1) * w;
-        const y = h - (values[i] - lo) / (hi - lo) * h;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      let started = false;
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i])) {
+          started = false;
+          continue;
+        }
+        const x = xOf(i);
+        const y = plotBottom - (values[i] - lo) / (hi - lo) * plotH;
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else ctx.lineTo(x, y);
       }
       ctx.stroke();
     }
-  }, [frames, channels]);
-  return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } }, /* @__PURE__ */ react_default.createElement(
+    ctx.fillStyle = axisLabel;
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(`\u5E27 ${startIdx} \u2192 ${endIdx - 1}`, padL, 2);
+    ctx.textAlign = "right";
+    ctx.fillText(`\u5171 ${shown.length} \u5E27 \xB7 \u7A97\u53E3 ${endIdx - startIdx} \xB7 \xD7${scaleX.toFixed(1)}`, w - padR, 2);
+  }, [shown, scaleX, offsetX, shownCh]);
+  const onWheel = (e) => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const xInCanvas = e.clientX - rect.left;
+    const padL = 8;
+    const plotW = rect.width - padL - 8;
+    const frameAtCursor = Math.round(offsetX + Math.max(0, xInCanvas - padL) / scaleX);
+    const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2));
+    const visibleCount = Math.max(2, Math.round(plotW / newScale));
+    let newOffset = frameAtCursor - Math.round((xInCanvas - padL) / newScale);
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
+    onView(newScale, newOffset);
+    if (follow) onFollowChange(false);
+  };
+  const onMouseDown = (e) => {
+    dragRef.current = { startClientX: e.clientX, startOffset: offsetX };
+    dragActive.current = true;
+    e.preventDefault();
+  };
+  const onMouseMove = (e) => {
+    if (!dragActive.current || !dragRef.current) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const plotW = rect.width - 44 - 8;
+    const dx = e.clientX - dragRef.current.startClientX;
+    const offsetDelta = Math.round(-dx / scaleX);
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    let newOffset = dragRef.current.startOffset + offsetDelta;
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
+    if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset);
+    if (follow) onFollowChange(false);
+  };
+  const endDrag = () => {
+    dragActive.current = false;
+    dragRef.current = null;
+  };
+  const canvasReady = shown.length > 0;
+  const chip2 = { padding: "2px 8px", fontSize: 12, lineHeight: 1, border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", background: "var(--elab-bg-surface)", color: "var(--elab-fg-secondary)", cursor: "pointer", fontFamily: "inherit" };
+  return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "12px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", flex: "1 1 auto" } }, shownCh.map((ch) => /* @__PURE__ */ react_default.createElement("span", { key: ch, style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { width: "10px", height: "10px", borderRadius: "2px", background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` } }), `CH${ch}`))), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.max(1, scaleX / 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u7F29\u5C0F\uFF08\u5411\u540E\u770B\u66F4\u591A\u5E27\uFF09" }, "\u2212"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.min(20, scaleX * 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u653E\u5927\uFF08\u770B\u66F4\u7CBE\u7EC6\u7684\u5C40\u90E8\uFF09" }, "+"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(1, 0), style: chip2, disabled: !canvasReady, title: "\u91CD\u7F6E\uFF08\u5168\u90E8\u53EF\u89C1\u3001\u56DE\u5230\u5F00\u5934\uFF09" }, "\u293E"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onFollowChange(!follow), style: { ...chip2, ...follow ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : {} }, disabled: !canvasReady, title: follow ? "\u6B63\u5728\u8DDF\u968F\u6700\u65B0\u5E27\uFF0C\u70B9\u51FB\u6682\u505C\uFF08\u753B\u9762\u5B9A\u683C\u5728\u5F53\u524D\u7A97\u53E3\uFF0C\u6570\u636E\u4ECD\u7EE7\u7EED\u63A5\u6536\uFF09" : "\u753B\u9762\u5DF2\u5B9A\u683C\uFF0C\u70B9\u51FB\u6062\u590D\u8DDF\u968F\u6700\u65B0\u5E27" }, follow ? "\u275A\u275A \u6682\u505C\u8DDF\u968F" : "\u25B6 \u6062\u590D\u8DDF\u968F"))), /* @__PURE__ */ react_default.createElement(
     "canvas",
     {
-      ref: hostRef,
-      style: { width: "100%", height: "220px", display: "block", background: "var(--elab-bg-surface)", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)" }
+      ref: canvasRef,
+      style: { width: "100%", height: "220px", display: "block", background: "var(--elab-bg-surface)", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", cursor: canvasReady ? dragActive.current ? "grabbing" : "grab" : "default" },
+      onWheel,
+      onMouseDown,
+      onMouseMove,
+      onMouseUp: endDrag,
+      onMouseLeave: endDrag
     }
-  ), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "12px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)" } }, Array.from({ length: Math.max(0, channels) }, (_, i) => /* @__PURE__ */ react_default.createElement("span", { key: i, style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, /* @__PURE__ */ react_default.createElement(
-    "span",
-    {
-      style: {
-        width: "10px",
-        height: "10px",
-        borderRadius: "2px",
-        background: `var(--elab-ansi-${["bright-blue", "bright-green", "bright-red", "bright-yellow", "bright-magenta", "bright-cyan", "blue", "green"][i % 8]})`
-      }
-    }
-  ), `CH${i}`))));
+  ));
 }
 
 // src/adapters/dsh-web/serial/useSerialStream.ts
@@ -4565,7 +5205,6 @@ function AdaptBanner(props) {
     checkRoot,
     error,
     disabled,
-    onAdapt,
     onCheck
   } = props;
   if (phase === "adapting") {
@@ -4655,48 +5294,7 @@ function AdaptBanner(props) {
     }
     return null;
   }
-  return /* @__PURE__ */ react_default.createElement(
-    "div",
-    {
-      style: {
-        flex: "0 0 auto",
-        padding: "3px 8px",
-        fontSize: "11px",
-        color: "var(--elab-fg-muted)",
-        borderBottom: "1px solid var(--elab-border)",
-        display: "flex",
-        flexDirection: "column",
-        gap: "2px"
-      }
-    },
-    pending.map((c) => /* @__PURE__ */ react_default.createElement("div", { key: c.path, style: { display: "flex", alignItems: "center", gap: "6px", minWidth: 0 } }, /* @__PURE__ */ react_default.createElement(
-      "span",
-      {
-        style: { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-        title: c.path
-      },
-      `\u53D1\u73B0\u672A\u63A5\u5165\u5DE5\u7A0B\uFF1A${c.dirname}`
-    ), /* @__PURE__ */ react_default.createElement(
-      "button",
-      {
-        type: "button",
-        disabled,
-        onClick: () => onAdapt(c.path),
-        title: `\u63A5\u5165 ${c.path}\uFF08\u53EA\u751F\u6210 projects/<name>.yaml\uFF0C\u4E1A\u52A1\u5DE5\u7A0B\u96F6\u6539\u52A8\uFF09`,
-        style: {
-          flex: "0 0 auto",
-          padding: "0 6px",
-          fontSize: "11px",
-          borderRadius: "4px",
-          border: "1px solid var(--elab-border)",
-          background: "transparent",
-          color: "var(--elab-accent)",
-          cursor: disabled ? "default" : "pointer"
-        }
-      },
-      "\u4E00\u952E\u9002\u914D"
-    )))
-  );
+  return null;
 }
 function CockpitPane(props) {
   const { sessionId, visible = true } = props;
@@ -5273,6 +5871,10 @@ var DSW_MAP_CSS = `.elab-root {
   --elab-bg-canvas: var(--dsw-alias-bg-base);
   --elab-bg-surface: var(--dsw-alias-bg-layer-1);
   --elab-bg-raised: var(--dsw-alias-bg-layer-2);
+  /* \u4EE3\u7801/\u53C2\u6570\u5757\u5E95\uFF08\u7B49\u5BBD\u5185\u5BB9\u4E13\u7528\u9762\uFF09\uFF1A\u5BBF\u4E3B\u6CA1\u6709\u72EC\u7ACB\u7684 code \u9762\uFF0C\u53D6"\u66F4\u62AC\u8D77\u7684\u4E00\u5C42"\u3002
+     \u7F3A\u8FD9\u4E2A\u6620\u5C04\u65F6 var(--elab-bg-code) \u5C31\u662F**\u672A\u5B9A\u4E49\u53D8\u91CF** \u2192 \u6574\u6761\u58F0\u660E\u5931\u6548 \u2192
+     \u7EC4\u4EF6 chips \u53D8\u6210\u900F\u660E\u5E95\uFF08\u5B9E\u6D4B\uFF1A\u4E0E\u72EC\u7ACB WebUI \u4E0D\u4E00\u81F4\uFF09\u3002 */
+  --elab-bg-code: var(--dsw-alias-bg-layer-2);
   --elab-bg-overlay: var(--dsw-alias-bg-overlay);
   /* \u7EBF */
   --elab-border: var(--dsw-alias-border-l1);

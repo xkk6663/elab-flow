@@ -53,7 +53,11 @@ void MX_USART1_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART1_Init 2 */
-
+  /* ★ 开 RXNE + IDLE 中断 —— HAL_UART_Init 不会自动开，
+     但 USART1_IRQn 已在 MspInit 里 Enable，开了 IT 才能让 USER CODE 0 的
+     RXNE 分支真的触发；同时开 IDLE 用于帧边界检测（可选但便宜） */
+  __HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+  __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
   /* USER CODE END USART1_Init 2 */
 
 }

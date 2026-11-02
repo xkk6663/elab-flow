@@ -1,7 +1,8 @@
 [
-  "assets/15-serial-wave.png",
-  "assets/06-loop-all-green.png",
-  "assets/14-serial-lines.png",
-  "assets/11-build.png",
-  "assets/13-debug-sine.png"
+  "assets/dsh-serial-lines.png",
+  "assets/dsh-serial-wave.png",
+  "assets/dsh-serial-widget-params.png",
+  "assets/dsh-serial-widget-run.png",
+  "assets/dsh-serial-widget-paused.png",
+  "assets/dsh-serial-widget-stopped.png"
 ]

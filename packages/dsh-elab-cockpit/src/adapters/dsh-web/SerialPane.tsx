@@ -15,7 +15,7 @@ import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { SerialPort } from '../../app/ports.ts'
-import type { SerialChunk } from '../../domain/icd.ts'
+import type { SerialChunk, SerialWidget, SerialWidgetsDoc, SerialWidgetRunResult } from '../../domain/icd.ts'
 import {
   b64ToBytes,
   bytesToB64,
@@ -108,7 +108,39 @@ function saveHistory(items: string[]): void {
   }
 }
 
-/** HEX 分类色：控制字节 / DEL / 可打印 / 高位，全部引用主题令牌（不写字面色值）。 */
+/** 参数控件里都是字符串；提交前按组件声明的类型转成 JSON 值（服务端还会再校验一次）。 */
+function coerceWidgetParams(w: SerialWidget, raw: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const p of w.params) {
+    const v = raw[p.name] ?? ''
+    if (p.type === 'int') {
+      const n = Number.parseInt(v, 10)
+      out[p.name] = Number.isNaN(n) ? v : n
+    } else if (p.type === 'float') {
+      const n = Number(v)
+      out[p.name] = Number.isNaN(n) ? v : n
+    } else if (p.type === 'bool') {
+      out[p.name] = v === 'true' || v === '1'
+    } else {
+      out[p.name] = v
+    }
+  }
+  return out
+}
+
+/** 预览字节 → HEX（服务端返回的 preview_b64 是唯一的发送字节；与宽栏同一展示口径）。 */
+function widgetHex(b64: string | undefined): string {
+  if (b64 === undefined || b64 === '') return ''
+  try {
+    return Array.from(b64ToBytes(b64))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join(' ')
+      .toUpperCase()
+  } catch {
+    return ''
+  }
+}
+
 const BYTE_COLORS: Record<HexRow['cells'][number]['cls'], string> = {
   ctl: 'var(--elab-ansi-bright-yellow)',
   del: 'var(--elab-ansi-bright-red)',
@@ -268,6 +300,105 @@ const metaStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+/** 组件参数输入（窄栏里尽量小；宽度按类型由 width 决定） */
+const widgetInputStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  height: '20px',
+  padding: '0 4px',
+  fontFamily: 'var(--elab-font-mono)',
+  fontSize: 'var(--elab-fs-xs)',
+  color: 'var(--elab-fg-primary)',
+  background: 'var(--elab-bg-surface)',
+  border: '1px solid var(--elab-border)',
+  borderRadius: 'var(--elab-radius-sm)',
+  width: '6.5em',
+}
+
+const widgetBarStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '4px',
+  padding: '4px 12px',
+  borderTop: '1px solid var(--elab-border)',
+  background: 'var(--elab-bg-surface)',
+  flexWrap: 'wrap',
+  minWidth: 0,
+}
+
+const widgetTitleStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  fontSize: 'var(--elab-fs-xs)',
+  color: 'var(--elab-fg-faint)',
+  letterSpacing: '0.04em',
+  marginRight: '2px',
+}
+
+const widgetChipStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  padding: '2px 8px',
+  fontFamily: 'var(--elab-font-mono)',
+  fontSize: 'var(--elab-fs-xs)',
+  lineHeight: 1.4,
+  background: 'var(--elab-bg-code)',
+  color: 'var(--elab-fg-secondary)',
+  border: '1px solid var(--elab-border)',
+  borderRadius: 'var(--elab-radius-sm)',
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+}
+
+/**
+ * 选中态：**描边 + 浅底 + 加粗**，不用「品牌填充 + 反白字」。
+ * §15.6b 的教训在本宿主主题上重演：`--elab-accent` 映射的 brand-primary 在这里
+ * 是近白，白底白字 = 选中项直接消失；而 accent 本身又和正文色同值，
+ * 只靠文字色也分不出来。故强调走「可读的三重信号」：实心 accent 描边 + 浅色
+ * 悬停底 + 加粗字形 —— 任意主题下都能看出选中了哪个。
+ */
+const widgetChipOnStyle: React.CSSProperties = {
+  ...widgetChipStyle,
+  background: 'var(--elab-btn-primary-bg)',
+  color: 'var(--elab-fg-primary)',
+  borderColor: 'var(--elab-accent)',
+  fontWeight: 600,
+}
+
+const widgetErrStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  fontSize: 'var(--elab-fs-xs)',
+  color: 'var(--elab-status-fail)',
+  cursor: 'help',
+}
+
+const widgetPanelStyle: React.CSSProperties = {
+  flex: '0 0 auto',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  flexWrap: 'wrap',
+  padding: '5px 12px',
+  borderTop: '1px dashed var(--elab-border)',
+  background: 'color-mix(in srgb, var(--elab-btn-primary-bg) 35%, transparent)',
+  minWidth: 0,
+}
+
+const widgetPreviewStyle: React.CSSProperties = {
+  flex: '0 1 auto',
+  minWidth: 0,
+  fontFamily: 'var(--elab-font-mono)',
+  fontSize: 'var(--elab-fs-xs)',
+  color: 'var(--elab-fg-faint)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+}
+
+const widgetLabelStyle: React.CSSProperties = {
+  fontSize: 'var(--elab-fs-xs)',
+  color: 'var(--elab-fg-dimmed)',
+  whiteSpace: 'nowrap',
+}
+
 /** 波形页的共享解码标记（「共享解码」+「agent 选定」） */
 const waveBadge: React.CSSProperties = {
   padding: '1px 6px',
@@ -394,6 +525,15 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [replay, setReplay] = useState<ReplayData | null>(null)
   const [replayErr, setReplayErr] = useState<string | null>(null)
   const replayRef = useRef<HTMLInputElement | null>(null)
+  // 发送组件（M2）：下拉 + 类型化参数 + 服务端预览 + 异步任务（轮询/暂停/停止）
+  const [widgetDoc, setWidgetDoc] = useState<SerialWidgetsDoc | null>(null)
+  const [widgetId, setWidgetId] = useState('')
+  const [widgetParams, setWidgetParams] = useState<Record<string, string>>({})
+  const [widgetPreview, setWidgetPreview] = useState('')
+  const [widgetErr, setWidgetErr] = useState<string | null>(null)
+  const [widgetBusy, setWidgetBusy] = useState(false)
+  const [widgetJob, setWidgetJob] = useState<SerialWidgetRunResult | null>(null)
+  const [widgetJobId, setWidgetJobId] = useState('')
   // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
 
@@ -555,18 +695,91 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     }
   }, [view, sharedActive, filtered, decoder, props.sessionId, api, replayMode])
 
+  // ── 波形多面板 + 通道绑定 ──────────────────────────────────────
+  interface WaveViewport {
+    id: string
+    name: string
+    channels: number[]
+    /** 每个面板独立持有的视图（切 tab 不串味） */
+    scaleX: number
+    offsetX: number
+  }
+  const [waveViewports, setWaveViewports] = useState<WaveViewport[]>([])
+  const [activeViewport, setActiveViewport] = useState<string>('')
+  const [viewportFollow, setViewportFollow] = useState<Record<string, boolean>>({})
+
+  // 当解码出帧时，初始化默认 viewport
+  // ★ 只在"解码通道总数变大"时重建（理由同 cockpit/web：通道数在 1↔2 抖动会冲掉用户面板）
+  const lastTotalChDsh = useRef(0)
+  useEffect(() => {
+    const totalCh = shownChannels
+    if (totalCh === 0) return
+    const needInit = waveViewports.length === 0
+    const grew = totalCh > lastTotalChDsh.current
+    lastTotalChDsh.current = Math.max(lastTotalChDsh.current, totalCh)
+    if (!needInit && !grew) return
+    const allVp: WaveViewport = { id: 'all', name: '全部', channels: Array.from({ length: totalCh }, (_, i) => i), scaleX: 1, offsetX: 0 }
+    setWaveViewports([allVp])
+    setActiveViewport('all')
+    setViewportFollow({ all: follow })
+  }, [shownChannels])
+
+  // 顶层「跟随」开关：一次性把当前所有面板的 follow 对齐到开关状态。
+  // ★ 不做成 effect：新增面板/通道增长时不该把用户**手动暂停**的面板拉回跟随。
+  const setFollowAll = (v: boolean) => {
+    setFollow(v)
+    setViewportFollow((prev) => {
+      const next = { ...prev }
+      for (const vp of waveViewports) next[vp.id] = v
+      return next
+    })
+  }
+
+  const addWaveViewport = () => {
+    const totalCh = shownChannels
+    if (totalCh === 0) return
+    const id = `vp_${Date.now().toString(36)}`
+    setWaveViewports((vps) => [
+      ...vps,
+      { id, name: `面板 ${vps.length + 1}`, channels: Array.from({ length: totalCh }, (_, i) => i), scaleX: 1, offsetX: 0 },
+    ])
+    setViewportFollow((f) => ({ ...f, [id]: follow }))
+    setActiveViewport(id)
+  }
+  const removeWaveViewport = (id: string) => {
+    setWaveViewports((vps) => {
+      const rest = vps.filter((v) => v.id !== id)
+      if (rest.length === 0) return vps
+      if (activeViewport === id) setActiveViewport(rest[rest.length - 1].id)
+      return rest
+    })
+    setViewportFollow((f) => { const { [id]: _gone, ...rest } = f; return rest })
+  }
+  const setViewportChannels = (id: string, channels: number[]) => {
+    setWaveViewports((vps) => vps.map((v) => (v.id === id ? { ...v, channels } : v)))
+  }
+  const setViewportView = (id: string, scaleX: number, offsetX: number) => {
+    setWaveViewports((vps) => {
+      const vp = vps.find((v) => v.id === id)
+      if (!vp || (vp.scaleX === scaleX && vp.offsetX === offsetX)) return vps
+      return vps.map((v) => (v.id === id ? { ...v, scaleX, offsetX } : v))
+    })
+  }
+
   // ── 跟随滚动 ────────────────────────────────────────────────
+  // ★ 依赖必须是**数组引用**而不是 `.length`：行缓冲封顶 2000 行后，追加一条就挤掉
+  //   一条，长度恒为 2000 —— 用 length 当依赖就等于"有新数据却不再跟随"（实测：
+  //   高流量跑久了「行」不再滚到底，点「恢复跟随」也没反应）。
+  //   同时 follow 本身进依赖：从「已暂停」切回跟随时要立刻贴底，不能等下一批。
+  //   跟随开关与独立 WebUI 同口径：只由「跟随/恢复」按钮控制，不用 scroll 事件反推
+  //   —— 环形缓冲挤出时浏览器 scroll anchoring 会改 scrollTop，反推会把跟随误关掉。
+  //   ★ 波形视图**不参与**文本跟随：波形有自己面板级的跟随（viewports）；而窄栏在
+  //   组件行出现后内容会溢出，贴底滚动会把「全部 / ＋新建面板 / 通道绑定 CH」那一行
+  //   滚出可视区（实测：切到波形后通道绑定整行消失）。
   useEffect(() => {
     const el = scrollRef.current
-    if (el !== null && followRef.current) el.scrollTop = el.scrollHeight
-  }, [view, monitorLines.length, runLines.length, byteBlocks.length, shownTerm.length, shownFrames.length, props.runLinesVersion])
-
-  const onScroll = (): void => {
-    const el = scrollRef.current
-    if (el === null) return
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24
-    if (atBottom !== follow) setFollow(atBottom)
-  }
+    if (el !== null && view !== 'wave' && followRef.current) el.scrollTop = el.scrollHeight
+  }, [follow, view, monitorLines, runLines, byteBlocks, shownTerm, shownFrames, props.runLinesVersion])
 
   // ── 操作 ────────────────────────────────────────────────────
   const doCapture = useCallback(async (): Promise<void> => {
@@ -718,6 +931,190 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     },
     [running, writable, sendFormat, eol, stream],
   )
+
+  // ── 发送组件（M1/M2）────────────────────────────────────────────
+  const widgets = useMemo<SerialWidget[]>(() => widgetDoc?.widgets ?? [], [widgetDoc])
+  const activeWidget = useMemo(
+    () => widgets.find((w) => w.id === widgetId) ?? null,
+    [widgets, widgetId],
+  )
+  const jobActive = widgetJob !== null
+    && (widgetJob.state === 'running' || widgetJob.state === 'paused' || widgetJob.state === 'cancelling')
+  const widgetProgress = (() => {
+    if (widgetJob === null) return ''
+    const rounds = widgetJob.rounds ?? 0
+    const skipped = widgetJob.skipped ?? 0
+    const bytes = widgetJob.total_bytes ?? 0
+    const st = widgetJob.state ?? ''
+    if (jobActive) {
+      const skip = skipped > 0 ? ` · 跳过 ${skipped} 拍` : ''
+      const label = st === 'paused' ? '已暂停' : st === 'cancelling' ? '停止中…' : '运行中'
+      return `${label} · 第 ${rounds} 轮${skip} · ${bytes} B`
+    }
+    if (st === 'done') return `完成 · ${rounds} 轮 · ${bytes} B${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ''}`
+    if (st === 'cancelled') return `已停止 · ${bytes} B`
+    if (st === 'failed') return `失败${widgetJob.error ? ` · ${widgetJob.error}` : ''}`
+    return ''
+  })()
+
+  /** 读取工程组件（坏文件/坏组件不阻塞：error/warnings 原样展示）。 */
+  useEffect(() => {
+    if (project === '') {
+      setWidgetDoc(null)
+      setWidgetId('')
+      return
+    }
+    let alive = true
+    void api.serialWidgets(project).then((d) => {
+      if (!alive) return
+      setWidgetDoc(d)
+      setWidgetErr(d.error)
+      // 与独立 WebUI 同口径：默认**不选中**任何组件（用户点 chip 才展开参数面板），
+      // 只在组件消失时清掉已失效的选中项。
+      setWidgetId((cur) => (d.widgets.some((w) => w.id === cur) ? cur : ''))
+    }).catch((e: unknown) => {
+      if (alive) setWidgetErr(e instanceof Error ? e.message : String(e))
+    })
+    return () => { alive = false }
+  }, [api, project])
+
+  /** 切组件时把参数重置为默认值（类型化控件显示的都是字符串，提交前再转换）。 */
+  useEffect(() => {
+    if (activeWidget === null) {
+      setWidgetParams({})
+      return
+    }
+    const next: Record<string, string> = {}
+    for (const p of activeWidget.params) {
+      next[p.name] = p.type === 'bool'
+        ? (p.default === true ? 'true' : 'false')
+        : String(p.default ?? '')
+    }
+    setWidgetParams(next)
+  }, [activeWidget?.id])
+
+  /** 预览字节由服务端渲染（与真正发送共用同一条路径；这里只展示）。 */
+  useEffect(() => {
+    if (activeWidget === null || project === '') {
+      setWidgetPreview('')
+      return
+    }
+    let alive = true
+    const timer = window.setTimeout(() => {
+      void api.serialWidgetRun({
+        project,
+        id: activeWidget.id,
+        params: coerceWidgetParams(activeWidget, widgetParams),
+        dryRun: true,
+      }).then((r) => {
+        if (!alive) return
+        if (!r.ok) {
+          setWidgetPreview('')
+          setWidgetErr(r.error ?? '预览失败')
+          return
+        }
+        setWidgetErr(null)
+        setWidgetPreview(`预览 ${r.bytes ?? 0} B · ${widgetHex(r.preview_b64)}`)
+      }).catch((e: unknown) => {
+        if (alive) setWidgetErr(e instanceof Error ? e.message : String(e))
+      })
+    }, 150)
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [api, project, activeWidget, widgetParams])
+
+  /** 刷新/换工程后找回仍在跑的任务（run 只等 2s，长任务只能靠轮询）。 */
+  useEffect(() => {
+    if (project === '') return
+    let alive = true
+    void api.serialWidgetJob().then((j) => {
+      if (!alive) return
+      const active = j.state === 'running' || j.state === 'paused' || j.state === 'cancelling'
+      if (!active || j.job_id === undefined || j.job_id === '') return
+      setWidgetJob(j)
+      setWidgetJobId(j.job_id)
+      setWidgetBusy(true)
+    }).catch(() => {
+      // 404 = 没有在跑的任务，是常态；不打扰用户
+    })
+    return () => { alive = false }
+  }, [api, project])
+
+  /** 任务轮询：run 返回 running 后 400ms 一次，直到终态（不新增 SSE）。 */
+  useEffect(() => {
+    if (widgetJobId === '') return
+    let alive = true
+    let timer = 0
+    const isActive = (s?: string): boolean =>
+      s === 'running' || s === 'paused' || s === 'cancelling'
+    const tick = async (): Promise<void> => {
+      try {
+        const j = await api.serialWidgetJob(widgetJobId)
+        if (!alive) return
+        setWidgetJob(j)
+        if (isActive(j.state)) {
+          timer = window.setTimeout(() => void tick(), 400)
+        } else {
+          setWidgetBusy(false)
+          if (!j.ok) setWidgetErr(j.error ?? '执行失败')
+        }
+      } catch (e) {
+        if (!alive) return
+        setWidgetBusy(false)
+        setWidgetErr(e instanceof Error ? e.message : String(e))
+      }
+    }
+    void tick()
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [api, widgetJobId])
+
+  const doWidgetRun = useCallback(async (repeat: boolean): Promise<void> => {
+    if (activeWidget === null || running || !writable || widgetBusy || jobActive) return
+    if (activeWidget.confirm && !window.confirm(`组件「${activeWidget.label}」需要确认后执行，继续？`)) return
+    setWidgetErr(null)
+    setWidgetBusy(true)
+    try {
+      const r = await api.serialWidgetRun({
+        project,
+        id: activeWidget.id,
+        params: coerceWidgetParams(activeWidget, widgetParams),
+        repeat,
+        confirm: activeWidget.confirm,
+      })
+      setWidgetJob(r)
+      if (r.job_id !== undefined && r.job_id !== '') setWidgetJobId(r.job_id)
+      const stillActive = r.state === 'running' || r.state === 'paused' || r.state === 'cancelling'
+      if (!stillActive) {
+        setWidgetBusy(false)
+        if (!r.ok) setWidgetErr(r.error ?? '执行失败')
+      }
+    } catch (e) {
+      setWidgetBusy(false)
+      setWidgetErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [activeWidget, running, writable, widgetBusy, jobActive, api, project, widgetParams])
+
+  const doWidgetCancel = useCallback(async (): Promise<void> => {
+    const id = widgetJob?.job_id ?? widgetJobId
+    if (id === '') return
+    try {
+      await api.serialWidgetCancel(id)
+      setWidgetJob(await api.serialWidgetJob(id))
+    } catch (e) {
+      setWidgetErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [api, widgetJob, widgetJobId])
+
+  const doWidgetPause = useCallback(async (): Promise<void> => {
+    const id = widgetJob?.job_id ?? widgetJobId
+    if (id === '') return
+    const paused = widgetJob?.state !== 'paused'
+    try {
+      await api.serialWidgetPause(id, paused)
+      setWidgetJob(await api.serialWidgetJob(id))
+    } catch (e) {
+      setWidgetErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [api, widgetJob, widgetJobId])
 
   /** 选一个录制 JSONL 在本地回放（纯前端只读，不打开串口）。 */
   const doReplay = useCallback(async (e: any): Promise<void> => {
@@ -983,7 +1380,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         <span style={{ flex: '1 1 auto' }} />
         <button
           type="button"
-          onClick={() => setFollow((v) => !v)}
+          onClick={() => setFollowAll(!follow)}
           title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
           style={{
             ...chip,
@@ -1044,7 +1441,6 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       {/* ── 内容区 ── */}
       <div
         ref={scrollRef}
-        onScroll={onScroll}
         style={{
           flex: '1 1 auto',
           minHeight: 0,
@@ -1229,7 +1625,94 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                 ) : null}
               </div>
             ) : null}
-            {shownFrames.length > 0 ? <WaveChart frames={shownFrames} channels={shownChannels} /> : null}
+            {/* ── 多面板 viewport tab 条 ── */}
+            {shownFrames.length > 0 && waveViewports.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                  {waveViewports.map((vp) => (
+                    <div key={vp.id} style={{ display: 'inline-flex', alignItems: 'center', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', overflow: 'hidden' }}>
+                      <button type="button"
+                        onClick={() => setActiveViewport(vp.id)}
+                        style={{
+                          padding: '3px 8px', fontSize: 'var(--elab-fs-xs)',
+                          /* 选中态用「浅色强调底 + 恒可读文字」：宿主 brand-primary 是近白，
+                             拿它当填充会把白字吃掉（实测波形页签变成一块白板）。 */
+                          background: activeViewport === vp.id ? 'var(--elab-btn-primary-bg)' : 'var(--elab-bg-surface)',
+                          color: activeViewport === vp.id ? 'var(--elab-fg-primary)' : 'var(--elab-fg-secondary)',
+                          fontWeight: activeViewport === vp.id ? 600 : 400,
+                          border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                        }}
+                        title={`切换到 ${vp.name}`}
+                      >{vp.name}</button>
+                      {waveViewports.length > 1 ? (
+                        <button type="button"
+                          onClick={() => removeWaveViewport(vp.id)}
+                          style={{ padding: '3px 6px', fontSize: 12, background: 'transparent', color: 'var(--elab-fg-dimmed)', border: 'none', borderLeft: '1px solid var(--elab-border)', cursor: 'pointer', lineHeight: 1 }}
+                          title="删除此面板（至少保留一个）"
+                        >×</button>
+                      ) : null}
+                    </div>
+                  ))}
+                  <button type="button" onClick={addWaveViewport}
+                    style={{ padding: '3px 8px', fontSize: 'var(--elab-fs-xs)', background: 'transparent', color: 'var(--elab-accent)', border: '1px dashed var(--elab-accent)', borderRadius: 'var(--elab-radius-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                    title="新建波形面板：独立缩放/平移，可绑定不同通道"
+                  >+ 新建面板</button>
+                </div>
+
+                {/* 通道绑定 chip */}
+                {(() => {
+                  const vp = waveViewports.find((v) => v.id === activeViewport)
+                  if (!vp) return null
+                  const totalCh = shownChannels
+                  if (totalCh === 0) return null
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap', fontSize: 'var(--elab-fs-xs)' }}>
+                      <span style={{ color: 'var(--elab-fg-faint)' }}>通道绑定：</span>
+                      {Array.from({ length: totalCh }, (_, i) => {
+                        const on = vp.channels.includes(i)
+                        return (
+                          <button key={i} type="button"
+                            onClick={() => {
+                              const newCh = on ? vp.channels.filter((x) => x !== i) : [...vp.channels, i].sort((a, b) => a - b)
+                              if (newCh.length > 0) setViewportChannels(vp.id, newCh)
+                            }}
+                            style={{
+                              padding: '2px 6px', fontSize: 'var(--elab-fs-xs)',
+                              background: on ? 'var(--elab-btn-primary-bg)' : 'var(--elab-bg-surface)',
+                              color: on ? 'var(--elab-fg-primary)' : 'var(--elab-fg-dimmed)',
+                              fontWeight: on ? 600 : 400,
+                              border: `1px solid ${on ? 'var(--elab-accent)' : 'var(--elab-border)'}`,
+                              borderRadius: 'var(--elab-radius-sm)', cursor: 'pointer', fontFamily: 'inherit',
+                            }}
+                            title={`${on ? '取消' : '绑定'} CH${i}`}
+                          >CH{i}</button>
+                        )
+                      })}
+                    </div>
+                  )
+                })()}
+              </div>
+            ) : null}
+
+            {/* ── 当前激活面板的 WaveChart ── */}
+            {shownFrames.length > 0 && waveViewports.length > 0 ? (
+              (() => {
+                const vp = waveViewports.find((v) => v.id === activeViewport)
+                if (!vp) return null
+                const f = viewportFollow[vp.id] ?? follow
+                return (
+                  <WaveChart
+                    frames={shownFrames}
+                    channels={vp.channels}
+                    scaleX={vp.scaleX}
+                    offsetX={vp.offsetX}
+                    onView={(sx, ox) => setViewportView(vp.id, sx, ox)}
+                    follow={f}
+                    onFollowChange={(v) => setViewportFollow((prev) => ({ ...prev, [vp.id]: v }))}
+                  />
+                )
+              })()
+            ) : null}
             {sharedActive && sharedState !== null ? (
               <div style={{ marginTop: '8px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)' }}>
                 {`${shownFrames.length} 帧（显示）· 共 ${sharedState.total_frames} 帧 · ${sharedState.channels} 通道` +
@@ -1247,6 +1730,121 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           </div>
         ) : null}
       </div>
+
+      {/* ── 发送组件（M1/M2）：chips + 类型化参数 + 服务端预览 + 执行/周期/暂停/停止 ── */}
+      {widgetDoc !== null && project !== ''
+        && (widgets.length > 0 || widgetDoc.warnings.length > 0 || widgetDoc.error !== null) ? (
+        <div style={widgetBarStyle}>
+          <span style={widgetTitleStyle}>{'组件'}</span>
+          {widgets.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              title={`${w.label} · ${w.steps.length} 步${w.group ? ` · ${w.group}` : ''}`}
+              onClick={() => setWidgetId(widgetId === w.id ? '' : w.id)}
+              style={widgetId === w.id ? widgetChipOnStyle : widgetChipStyle}
+            >
+              {w.label}
+            </button>
+          ))}
+          {widgetDoc.error !== null ? (
+            <span style={widgetErrStyle}>{`✗ ${widgetDoc.error}`}</span>
+          ) : null}
+          {widgetDoc.warnings.length > 0 ? (
+            <span style={widgetErrStyle} title={widgetDoc.warnings.join('\n')}>
+              {`⚠ ${widgetDoc.warnings.length} 处配置问题`}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {activeWidget !== null ? (
+        <div style={widgetPanelStyle}>
+          {activeWidget.params.length === 0 ? (
+            <span style={widgetLabelStyle}>{'无参数'}</span>
+          ) : (
+            activeWidget.params.map((p) => (
+              <label key={p.name} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }} title={p.name}>
+                <span style={widgetLabelStyle}>{p.label ?? p.name}</span>
+                {p.type === 'bool' ? (
+                  <input
+                    type="checkbox"
+                    checked={widgetParams[p.name] === 'true'}
+                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.checked ? 'true' : 'false' }))}
+                    style={{ width: '14px', height: '14px', cursor: 'pointer' }}
+                  />
+                ) : p.type === 'enum' ? (
+                  <select
+                    value={widgetParams[p.name] ?? ''}
+                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value }))}
+                    style={selectStyle}
+                  >
+                    {(p.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={p.type === 'int' || p.type === 'float' ? 'number' : 'text'}
+                    value={widgetParams[p.name] ?? ''}
+                    min={p.min}
+                    max={p.max}
+                    step={p.step ?? (p.type === 'float' ? 'any' : undefined)}
+                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value }))}
+                    style={{ ...widgetInputStyle, width: p.type === 'string' ? '7em' : '5.5em' }}
+                  />
+                )}
+              </label>
+            ))
+          )}
+          <span style={widgetPreviewStyle} title={widgetErr ?? widgetPreview}>
+            {widgetErr !== null ? `✗ ${widgetErr}` : widgetPreview !== '' ? widgetPreview : '预览中…'}
+          </span>
+          {widgetProgress !== '' ? (
+            <span style={widgetPreviewStyle} title={widgetProgress}>{widgetProgress}</span>
+          ) : null}
+          <span style={{ flex: '1 1 auto' }} />
+          {activeWidget.repeat ? (
+            <button
+              type="button"
+              disabled={running || !writable || widgetBusy || jobActive}
+              onClick={() => void doWidgetRun(true)}
+              title={`周期发送：每 ${activeWidget.repeat.interval_ms} ms 一轮，${
+                activeWidget.repeat.count > 0 ? `共 ${activeWidget.repeat.count} 轮` : '直到手动停止'
+              }；上一轮超时只记跳过、不补发`}
+              style={{
+                ...chip,
+                opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
+                cursor: running || !writable || widgetBusy || jobActive ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {'↻ 周期'}
+            </button>
+          ) : null}
+          {jobActive ? (
+            <>
+              <button type="button" onClick={() => void doWidgetPause()} style={chip} title="暂停/恢复（节拍照常走，停掉的记跳过）">
+                {widgetJob?.state === 'paused' ? '▶ 继续任务' : '❚❚ 暂停任务'}
+              </button>
+              <button type="button" onClick={() => void doWidgetCancel()} style={chip} title="停止（1s 内退出，不再发后续步骤）">
+                {'■ 停止任务'}
+              </button>
+            </>
+          ) : null}
+          <button
+            type="button"
+            disabled={running || !writable || widgetBusy || jobActive}
+            onClick={() => void doWidgetRun(false)}
+            title={activeWidget.confirm ? '该组件需要确认后执行' : '执行组件（send/delay/wait 序列）'}
+            style={{
+              ...chip,
+              fontWeight: 600,
+              opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
+              cursor: running || !writable || widgetBusy || jobActive ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {'▶ 发送'}
+          </button>
+        </div>
+      ) : null}
 
       {/* ── 发送面板：与监视会话同一个口（写穿，不重开）── */}
       <form
@@ -1396,17 +1994,78 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   )
 }
 
-/** Canvas 多通道折线：每通道独立归一化（同一屏里量纲不同也能看清形状）。 */
-function WaveChart(props: { frames: number[][]; channels: number }): ReactNode {
-  const { frames, channels } = props
-  const hostRef = useRef<HTMLCanvasElement | null>(null)
+/** WaveChart V2 —— 多通道折线 + 缩放 + 平移 + 时间轴 + 跟随
+ *  inline 样式（宿主无 CSS 模块构建）。channels 可以是 number[] 或 number。 */
+const WAVE_TOKENS = [
+  'bright-blue', 'bright-green', 'bright-red', 'bright-yellow',
+  'bright-magenta', 'bright-cyan', 'blue', 'green',
+] as const
 
+function resolvedChannelsDsh(ch: number[] | number, frameChannels: number): number[] {
+  if (typeof ch === 'number') return Array.from({ length: Math.min(ch, frameChannels) }, (_, i) => i)
+  return ch.filter((i) => i >= 0 && i < frameChannels)
+}
+
+function WaveChart(props: {
+  frames: number[][]
+  channels: number[] | number
+  /** X 轴缩放（1 = 全部可见；>1 = 放大） */
+  scaleX: number
+  /** 最左边可见帧 index（0-based） */
+  offsetX: number
+  /** 缩放/平移变化回写父组件（按 viewport 保存） */
+  onView: (scaleX: number, offsetX: number) => void
+  follow: boolean
+  onFollowChange: (v: boolean) => void
+}): ReactNode {
+  const { frames, channels, scaleX, offsetX, onView, follow, onFollowChange } = props
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragRef = useRef<{ startClientX: number; startOffset: number } | null>(null)
+  const dragActive = useRef(false)
+
+  // ── 取消跟随 = 定格画面 ──────────────────────────────────────
+  // 波形是"最近 N 字节"的滚动解码窗口：只钉住 offsetX 没用 —— 窗口本身
+  // 在滑，同一个 index 已经对应到新数据，曲线看起来就一直在走。
+  // 所以 follow=false 时留下**这一刻的帧快照**，恢复跟随才换回实时帧。
+  const [frozen, setFrozen] = useState<number[][] | null>(null)
   useEffect(() => {
-    const canvas = hostRef.current
-    if (canvas === null || frames.length === 0) return
+    if (frames.length === 0) { setFrozen(null); return }
+    if (follow) { setFrozen(null); return }
+    setFrozen((cur) => cur ?? frames)
+  }, [follow, frames])
+  const shown = follow ? frames : (frozen ?? frames)
+
+  const frameChannels = shown[0]?.length ?? 0
+  const shownCh = resolvedChannelsDsh(channels, frameChannels)
+
+  // follow → 跳尾
+  const lastFramesLen = useRef(0)
+  useEffect(() => {
+    if (shown.length === 0) { onView(scaleX, 0); return }
+    const prev = lastFramesLen.current
+    lastFramesLen.current = shown.length
+    if (follow) {
+      const canvas = canvasRef.current
+      const w = canvas?.clientWidth ?? 480
+      const visible = Math.max(20, Math.ceil(w / scaleX))
+      onView(scaleX, Math.max(0, shown.length - visible))
+    } else if (prev === 0) {
+      const canvas = canvasRef.current
+      const w = canvas?.clientWidth ?? 480
+      const visible = Math.max(20, Math.ceil(w / scaleX))
+      onView(scaleX, Math.min(offsetX, Math.max(0, shown.length - visible)))
+    }
+    // onView/offsetX 故意不进依赖：只在帧数或缩放/跟随变化时重算
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown.length, follow, scaleX])
+
+  // 绘制
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (canvas === null || shown.length === 0) return
     const dpr = window.devicePixelRatio || 1
     const w = canvas.clientWidth || 480
-    const h = canvas.clientHeight || 200
+    const h = canvas.clientHeight || 220
     canvas.width = Math.round(w * dpr)
     canvas.height = Math.round(h * dpr)
     const ctx = canvas.getContext('2d')
@@ -1415,82 +2074,134 @@ function WaveChart(props: { frames: number[][]; channels: number }): ReactNode {
     ctx.clearRect(0, 0, w, h)
 
     const css = getComputedStyle(canvas)
-    const cvar = (name: string): string => css.getPropertyValue(name).trim()
-    const border = cvar('--elab-border') || cvar('--elab-fg-dimmed')
-    const palette = [
-      '--elab-ansi-bright-blue',
-      '--elab-ansi-bright-green',
-      '--elab-ansi-bright-red',
-      '--elab-ansi-bright-yellow',
-      '--elab-ansi-bright-magenta',
-      '--elab-ansi-bright-cyan',
-      '--elab-ansi-blue',
-      '--elab-ansi-green',
-    ]
-    // 取不到令牌时退回前景色（不写字面色值：色源只有 dsw-map.ts）
-    const fallback = cvar('--elab-fg-primary')
-    const colors = palette.map((p) => cvar(p) || fallback)
+    const cvar = (n: string): string => css.getPropertyValue(n).trim()
+    const border = cvar('--elab-border') || 'transparent'
+    const axisLabel = cvar('--elab-fg-faint') || 'gray'
+    const palette: string[] = WAVE_TOKENS.map((tok) => cvar(`--elab-ansi-${tok}`) || axisLabel)
 
-    ctx.strokeStyle = border
-    ctx.lineWidth = 1
-    for (let i = 1; i < 4; i += 1) {
-      const y = (h * i) / 4
-      ctx.beginPath()
-      ctx.moveTo(0, y)
-      ctx.lineTo(w, y)
-      ctx.stroke()
+    // 顶部一行标签 / 底部一行帧号，绘图区夹在中间
+    const padL = 8, padR = 8, padT = 16, padB = 18
+    const plotW = w - padL - padR, plotH = h - padT - padB
+    if (plotW <= 4 || plotH <= 4) return
+    const plotTop = padT, plotBottom = padT + plotH
+
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    const startIdx = Math.max(0, Math.min(offsetX, shown.length - 1))
+    const endIdx = Math.min(shown.length, startIdx + visibleCount)
+    const slice = shown.slice(startIdx, endIdx)
+    if (slice.length === 0) return
+    const xOf = (i: number): number => padL + (slice.length <= 1 ? plotW / 2 : (i / (slice.length - 1)) * plotW)
+
+    ctx.strokeStyle = border; ctx.lineWidth = 1
+    for (let i = 1; i < 4; i++) {
+      const y = plotTop + (plotH * i) / 4
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke()
+    }
+    const stepSec = Math.max(10, Math.round(slice.length / 6))
+    ctx.fillStyle = axisLabel; ctx.font = '10px ui-monospace, Menlo, Consolas, monospace'; ctx.textBaseline = 'top'
+    for (let i = 0; i < slice.length; i += stepSec) {
+      const x = xOf(i)
+      if (x > w - padR) break
+      ctx.strokeStyle = border
+      ctx.beginPath(); ctx.moveTo(x, plotTop); ctx.lineTo(x, plotBottom); ctx.stroke()
+      ctx.textAlign = 'center'
+      // 首尾帧号夹在画布内，否则画布边缘会把文字裁掉
+      const label = `${startIdx + i}`
+      const half = ctx.measureText(label).width / 2
+      const lx = Math.min(w - padR - half, Math.max(padL + half, x))
+      ctx.fillText(label, lx, plotBottom + 3)
     }
 
-    const n = frames.length
-    for (let ch = 0; ch < channels; ch += 1) {
-      const values = frames.map((f) => (ch < f.length ? f[ch] : 0))
-      let lo = Infinity
-      let hi = -Infinity
-      for (const v of values) {
-        if (v < lo) lo = v
-        if (v > hi) hi = v
-      }
+    for (const ch of shownCh) {
+      const values = slice.map((f) => (ch < f.length ? f[ch] : NaN))
+      let lo = Infinity, hi = -Infinity
+      for (const v of values) { if (!Number.isFinite(v)) continue; if (v < lo) lo = v; if (v > hi) hi = v }
       if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue
-      if (hi === lo) {
-        hi = lo + 1
-        lo -= 1
-      }
-      ctx.strokeStyle = colors[ch % colors.length]
-      ctx.lineWidth = 1.4
+      if (hi === lo) { hi = lo + 1; lo -= 1 }
+      ctx.strokeStyle = palette[ch % palette.length]; ctx.lineWidth = 1.4
       ctx.beginPath()
-      for (let i = 0; i < n; i += 1) {
-        const x = n === 1 ? w / 2 : (i / (n - 1)) * w
-        const y = h - ((values[i] - lo) / (hi - lo)) * h
-        if (i === 0) ctx.moveTo(x, y)
-        else ctx.lineTo(x, y)
+      let started = false
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i])) { started = false; continue }
+        const x = xOf(i)
+        const y = plotBottom - ((values[i] - lo) / (hi - lo)) * plotH
+        if (!started) { ctx.moveTo(x, y); started = true } else ctx.lineTo(x, y)
       }
       ctx.stroke()
     }
-  }, [frames, channels])
+
+    ctx.fillStyle = axisLabel; ctx.textBaseline = 'top'
+    ctx.textAlign = 'left'; ctx.fillText(`帧 ${startIdx} → ${endIdx - 1}`, padL, 2)
+    ctx.textAlign = 'right'; ctx.fillText(`共 ${shown.length} 帧 · 窗口 ${endIdx - startIdx} · ×${scaleX.toFixed(1)}`, w - padR, 2)
+  }, [shown, scaleX, offsetX, shownCh])
+
+  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const xInCanvas = e.clientX - rect.left
+    const padL = 8
+    const plotW = rect.width - padL - 8
+    const frameAtCursor = Math.round(offsetX + Math.max(0, xInCanvas - padL) / scaleX)
+    const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2))
+    const visibleCount = Math.max(2, Math.round(plotW / newScale))
+    let newOffset = frameAtCursor - Math.round((xInCanvas - padL) / newScale)
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)))
+    onView(newScale, newOffset)
+    if (follow) onFollowChange(false)
+  }
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    dragRef.current = { startClientX: e.clientX, startOffset: offsetX }
+    dragActive.current = true; e.preventDefault()
+  }
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!dragActive.current || !dragRef.current) return
+    const canvas = canvasRef.current; if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const plotW = rect.width - 44 - 8
+    const dx = e.clientX - dragRef.current.startClientX
+    const offsetDelta = Math.round(-dx / scaleX)
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    let newOffset = dragRef.current.startOffset + offsetDelta
+    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)))
+    if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset)
+    if (follow) onFollowChange(false)
+  }
+  const endDrag = () => { dragActive.current = false; dragRef.current = null }
+
+  const canvasReady = shown.length > 0
+  const chip: React.CSSProperties = { padding: '2px 8px', fontSize: 12, lineHeight: 1, border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', background: 'var(--elab-bg-surface)', color: 'var(--elab-fg-secondary)', cursor: 'pointer', fontFamily: 'inherit' }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-      <canvas
-        ref={hostRef}
-        style={{ width: '100%', height: '220px', display: 'block', background: 'var(--elab-bg-surface)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)' }}
-      />
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)' }}>
-        {Array.from({ length: Math.max(0, channels) }, (_, i) => (
-          <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-            <span
-              style={{
-                width: '10px',
-                height: '10px',
-                borderRadius: '2px',
-                background: `var(--elab-ansi-${
-                  ['bright-blue', 'bright-green', 'bright-red', 'bright-yellow', 'bright-magenta', 'bright-cyan', 'blue', 'green'][i % 8]
-                })`,
-              }}
-            />
-            {`CH${i}`}
-          </span>
-        ))}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)', flex: '1 1 auto' }}>
+          {shownCh.map((ch) => (
+            <span key={ch} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` }} />
+              {`CH${ch}`}
+            </span>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: '4px' }}>
+          <button type="button" onClick={() => onView(Math.max(1, scaleX / 1.2), offsetX)} style={chip} disabled={!canvasReady} title="缩小（向后看更多帧）">−</button>
+          <button type="button" onClick={() => onView(Math.min(20, scaleX * 1.2), offsetX)} style={chip} disabled={!canvasReady} title="放大（看更精细的局部）">+</button>
+          <button type="button" onClick={() => onView(1, 0)} style={chip} disabled={!canvasReady} title="重置（全部可见、回到开头）">⤾</button>
+          <button type="button" onClick={() => onFollowChange(!follow)} style={{ ...chip, ...(follow ? { color: 'var(--elab-accent)', borderColor: 'var(--elab-accent)' } : {}) }} disabled={!canvasReady} title={follow ? '正在跟随最新帧，点击暂停（画面定格在当前窗口，数据仍继续接收）' : '画面已定格，点击恢复跟随最新帧'}>
+            {follow ? '❚❚ 暂停跟随' : '▶ 恢复跟随'}
+          </button>
+        </div>
       </div>
+      <canvas
+        ref={canvasRef}
+        style={{ width: '100%', height: '220px', display: 'block', background: 'var(--elab-bg-surface)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', cursor: canvasReady ? (dragActive.current ? 'grabbing' : 'grab') : 'default' }}
+        onWheel={onWheel}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={endDrag}
+        onMouseLeave={endDrag}
+      />
     </div>
   )
 }

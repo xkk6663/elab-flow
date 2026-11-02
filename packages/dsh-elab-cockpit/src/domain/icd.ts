@@ -332,6 +332,141 @@ export interface SerialWriteResult {
   via?: "monitor";
 }
 
+// ── 串口发送组件（send widgets, M1/M2）──────────────────────────
+/**
+ * 工程级发送组件：参数 + 步骤全在**服务端**校验/渲染，前端只展示与触发。
+ * ★ 预览字节与实际发送共用同一份服务端渲染结果 —— "看的是 A、发的是 B"不可能发生。
+ */
+export type SerialWidgetParamType = 'int' | 'float' | 'bool' | 'enum' | 'string' | 'hex'
+
+export interface SerialWidgetParam {
+  name: string
+  label: string
+  type: SerialWidgetParamType
+  default?: unknown
+  min?: number
+  max?: number
+  step?: number
+  decimals?: number
+  /** int 以十六进制呈现时的位数 */
+  render?: 'hex'
+  width?: number
+  true_value?: string
+  false_value?: string
+  options?: Array<{ label: string; value: string }>
+  max_len?: number
+  pattern?: string
+  endian?: 'be' | 'le'
+}
+
+export interface SerialWidgetStep {
+  /** 1-based 步号（预览时服务端给出） */
+  i?: number
+  kind: 'send' | 'delay' | 'wait'
+  text?: string
+  format?: string
+  eol?: string
+  bytes?: number
+  ms?: number
+  within_s?: number
+  match?: { kind: string; value: string }
+}
+
+export interface SerialWidgetRepeat {
+  interval_ms: number
+  /** 0 = 直到手动停止 */
+  count: number
+}
+
+export interface SerialWidget {
+  id: string
+  label: string
+  group: string
+  /** true = 执行前必须显式 confirm（agent 与人都一样） */
+  confirm: boolean
+  format: string
+  eol: string
+  params: SerialWidgetParam[]
+  steps: SerialWidgetStep[]
+  repeat: SerialWidgetRepeat | null
+}
+
+export interface SerialWidgetsDoc {
+  ok: boolean
+  project: string
+  /** 乐观锁版本：写请求必须带它 */
+  rev: number
+  widgets: SerialWidget[]
+  /** 坏组件/坏字段（仍然能读的其它组件不受影响） */
+  warnings: string[]
+  /** 文件级错误（null = 正常） */
+  error: string | null
+  path: string
+}
+
+export type SerialWidgetJobState =
+  | 'running'
+  | 'paused'
+  | 'cancelling'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+
+/** 任务里的一条步骤结果（周期任务按轮次重复出现，超出上限会丢最旧的）。 */
+export interface SerialWidgetJobStep {
+  i: number
+  kind: 'send' | 'delay' | 'wait'
+  ok: boolean
+  t_ms: number
+  round: number
+  text?: string | null
+  via?: string
+  bytes?: number
+  ms?: number
+  matched?: boolean
+  match?: { kind: string; value: string }
+  error?: string | null
+}
+
+/**
+ * 组件执行结果 / 任务快照。
+ *
+ * ★ 异步：周期任务与含 delay/wait 的序列在后台线程跑，HTTP 最多等 2s；
+ *   还在跑时返回 `state='running'` + `accepted`，面板按 300–500ms 轮询
+ *   `serialWidgetJob`直到终态。`ok:false + state='failed'` 仍是 200。
+ */
+export interface SerialWidgetRunResult {
+  ok: boolean
+  /** true = 已受理，任务仍在后台跑（看 job_id 轮询） */
+  accepted?: boolean
+  /** 组件 id */
+  id: string
+  job_id?: string
+  state?: SerialWidgetJobState
+  actor?: string
+  params?: Record<string, unknown>
+  rounds?: number
+  /** 固定节拍不重叠：上一轮超时错过的节拍数（只报告、不补发） */
+  skipped?: number
+  repeat?: SerialWidgetRepeat | null
+  steps?: SerialWidgetJobStep[]
+  steps_dropped?: number
+  total_bytes?: number
+  bytes?: number
+  preview_b64?: string
+  preview_steps?: SerialWidgetStep[]
+  port?: string
+  baud?: number
+  via?: string
+  stop_reason?: string | null
+  error: string | null
+  started_at?: number
+  finished_at?: number | null
+  /** dry_run 预览响应 */
+  dry_run?: boolean
+  deferred?: Array<{ i: number; kind: string }>
+}
+
 // ── 串口 console 留档（M3-b2）────────────────────────────────────
 /**
  * console 日志里的一条记录。

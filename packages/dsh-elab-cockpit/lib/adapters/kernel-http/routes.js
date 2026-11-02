@@ -47,12 +47,18 @@ const GET_ALLOW = new Set([
     'packs',
     // 包操作任务快照（POST /api/pkg/* 返回 202 后轮询它）
     'pkg/job',
+    // 工程级发送组件（M1/M2）：只读投影
+    'serial/widgets',
+    // 组件任务快照（run 返回 running 后 300–500ms 轮询；不带 id = 当前任务）
+    'serial/widget/job',
 ]);
 /** 允许转发的 POST 端点。 */
 const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
     'serial/capture', 'adapt',
     // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
-    'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate']);
+    'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate',
+    // 工程级发送组件（M1/M2）：保存/删除（rev 乐观锁）+ 执行/取消/暂停
+    'serial/widgets', 'serial/widget/run', 'serial/widget/cancel', 'serial/widget/pause']);
 function json(res, code, body) {
     const text = JSON.stringify(body);
     res.statusCode = code;
@@ -122,7 +128,9 @@ export function registerApiRoute(ctx, deps) {
                     // ★ actor 注入：AI 通过工具发起时，Host 半会带上 `__actor`
                     //   （工具层用内部头传，避免与用户 body 混淆）
                     const internal = req.headers['x-elab-actor'];
-                    if (rel === 'run') {
+                    if (rel === 'run' || rel === 'serial/widget/run') {
+                        // ★ 组件执行也要区分人/agent：人的按钮 = human，工具调用带内部头 = agent
+                        //   （面板据 actor 决定谁能停：人的停止/暂停永远优先）。
                         parsed.actor = internal === 'agent' ? 'agent' : 'human';
                         // ★ §6.2 规则 2 预判拦截：带 onhw 步骤的 run 与常驻串口监视互斥
                         //   （服务端只在监视 open/串口写侧查闭环，run 侧不查 —— 宿主提前拦）。

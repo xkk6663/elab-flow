@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "rev": 0,
+  "widgets": [
+    {
+      "id": "ping",
+      "label": "PING 回显",
+      "group": "echo",
+      "format": "utf8",
+      "eol": "crlf",
+      "params": [
+        {
+          "name": "n",
+          "label": "payload 数字",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 65535
+        }
+      ],
+      "steps": [
+        { "kind": "send", "text": "PING:{{n}}" }
+      ]
+    },
+    {
+      "id": "stats",
+      "label": "STATS 查询",
+      "group": "echo",
+      "format": "utf8",
+      "eol": "crlf",
+      "params": [],
+      "steps": [
+        { "kind": "send", "text": "STATS?" }
+      ]
+    },
+    {
+      "id": "echo_switch",
+      "label": "ECHO 开关",
+      "group": "echo",
+      "format": "utf8",
+      "eol": "crlf",
+      "params": [
+        {
+          "name": "en",
+          "label": "回显",
+          "type": "bool",
+          "default": true,
+          "true_value": "1",
+          "false_value": "0"
+        }
+      ],
+      "steps": [
+        { "kind": "send", "text": "ECHO_ENABLE {{en}}" }
+      ]
+    },
+    {
+      "id": "ping_ack",
+      "label": "PING 应答（序列）",
+      "group": "echo",
+      "format": "utf8",
+      "eol": "crlf",
+      "params": [
+        {
+          "name": "n",
+          "label": "payload 数字",
+          "type": "int",
+          "default": 42,
+          "min": 0,
+          "max": 65535
+        }
+      ],
+      "steps": [
+        { "kind": "send", "text": "PING:{{n}}" },
+        {
+          "kind": "wait",
+          "within_s": 1.5,
+          "match": { "kind": "regex", "pattern": "^PONG:" }
+        }
+      ]
+    },
+    {
+      "id": "ping_loop",
+      "label": "PING 周期（100ms）",
+      "group": "echo",
+      "format": "utf8",
+      "eol": "crlf",
+      "params": [
+        {
+          "name": "n",
+          "label": "payload 数字",
+          "type": "int",
+          "default": 7,
+          "min": 0,
+          "max": 65535
+        }
+      ],
+      "steps": [
+        { "kind": "send", "text": "PING:{{n}}" }
+      ],
+      "repeat": { "interval_ms": 100, "count": 0 }
+    },
+    {
+      "id": "hex_frame",
+      "label": "HEX 帧",
+      "group": "raw",
+      "format": "hex",
+      "eol": "none",
+      "params": [
+        {
+          "name": "data",
+          "label": "两字节",
+          "type": "hex",
+          "width": 2,
+          "endian": "be",
+          "default": "0AFF"
+        }
+      ],
+      "steps": [
+        { "kind": "send", "text": "{{data}}" }
+      ]
+    }
+  ]
+}

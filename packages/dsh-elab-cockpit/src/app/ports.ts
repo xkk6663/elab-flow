@@ -28,6 +28,9 @@ import type {
   SerialDecodedTail,
   SerialMonitorSnapshot,
   SerialMonitorTail,
+  SerialWidget,
+  SerialWidgetRunResult,
+  SerialWidgetsDoc,
   SerialWriteResult,
 } from '../domain/icd.ts'
 import type { RunArbiter } from '../domain/arbiter.ts'
@@ -178,6 +181,32 @@ export interface SerialPort {
     maxBytes?: number
     sessionId?: string
   }): Promise<Record<string, unknown>>
+  // ── 串口发送组件（M1/M2）──────────────────────────────────────
+  serialWidgets(project: string, sessionId?: string): Promise<SerialWidgetsDoc>
+  serialWidgetSave(opts: {
+    project: string
+    rev: number
+    widget: SerialWidget | Record<string, unknown>
+    sessionId?: string
+  }): Promise<SerialWidgetsDoc>
+  serialWidgetDelete(opts: { project: string; rev: number; id: string; sessionId?: string }): Promise<SerialWidgetsDoc>
+  serialWidgetRun(opts: {
+    project: string
+    id: string
+    params?: Record<string, unknown>
+    dryRun?: boolean
+    repeat?: boolean
+    confirm?: boolean
+    agent?: boolean
+    sessionId?: string
+  }): Promise<SerialWidgetRunResult>
+  serialWidgetJob(jobId?: string, sessionId?: string): Promise<SerialWidgetRunResult>
+  serialWidgetCancel(jobId: string, sessionId?: string): Promise<{ ok: boolean; id: string; state: string }>
+  serialWidgetPause(
+    jobId: string,
+    paused: boolean,
+    sessionId?: string,
+  ): Promise<{ ok: boolean; id: string; state: string; paused?: boolean }>
 }
 
 /** run 事件流的消费者（dsh-web 的环形缓冲从这里拿原始事件）。 */

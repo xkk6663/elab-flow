@@ -12,6 +12,10 @@ import type {
   SerialMonitorSnapshot,
   SerialMonitorTail,
   SerialWriteResult,
+  SerialWidget,
+  SerialWidgetJob,
+  SerialWidgetRunResult,
+  SerialWidgetsResponse,
   StepId,
   PacksStatus,
   PkgJob,
@@ -204,6 +208,82 @@ export const api = {
         allow_agent_write: opts?.allow_agent_write,
       }),
     }),
+
+  // ── 自定义发送组件（M1）───────────────────────────────────────
+  /**
+   * 工程级发送组件（只读投影：rev / widgets / warnings）。
+   * GET = 纯读；写动作走 `serialWidgetSave`（POST，会改工程文件）。
+   */
+  serialWidgets: (project: string) =>
+    req<SerialWidgetsResponse>(
+      `/api/serial/widgets?project=${encodeURIComponent(project)}`,
+    ),
+
+  /**
+   * 保存/删除组件。**必须带 rev**：服务端用乐观锁，人的修改不会被旧副本覆盖。
+   * rev 不匹配 → HTTP 409，`SerialWidgetsResponse.conflict=true` 且带最新内容。
+   */
+  serialWidgetSave: (opts: {
+    project: string;
+    action: "save" | "delete";
+    rev: number;
+    widget?: SerialWidget;
+    id?: string;
+  }) =>
+    post<SerialWidgetsResponse>("/api/serial/widgets", {
+      project: opts.project,
+      action: opts.action,
+      rev: opts.rev,
+      widget: opts.widget,
+      id: opts.id,
+    }),
+
+  /**
+   * 执行组件（`dryRun` 只渲染、不写口）。
+   * ★ 400 = 参数/模板不合法；409 = 有闭环占用串口，或已有组件任务在跑；
+   *   写口失败是 **200 + ok:false**（与 `serial()` 同一条纪律）。
+   */
+  serialWidgetRun: (opts: {
+    project: string;
+    id: string;
+    params?: Record<string, unknown>;
+    dryRun?: boolean;
+    repeat?: boolean;
+    confirm?: boolean;
+    actor?: "human" | "agent";
+  }) =>
+    post<SerialWidgetRunResult>("/api/serial/widget/run", {
+      project: opts.project,
+      id: opts.id,
+      params: opts.params,
+      dry_run: opts.dryRun === true,
+      repeat: opts.repeat === true,
+      confirm: opts.confirm === true,
+      actor: opts.actor,
+    }),
+
+  /**
+   * 任务快照（300–500ms 轮询；不新增 SSE topic）。
+   * `id` 省略 = 当前未结束的任务（刷新页面后也能找回在跑的那一个）。
+   */
+  serialWidgetJob: (id = "") =>
+    req<SerialWidgetJob>(
+      `/api/serial/widget/job${id ? `?id=${encodeURIComponent(id)}` : ""}`,
+    ),
+
+  /** 取消任务（人的停止始终优先于 agent）。 */
+  serialWidgetCancel: (id: string) =>
+    post<{ ok: boolean; id?: string; state?: string; error?: string }>(
+      "/api/serial/widget/cancel",
+      { id },
+    ),
+
+  /** 暂停/恢复周期任务。暂停只挡发送，停掉的节拍照常计入 skipped。 */
+  serialWidgetPause: (id: string, paused: boolean) =>
+    post<{ ok: boolean; id?: string; state?: string; paused?: boolean; error?: string }>(
+      "/api/serial/widget/pause",
+      { id, paused },
+    ),
 
   /** 无状态协议解码（P3）：输入一段原始字节，返回通道帧。 */
   serialDecode: (opts: {

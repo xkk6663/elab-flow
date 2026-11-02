@@ -44,6 +44,7 @@ from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
+from elab import serialwidgets as serialwidgets_mod  # noqa: E402
 from elab.config import Config, ElabError, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 from elab import pkg as pkg_mod                       # noqa: E402
@@ -92,10 +93,16 @@ SERIAL_META = {
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
                  "capture", "capture_export", "waveform",
                  # 会话级共享解码：agent 选的 decoder 与面板同图（P3.5）
-                 "decoder_share", "decoded_frames"],
+                 "decoder_share", "decoded_frames",
+                 # 自定义发送组件（M1）：chips / 参数 / 预览 / 单条发送
+                 "send_widgets", "widget_dry_run", "widget_jobs",
+                 # 序列 / 周期（M2）：send+delay+wait、固定节拍、暂停/取消
+                 "widget_sequence", "widget_wait", "widget_repeat", "widget_pause"],
+    # 组件词汇与限制（内核自描述；工具层/前端只渲染，不写死）
+    "widget": serialwidgets_mod.meta(),
 }
 
-COCKPIT_VERSION = "2.1.0"
+COCKPIT_VERSION = "3.0.0"
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
@@ -1026,6 +1033,21 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 recs = clog.tail(limit)
                 return self._json({"records": recs, "count": clog.count(),
                                    "requested": limit, "path": to_fwd(clog.path)})
+            if path == "/api/serial/widgets":
+                # 工程级发送组件（M1）：只读投影（rev / widgets / warnings）。
+                # 坏文件不阻塞串口功能：文件级错误在 error，单组件问题在 warnings。
+                project = (qs.get("project") or [""])[0]
+                if not project:
+                    raise ElabError("缺少 project")
+                return self._json(serialwidgets_mod.load(self.cfg, project))
+            if path == "/api/serial/widget/job":
+                # 不带 id = 当前未结束的任务（面板刷新/agent 找回在跑的那一个）。
+                job_id = (qs.get("id") or [""])[0]
+                snap = serialwidgets_mod.job_status(job_id)
+                if snap is None:
+                    return self._err(404, ("没有正在进行的组件任务" if not job_id
+                                           else f"没有这个组件任务（或已过期）：{job_id!r}"))
+                return self._json(snap)
             if path == "/api/serial/monitor/bytes":
                 # P1 字节真值：带方向/时间/序号的原始批次（data_b64）。
                 # ?after=批次序号 &dir=all|rx|tx &limit=最多返回几个批次
@@ -1124,6 +1146,75 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                   "activate", "market"):
                     return self._err(404, f"未知包操作：{action}")
                 return self._pkg(action, self._body())
+            if u.path == "/api/serial/widgets":
+                # 组件增删（M1）：与 agent/人共用一套 rev 乐观锁。
+                # ★ 人的修改永远优先：rev 不匹配 → 409 + 最新内容，写者必须重读。
+                body = self._body()
+                action = str(body.get("action") or "")
+                project = str(body.get("project") or "")
+                if not project:
+                    return self._err(400, "缺少 project")
+                if action not in ("save", "delete"):
+                    return self._err(400, f"action 必须是 save/delete：{action!r}")
+                try:
+                    rev = int(body.get("rev"))
+                except (TypeError, ValueError):
+                    return self._err(400, f"rev 必须是整数：{body.get('rev')!r}")
+                if action == "save":
+                    widget = body.get("widget")
+                    if not isinstance(widget, dict):
+                        return self._err(400, "save 需要 widget 对象")
+                    res = serialwidgets_mod.save(self.cfg, project, widget, rev)
+                else:
+                    wid = str(body.get("id") or "")
+                    if not wid:
+                        return self._err(400, "delete 需要 id")
+                    res = serialwidgets_mod.delete(self.cfg, project, wid, rev)
+                return self._json(res, 409 if res.get("conflict") else 200)
+            if u.path == "/api/serial/widget/run":
+                # 执行一个组件：dry_run 只渲染（不占口），否则走现有写穿/往返通道。
+                body = self._body()
+                project = str(body.get("project") or "")
+                wid = str(body.get("id") or "")
+                if not project or not wid:
+                    return self._err(400, "缺少 project 或 id")
+                dry = bool(body.get("dry_run"))
+                if not dry:
+                    busy = _serial_blocker(self.mgr)
+                    if busy:
+                        return self._err(409, (
+                            f"有闭环正在跑（run={busy.get('run')}，"
+                            f"步骤 {'/'.join(busy.get('steps') or [])}）—— "
+                            f"它要用串口/SWD（约束 N5）。等它跑完，或先取消它。"))
+                res = serialwidgets_mod.run(
+                    self.cfg, project, wid, body.get("params"),
+                    dry_run=dry, repeat=bool(body.get("repeat")),
+                    confirm=bool(body.get("confirm")),
+                    actor=str(body.get("actor") or "human"),
+                    journal=serialconsole_mod.journal_for(self.cfg, project=project))
+                if res.get("stage") == "busy":
+                    return self._err(409, res.get("error") or "已有组件任务在跑")
+                if res.get("stage") == "validate":
+                    return self._err(400, res.get("error") or "组件请求不合法")
+                # "执行了但写失败"沿用 200 + ok:false（与 POST /api/serial 同一条纪律）
+                return self._json(res, 200)
+            if u.path == "/api/serial/widget/cancel":
+                body = self._body()
+                job_id = str(body.get("id") or "")
+                if not job_id:
+                    return self._err(400, "缺少 id")
+                res = serialwidgets_mod.cancel(job_id)
+                return self._json(res, 200 if res.get("ok") else 404)
+            if u.path == "/api/serial/widget/pause":
+                # 暂停/恢复（M2）：只改标志位。人的暂停优先于 agent ——
+                # agent 的周期任务被人按停后，必须人再按恢复（不自动续跑）。
+                body = self._body()
+                job_id = str(body.get("id") or "")
+                if not job_id:
+                    return self._err(400, "缺少 id")
+                paused = bool(body.get("paused", True))
+                res = serialwidgets_mod.set_paused(job_id, paused)
+                return self._json(res, 200 if res.get("ok") else 404)
             if u.path == "/api/serial":
                 # 手写通道（M3-b）：写一条出去、收一小段回显，一次请求内闭环。
                 # ★ 返回 **200 + ok:false**（而不是 5xx）承载"执行了但没成功"：

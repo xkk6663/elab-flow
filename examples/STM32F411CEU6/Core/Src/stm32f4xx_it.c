@@ -32,7 +32,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* echo 环形缓冲：IRQ 生产（RXNE 逐字节喂入），任务消费（按 \n 切帧）。
+   大小 512 B —— 115200 波特下连续 44ms 才能填满 echo 流，生产速率远低于消费速率，
+   永远追不上；零互斥、零原子操作，volatile head/tail 足以保证可见性。 */
+#define ECHO_RING_SIZE 512U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -42,17 +45,38 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-
+/* echo 环形缓冲（IRQ 写 / 任务读） */
+static volatile uint8_t  echo_ring[ECHO_RING_SIZE];
+static volatile uint16_t echo_ring_head = 0;  /* 下一个写入位置（IRQ 推进） */
+static volatile uint16_t echo_ring_tail = 0;  /* 下一个读取位置（任务推进） */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
+/* echo 环形缓冲接口 —— IRQ 里 push（零开销），任务里 pull（按字节读，空了返回 0 不阻塞） */
+extern void echo_ring_push(uint8_t c);
+extern uint8_t echo_ring_pull(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/* echo 环形缓冲实现 —— IRQ 与任务各只改自己的指针，天然无锁；
+   head == tail  = 空，(head+1)%SIZE == tail = 满（留一格不用，区分空满） */
+void echo_ring_push(uint8_t c) {
+  uint16_t next = (echo_ring_head + 1U) % ECHO_RING_SIZE;
+  if (next != echo_ring_tail) {        /* 未满 */
+    echo_ring[echo_ring_head] = c;
+    echo_ring_head = next;
+  }
+  /* 满时静默丢弃 —— 任务消费远快于生产，极端场景下丢 1 字节等于丢半帧，
+     但压测场景里若出现，说明 echo 任务被完全饿死，需要另查优先级 */
+}
+uint8_t echo_ring_pull(void) {
+  if (echo_ring_head == echo_ring_tail) return 0;   /* 空 */
+  uint8_t c = echo_ring[echo_ring_tail];
+  echo_ring_tail = (echo_ring_tail + 1U) % ECHO_RING_SIZE;
+  return c;
+}
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -183,14 +207,13 @@ void TIM1_UP_TIM10_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
-  /* OTA hook：RXNE 逐字节喂触发扫描（'!'×5 / 0x15 组件发现）。
-     ★ F411 实测坑：只靠 IDLE 收尾集中读 DR，5 连'!'（约 0.4ms@115200）
-     会在 IDLE 到来前 ORE 溢出丢 4 字节 → 只喂进 1 个 '!' → 触发不生效、
-     0x15 只见 SOF 无应答。必须 RXNE 逐字节喂 + IDLE 仅清标志。
-     注：USER CODE 0 先于 HAL_UART_IRQHandler 执行，DR 在此被消费，
-     HAL 的 RXNE 分支不会重复取字节。 */
+  /* OTA hook + echo ring：同一 RXNE 字节同时喂给两个消费者，
+     先 OTA（不 echo 也能触发 boot），再 echo_ring_push。
+     ★ 注意：DR 在这里被消费，HAL_UART_IRQHandler 的 RXNE 分支不会再取 */
   if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE)) {
-    OtaAppHook_ScanChar((char)(huart1.Instance->DR & 0xFFU));
+    uint8_t d = (uint8_t)(huart1.Instance->DR & 0xFFU);
+    OtaAppHook_ScanChar((char)d);
+    echo_ring_push(d);
   }
   if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_IDLE)) {
     __HAL_UART_CLEAR_IDLEFLAG(&huart1);

@@ -304,6 +304,193 @@
   color: var(--elab-fg-faint);
 }
 
+/* ── WaveChart V2 工具栏按钮 ── */
+.waveToolBtn {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg-secondary);
+  cursor: pointer;
+  font-family: inherit;
+}
+.waveToolBtn:hover:not(:disabled) { background: var(--elab-bg-hover); color: var(--elab-fg-primary); }
+.waveToolBtn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── 多面板 viewport tab 条 ── */
+.waveVpBar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.waveVpTabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.waveVpTabRow {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  overflow: hidden;
+}
+.waveVpTab {
+  padding: 3px 8px;
+  font-size: var(--elab-fs-xs);
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg-secondary);
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.waveVpTab:hover { color: var(--elab-fg-primary); }
+.waveVpTabActive { background: var(--elab-accent); color: #fff; }
+.waveVpTabClose {
+  padding: 3px 6px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--elab-fg-dimmed);
+  border: none;
+  border-left: 1px solid var(--elab-border);
+  cursor: pointer;
+  line-height: 1;
+}
+.waveVpTabClose:hover { color: var(--elab-accent); background: var(--elab-bg-hover); }
+.waveVpAdd {
+  padding: 3px 8px;
+  font-size: var(--elab-fs-xs);
+  background: transparent;
+  color: var(--elab-accent);
+  border: 1px dashed var(--elab-accent);
+  border-radius: var(--elab-radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+}
+.waveVpAdd:hover { background: var(--elab-accent); color: #fff; }
+
+/* ── 通道绑定 chip ── */
+.waveVpControls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  font-size: var(--elab-fs-xs);
+}
+.waveVpLabel { color: var(--elab-fg-faint); }
+.waveChChip {
+  padding: 2px 6px;
+  font-size: var(--elab-fs-xs);
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg-dimmed);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+}
+.waveChChip:hover { color: var(--elab-fg-primary); border-color: var(--elab-fg-dimmed); }
+.waveChChipOn {
+  background: var(--elab-accent);
+  color: #fff;
+  border-color: var(--elab-accent);
+}
+.waveVpSpacer { flex: 1 1 auto; }
+
+/* ── 自定义发送组件（M1）：chips + 参数 + 预览 ── */
+.widgetBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px var(--elab-space-3);
+  border-top: 1px solid var(--elab-border);
+  background: var(--elab-bg-surface);
+  min-width: 0;
+}
+
+.widgetTitle {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  letter-spacing: 0.04em;
+  margin-right: 2px;
+}
+
+.widgetChip,
+.widgetChipOn {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.4;
+  background: var(--elab-bg-code);
+  color: var(--elab-fg-secondary);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  cursor: pointer;
+}
+
+.widgetChip:hover {
+  color: var(--elab-fg-primary);
+  border-color: var(--elab-fg-dimmed);
+}
+
+.widgetChipOn {
+  background: var(--elab-accent);
+  color: #fff;
+  border-color: var(--elab-accent);
+}
+
+.widgetErr {
+  flex: 0 0 auto;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-fail);
+  cursor: help;
+}
+
+.widgetPanel {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-3);
+  flex-wrap: wrap;
+  padding: 5px var(--elab-space-3);
+  border-top: 1px dashed var(--elab-border);
+  background: color-mix(in srgb, var(--elab-bg-hover) 35%, transparent);
+  min-width: 0;
+}
+
+.widgetField {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  white-space: nowrap;
+}
+
+.widgetInput {
+  width: 92px;
+  min-width: 60px;
+}
+
+.widgetPreview {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── 发送面板 ── */
 .write {
   flex: 0 0 auto;

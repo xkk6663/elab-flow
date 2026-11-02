@@ -72,10 +72,10 @@ vendor_fingerprints:         # 供 `elab adapt` 确定性探测（可选但强�
 # ③ 校验结构/安全/内容哈希，并记下 sha256
 ./elab pkg verify acme/acme32
 
-# ④ 真跑一遍闭环（至少 build；有硬件跑 triple）
+# ④ 真跑一遍闭环（至少 build；有硬件跑三连）
 ./elab doctor -p <project> --deep
 ./elab build  -p <project>
-./elab triple -p <project>      # 有探针时
+./elab run -p <project> --steps build,flash,debug_verify   # 有探针时
 ```
 
 `verify` 通过的判定：结构合法、没有禁用文件、`tree_hash` 与 `.installed.json` 一致。

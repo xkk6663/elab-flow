@@ -150,7 +150,6 @@ function AdaptBanner(props: {
     checkRoot,
     error,
     disabled,
-    onAdapt,
     onCheck,
   } = props
 
@@ -256,50 +255,10 @@ function AdaptBanner(props: {
     }
     return null
   }
-  // discovered：每个未接入候选给一个「一键适配」按钮
-  return (
-    <div
-      style={{
-        flex: '0 0 auto',
-        padding: '3px 8px',
-        fontSize: '11px',
-        color: 'var(--elab-fg-muted)',
-        borderBottom: '1px solid var(--elab-border)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '2px',
-      }}
-    >
-      {pending.map((c) => (
-        <div key={c.path} style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-          <span
-            style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-            title={c.path}
-          >
-            {`发现未接入工程：${c.dirname}`}
-          </span>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onAdapt(c.path)}
-            title={`接入 ${c.path}（只生成 projects/<name>.yaml，业务工程零改动）`}
-            style={{
-              flex: '0 0 auto',
-              padding: '0 6px',
-              fontSize: '11px',
-              borderRadius: '4px',
-              border: '1px solid var(--elab-border)',
-              background: 'transparent',
-              color: 'var(--elab-accent)',
-              cursor: disabled ? 'default' : 'pointer',
-            }}
-          >
-            {'一键适配'}
-          </button>
-        </div>
-      ))}
-    </div>
-  )
+  // discovered（扫到未接入工程）：窄栏里**不再常驻**一张候选列表 —— 它会长期占掉
+  // 两行并挤走真正的操作区（实测窄栏只剩 ~520px）。适配入口保留在「⚙ 设置 → 工程」
+  // 与首次引导里，面板本身只为「适配中 / 适配失败 / 已接入」三种瞬时状态让位。
+  return null
 }
 
 export function CockpitPane(props: CockpitPaneProps): ReactNode {

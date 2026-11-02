@@ -577,6 +577,155 @@ export interface SerialMonitorWriteResult {
   error: string | null;
 }
 
+// ── /api/serial/widgets（自定义发送组件，M1）────────────────────
+/**
+ * 参数类型词汇来自内核 `capabilities.meta.serial.widget.param_types`；
+ * 这里保留联合类型只是为了让前端分支可穷尽。
+ */
+export type SerialWidgetParamType = "int" | "float" | "bool" | "enum" | "string" | "hex";
+
+export interface SerialWidgetParamOption {
+  label: string;
+  value: string;
+}
+
+export interface SerialWidgetParam {
+  name: string;
+  label?: string;
+  type: SerialWidgetParamType;
+  /** 默认值已由服务端归一化（数值/布尔/字符串） */
+  default?: string | number | boolean | null;
+  min?: number;
+  max?: number;
+  step?: number;
+  /** float 固定小数位 */
+  decimals?: number;
+  /** int：按 hex 渲染（width = 十六进制位数） */
+  render?: "hex";
+  /** int：hex 位数；hex：字节数 */
+  width?: number;
+  endian?: "be" | "le";
+  options?: Array<SerialWidgetParamOption | string>;
+  max_len?: number;
+  pattern?: string;
+  true_value?: string;
+  false_value?: string;
+}
+
+export interface SerialWidgetStep {
+  /** 1-based 步号（预览时服务端给出） */
+  i?: number;
+  kind: "send" | "delay" | "wait";
+  text?: string;
+  ms?: number;
+  within_s?: number;
+  /** wait 的匹配规则（M2）：kind ∈ regex/contains/exact/hex */
+  match?: { kind: string; value: string };
+  format?: SerialFormat;
+  eol?: SerialEol;
+}
+
+export interface SerialWidget {
+  id: string;
+  label: string;
+  group?: string;
+  confirm?: boolean;
+  format?: SerialFormat;
+  eol?: SerialEol;
+  params?: SerialWidgetParam[];
+  steps: SerialWidgetStep[];
+  /** 周期发送（M2）：固定节拍、重复整个组件，上一轮超时只记 skipped */
+  repeat?: { interval_ms: number; count: number } | null;
+}
+
+/** GET/POST /api/serial/widgets 的返回：服务端校验后的**唯一**投影 */
+export interface SerialWidgetsResponse {
+  ok?: boolean;
+  project: string;
+  /** 乐观锁版本；所有写请求必须带它 */
+  rev: number;
+  widgets: SerialWidget[];
+  /** 单组件/文件内容级问题（不阻塞串口面板） */
+  warnings: string[];
+  /** 文件级错误（坏 JSON / 超限）；null = 正常 */
+  error: string | null;
+  path?: string;
+  /** 写请求 rev 不匹配时 true（HTTP 409，带最新 widgets/rev） */
+  conflict?: boolean;
+}
+
+export type SerialWidgetJobState =
+  | "running"
+  | "paused"
+  | "cancelling"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+/** 任务里的一条步骤结果（周期任务按轮次重复出现，超出上限会丢最旧的）。 */
+export interface SerialWidgetStepResult {
+  i: number;
+  kind: "send" | "delay" | "wait";
+  ok: boolean;
+  t_ms: number;
+  round: number;
+  text?: string | null;
+  via?: string;
+  bytes?: number;
+  ms?: number;
+  matched?: boolean;
+  match?: { kind: string; value: string };
+  error?: string | null;
+}
+
+/**
+ * POST /api/serial/widget/run 的结果，也是 GET /api/serial/widget/job 的快照。
+ *
+ * ★ `dry_run` 只渲染不写口：`preview_b64` 是面板显示与最终发送的**同一份字节**。
+ * ★ `stage="validate"` = 400（参数/模板不合法）；`stage="busy"` = 409（已有任务）。
+ *   写口失败是 **200 + ok:false**（与 POST /api/serial 同一条纪律）。
+ * ★ 异步：周期任务与含 delay/wait 的序列在后台线程跑，HTTP 最多等 2s；
+ *   还在跑时返回 `state="running"` + `accepted`，面板按 300–500ms 轮询
+ *   `serialWidgetJob` 直到终态。
+ */
+export interface SerialWidgetRunResult {
+  ok: boolean;
+  /** true = 已受理，任务仍在后台跑（看 job_id 轮询） */
+  accepted?: boolean;
+  /** 组件 id */
+  id?: string;
+  job_id?: string;
+  state?: SerialWidgetJobState;
+  actor?: string;
+  params?: Record<string, unknown>;
+  rounds?: number;
+  /** 固定节拍不重叠：上一轮超时错过的节拍数（只报告、不补发） */
+  skipped?: number;
+  repeat?: SerialWidget["repeat"];
+  steps?: SerialWidgetStepResult[];
+  steps_dropped?: number;
+  total_bytes?: number;
+  /** 渲染后的总字节数（dry_run 与 run 同源） */
+  bytes?: number;
+  preview_b64?: string;
+  preview_steps?: SerialWidgetStep[];
+  port?: string;
+  baud?: number;
+  via?: "monitor" | "roundtrip" | string;
+  stop_reason?: string | null;
+  error?: string | null;
+  started_at?: number;
+  finished_at?: number | null;
+  /** dry_run 预览响应 */
+  dry_run?: boolean;
+  /** 预览里未执行的步骤（dry_run 时给出） */
+  deferred?: Array<{ i: number; kind: string }>;
+  stage?: "validate" | "busy";
+}
+
+/** 任务快照与 `serialWidgetRun` 的返回同形（内核按同一份 `_job_result` 产出）。 */
+export type SerialWidgetJob = SerialWidgetRunResult;
+
 // ── /api/adapt（一键适配，M5.6）─────────────────────────────────
 export interface AdaptFact {
   key: string;

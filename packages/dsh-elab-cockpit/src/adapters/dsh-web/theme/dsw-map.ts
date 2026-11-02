@@ -65,6 +65,10 @@ export const DSW_MAP_CSS: string = `\
   --elab-bg-canvas: var(--dsw-alias-bg-base);
   --elab-bg-surface: var(--dsw-alias-bg-layer-1);
   --elab-bg-raised: var(--dsw-alias-bg-layer-2);
+  /* 代码/参数块底（等宽内容专用面）：宿主没有独立的 code 面，取"更抬起的一层"。
+     缺这个映射时 var(--elab-bg-code) 就是**未定义变量** → 整条声明失效 →
+     组件 chips 变成透明底（实测：与独立 WebUI 不一致）。 */
+  --elab-bg-code: var(--dsw-alias-bg-layer-2);
   --elab-bg-overlay: var(--dsw-alias-bg-overlay);
   /* 线 */
   --elab-border: var(--dsw-alias-border-l1);

@@ -32,14 +32,22 @@
 #include "usart.h"
 #include "KEY.h"
 #include "math.h"           /* elab 波形演示：sinf 产生正弦（FireWater 输出） */
-
+#include <string.h>         /* strncmp / memcmp —— echo 任务里仅头部比较 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-/* elab 串口波形演示：以 FireWater 文本协议输出单通道正弦值（实现见文件末尾） */
-static void wave_emit_sine(float v);
+/* elab 串口波形演示：以 FireWater 文本协议输出双通道正弦值（实现见文件末尾）。
+   CH1 = 基准正弦，CH2 = 延迟半个周期（相位 -π，与 CH1 反相）。 */
+static void wave_emit_sine2(float v1, float v2);
 
+/* elab echo 任务：从 USART1 IRQ 喂入的环形缓冲消费 RX 字节，按 \r\n 切帧，
+   识别 PING / STATS? / ECHO_ENABLE 命令并回显；用于双向吞吐与 RTT 压测。
+   栈仅 512 B —— 同 myUSART 任务压过栈爆坑，故只用 fputc 逐字节发，不走 printf */
+extern void echo_ring_push(uint8_t c);
+extern uint8_t echo_ring_pull(void);
+static void echo_emit(const char *s);   /* fputc 小包装，同 wave_emit_sine2 策略 */
+static void StartTask03_Echo(void *argument);
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -133,7 +141,17 @@ void MX_FREERTOS_Init(void) {
   myUSARTHandle = osThreadNew(StartTask02, NULL, &myUSART_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  /* creation of echoTask —— elab 串口压测 / 双向回显任务
+     栈 512 B（同 myUSART，不走 printf；fputc 逐字节安全），
+     priority Normal：与 myUSART 同级，按时间片轮换，避免波形 100Hz 持续输出
+     把 echo 任务饿死导致 PING 丢包（修复前 BelowNormal 丢包 ~9%） */
+  osThreadId_t echoTaskHandle;
+  const osThreadAttr_t echoTask_attributes = {
+    .name = "echoTask",
+    .stack_size = 128 * 4,
+    .priority = (osPriority_t) osPriorityNormal,
+  };
+  echoTaskHandle = osThreadNew(StartTask03_Echo, NULL, &echoTask_attributes);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -194,13 +212,14 @@ void StartTask02(void *argument)
       printf("KEY:%u\r\n", key_value);
   }
 
-    /* elab 波形演示：100 Hz 采样、0.5 Hz 正弦（FireWater 协议 "amp\r\n"）。
-       面板「串口 → 波形」选 FireWater 即可看到曲线；[alive] 行由 defaultTask 每秒发一次。 */
+    /* elab 波形演示：100 Hz 采样、0.5 Hz 正弦（FireWater 协议 "a,b\r\n"）。
+       CH1 基准、CH2 延迟半个周期（相位 -π = 反相）——面板「串口 → 波形」
+       选 FireWater 即可看到两条反相曲线；[alive] 行由 defaultTask 每秒发一次。 */
     {
       static float wave_phase = 0.0f;
       wave_phase += 0.0314159f;                 /* 2π × 0.5 Hz / 100 Hz */
       if (wave_phase >= 6.283185f) wave_phase -= 6.283185f;
-      wave_emit_sine(sinf(wave_phase));
+      wave_emit_sine2(sinf(wave_phase), sinf(wave_phase - 3.1415927f));
     }
 
     osDelay(10);
@@ -210,6 +229,73 @@ void StartTask02(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+/* ── echo 任务辅助（小缓冲逐字节，不走 printf） ── */
+static void echo_emit(const char *s) {
+  while (*s) fputc((unsigned char)*s++, stdout);
+}
+static void echo_emit_u32(uint32_t n) {
+  char buf[12]; int i = 0;
+  if (n == 0) { buf[i++] = '0'; }
+  while (n) { buf[i++] = (char)('0' + n % 10U); n /= 10U; }
+  while (i) fputc((unsigned char)buf[--i], stdout);
+}
+
+/* StartTask03_Echo —— USART1 RX 消费 + PING/STATS 回显（双向压测固件端）
+   帧格式：\r\n 分隔；命令帧开头 = PING: / STATS? / ECHO_ENABLE 0|1
+   自上报：每 50 次 echo 输出 [echo] total=N bytes=N 一行 */
+static void StartTask03_Echo(void *argument)
+{
+  char  frame[64];        /* 当前帧（不存 \r\n，零尾部当作"无内容"丢弃） */
+  int   fn = 0;           /* 帧内字符数 */
+  uint32_t total_echo = 0, total_bytes = 0, report_div = 0;
+  uint32_t echo_on = 1;   /* 可被 ECHO_ENABLE 关 */
+  uint8_t  c;
+
+  for (;;) {
+    while ((c = echo_ring_pull()) != 0) {   /* 0 = 空（未接收到），合法数据 > 0 */
+      if (c == '\r' || c == '\n') {
+        if (fn == 0) { continue; }          /* 空行丢掉（echo_ring 满时可能残留零头） */
+        frame[fn] = '\0';
+
+        /* ── 命令识别 ── */
+        if (echo_on && fn >= 5 && strncmp(frame, "PING:", 5) == 0) {
+          echo_emit("PONG:");
+          echo_emit(frame + 5);             /* payload 原样（不含 PING: 前缀） */
+          fputc('\r', stdout); fputc('\n', stdout);
+          total_echo++; total_bytes += (uint32_t)fn;
+          report_div++;
+        } else if (echo_on && fn >= 5 && strncmp(frame, "PONG:", 5) == 0) {
+          /* 自己发出的回显又被 echo 回显了 —— 必须忽略，否则无限递归 */
+        } else if (fn == 6 && strncmp(frame, "STATS?", 6) == 0) {
+          echo_emit("[echo] total="); echo_emit_u32(total_echo);
+          echo_emit(" bytes=");       echo_emit_u32(total_bytes);
+          echo_emit(" enable=");      echo_emit_u32(echo_on);
+          fputc('\r', stdout); fputc('\n', stdout);
+        } else if (fn >= 12 && strncmp(frame, "ECHO_ENABLE ", 12) == 0) {
+          uint32_t v = (uint32_t)(frame[12] - '0');
+          echo_on = (v == 1) ? 1U : 0U;
+          echo_emit("[echo] enable="); echo_emit_u32(echo_on);
+          fputc('\r', stdout); fputc('\n', stdout);
+        }
+
+        /* ── 自上报（每 50 次 echo） ── */
+        if (report_div >= 50U) {
+          report_div = 0U;
+          echo_emit("[echo] total="); echo_emit_u32(total_echo);
+          echo_emit(" bytes=");       echo_emit_u32(total_bytes);
+          fputc('\r', stdout); fputc('\n', stdout);
+        }
+        fn = 0;
+      } else if (fn < 63) {
+        frame[fn++] = (char)c;
+      }
+      /* fn == 63 满时静默丢整帧 —— echo 命令帧不可能那么长，极端防御 */
+    }
+    /* ring 空了，释放 CPU 给波形输出 & 心跳，1ms 后再拉 */
+    osDelay(1);
+  }
+}
+
 int fputc(int ch, FILE *stream)
 {
   osMutexAcquire(myUASRTHandle,portMAX_DELAY);
@@ -235,26 +321,29 @@ int __io_putchar(int ch)
 }
 
 /**
-  * @brief elab 串口波形演示：把 [-1,1] 的浮点值按 FireWater 协议打成一行
-  *        （``0.707\r\n``）。
+  * @brief elab 串口波形演示：把两个 [-1,1] 的浮点值按 FireWater 协议打成一行
+  *        （``0.707,-0.707\r\n``），逗号分隔 = 两个通道。
   *        ★ 不用 printf：myUSART 任务栈只有 512 B，newlib 的 printf 会把这栈
   *          压爆（实测 2026-11-01：100 Hz 输出跑几秒后 HardFault）。这里用
-  *          16 B 小缓冲 + fputc 逐字节发；fputc 自带互斥，与 defaultTask 的
+  *          24 B 小缓冲 + fputc 逐字节发；fputc 自带互斥，与 defaultTask 的
   *          ``[alive]`` 打印安全交错。整数值用毫单位拼装 —— newlib-nano 未开
   *          ``-u _printf_float``，``%f`` 也打不出小数。
   */
-static void wave_emit_sine(float v)
+static void wave_emit_sine2(float v1, float v2)
 {
-  int milli = (int)(v * 1000.0f);                  /* [-1000, 1000] */
-  uint32_t mag = (uint32_t)(milli < 0 ? -milli : milli);
-  char buf[16];
+  char buf[24];
   int n = 0;
-  if (milli < 0) buf[n++] = '-';
-  buf[n++] = (char)('0' + (mag / 1000u) % 10u);    /* 整数位（0 或 1） */
-  buf[n++] = '.';
-  buf[n++] = (char)('0' + (mag / 100u) % 10u);
-  buf[n++] = (char)('0' + (mag / 10u) % 10u);
-  buf[n++] = (char)('0' + mag % 10u);
+  for (int ch = 0; ch < 2; ch++) {
+    int milli = (int)((ch == 0 ? v1 : v2) * 1000.0f);  /* [-1000, 1000] */
+    uint32_t mag = (uint32_t)(milli < 0 ? -milli : milli);
+    if (ch == 1) buf[n++] = ',';                       /* 通道分隔 */
+    if (milli < 0) buf[n++] = '-';
+    buf[n++] = (char)('0' + (mag / 1000u) % 10u);      /* 整数位（0 或 1） */
+    buf[n++] = '.';
+    buf[n++] = (char)('0' + (mag / 100u) % 10u);
+    buf[n++] = (char)('0' + (mag / 10u) % 10u);
+    buf[n++] = (char)('0' + mag % 10u);
+  }
   buf[n++] = '\r';
   buf[n++] = '\n';
   for (int i = 0; i < n; i++) {
