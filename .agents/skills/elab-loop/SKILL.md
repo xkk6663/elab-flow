@@ -54,7 +54,7 @@ loopback HTTP ICD 与它说话 —— **工具层没有业务逻辑，业务变�
 - 步骤标签 / 加步骤 / 档位定义 → `cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`
   （内核自描述，工具层自动跟随）；
 - DSH 插件在本仓 `packages/dsh-elab-cockpit`（工具层）：只有修工具 bug 才碰；
-  分发仓 `xkk6663/dsh-elab-cockpit` 是只读镜像（改本仓 → 打 `plugin-v*` tag 由 CI 推送）；
+  插件市场与 npm 都直接取 `packages/dsh-elab-cockpit`（无镜像仓 / 分发仓）；
 - 门禁：`packages/dsh-elab-cockpit/test/boundary.test.mjs`。
 
 ## 常见故障 → 处置

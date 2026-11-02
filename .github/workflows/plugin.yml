@@ -1,8 +1,7 @@
 # DSH 插件（packages/dsh-elab-cockpit）的 CI
 #
-# 插件源码的唯一事实源在本仓（工具层回到 packages/ 下）；镜像仓
-# xkk6663/dsh-elab-cockpit 只读、由 publish-plugin.yml 自动推送。
-# 因此插件的测试/构建门禁必须**在这里**跑，镜像仓的 ci.yml 只是镜像自身的健康检查。
+# 插件源码的唯一事实源在本仓（工具层回到 packages/ 下）；插件市场按子目录安装、
+# npm 也从该目录发布，没有镜像/分发仓。因此插件的测试/构建门禁必须**在这里**跑。
 
 name: plugin
 

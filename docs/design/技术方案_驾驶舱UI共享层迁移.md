@@ -49,7 +49,7 @@
 | C3 | `domain/` 只准 `./xxx` | [boundary.test.mjs §4.4-1](../../packages/dsh-elab-cockpit/test/boundary.test.mjs#L83-L94) | 若 `domain/icd.ts` 改为转发共享类型，需给门禁加一条**显式白名单** |
 | C4 | 适配器隔离：`adapters/<dir>` 不得 import 兄弟目录 | [§4.4-3](../../packages/dsh-elab-cockpit/test/boundary.test.mjs#L120-L140) | 共享包不算适配器，不受此限 |
 | C5 | 插件 client 半单文件、React 外部化 | [build-client.mjs](../../packages/dsh-elab-cockpit/scripts/build-client.mjs) | 共享包必须能被 **esbuild 内联**，且**不得 import react** |
-| C6 | 镜像仓是 `packages/dsh-elab-cockpit` 的 subtree | [AGENTS.md §2](../../AGENTS.md) | 共享包**不能**位于插件包外并被镜像仓"源码构建"——镜像只承载 `lib/` 产物 |
+| C6 | ~~镜像仓是 `packages/dsh-elab-cockpit` 的 subtree~~（已退役） | [AGENTS.md §2](../../AGENTS.md) | 2026-11-02 镜像仓退役；插件市场与 npm 直接取主仓子目录，共享包由 esbuild 内联进 `lib/` |
 | C7 | WebUI 运行时只有 Python，`dist/` 入库 | [AGENTS.md 分层表](../../AGENTS.md)、[vite.config.ts](../../cockpit/web/vite.config.ts) | 共享包只在**构建期**参与，产物仍落 `dist/` |
 | C8 | 设计约束 C33（工具层不复制内核判据） | [设计约束](设计约束.md) | 共享包不得包含步骤/档位/芯片判据，只能是 UI 侧纯函数 |
 
@@ -203,6 +203,9 @@ resolve: { alias: { '@elab/cockpit-ui-core': fileURLToPath(new URL('../../packag
 
 ### 6.4 镜像仓与 npm 的影响
 
+> **2026-11-02 更新**：镜像仓已整体退役；市场与 npm 直接取主仓子目录。
+> 以下两条仅作历史记录（当时镜像仓尚在）。
+
 - **npm 包**：`lib/client.js` 已内联共享代码 → 安装者无感知，`files` 不变。
 - **镜像仓**：subtree 只含 `packages/dsh-elab-cockpit`，**不含** `packages/cockpit-ui-core`。
   镜像定位仍是"只读分发"，不支持从镜像源码构建；文档与 README 需注明这一点。
@@ -240,7 +243,7 @@ resolve: { alias: { '@elab/cockpit-ui-core': fileURLToPath(new URL('../../packag
 | V4 | WebUI `npm run build`（tsc + vite） | 通过；`dist/` 有对应 diff |
 | V5 | 真机闭环截图 | 阶梯 / 日志尾 / 串口终端 / HEX 与迁移前一致 |
 | V6 | 录制回放对齐 | 同一份 `.jsonl` 在两套 UI 中阶段与证据一致 |
-| V7 | 镜像构建链 | CI（主仓检出）仍可 `git subtree split` 并强推；镜像 `lib/` 自足 |
+| V7 | ~~镜像构建链~~ | 已退役（2026-11-02）；由 V3 的 lib 自足性覆盖 |
 
 ---
 
@@ -250,7 +253,7 @@ resolve: { alias: { '@elab/cockpit-ui-core': fileURLToPath(new URL('../../packag
 |---|---|
 | 共享包被当成"第三层"，日后塞进业务判据 | README + G1/G2 门禁；C8 约束写进注释 |
 | 插件 `lib/client.js` 体积膨胀 | 共享层只放纯函数；构建时看产物大小，超过阈值拆批 |
-| 镜像仓源码不可构建引起误解 | 在插件 README 与镜像 README 注明"分发形态，开发请回主仓" |
+| ~~镜像仓源码不可构建引起误解~~ | 镜像仓已退役（2026-11-02），不再存在该风险 |
 | 两侧 store 外壳仍分叉 | 只承诺"归约逻辑"共享，外壳差异写进文档，避免过度承诺 |
 | 迁移期双份代码短暂并存 | 每批一个 commit，删旧实现与接线同批完成，避免长期双跑 |
 
@@ -409,7 +412,8 @@ export interface PanelHost {
 - **不做的**：不再为 `cockpit/web` 的三列轨做共享改造（它是过渡形态，改造成本收不回来）。
 - **要做的**：把 `cockpit-panel` 的抽取提前到 P1，和 core 一起成为"唯一面板实现"。
 - **保持的**：逻辑层共享仍是第一步；`cockpit/web` 继续可运行，直到 harness 宿主接管。
-- **注意**：面板迁出插件包后，镜像仓（subtree 只含 `packages/dsh-elab-cockpit`）依旧只承载 `lib/` 产物，
+- **注意**：镜像仓已于 2026-11-02 退役，下面这条限制不再适用（保留为历史）。
+  面板迁出插件包后，~~镜像仓（subtree 只含 `packages/dsh-elab-cockpit`）依旧只承载 `lib/` 产物~~，
   源码开发回主仓；`npm` 包靠 esbuild 内联，不新增运行时依赖（§6.4 不变）。
 
 ---

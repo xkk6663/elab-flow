@@ -1,6 +1,6 @@
 ---
 name: elab-release
-description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版与维护流程：版本落点、门禁、双标签、镜像仓强推、npm 发布、dsh-market 刷新与回滚。触发：用户说要发版 / 版本更新 / 升级版本 / 打 tag / 推镜像 / npm publish / 发布插件 / 市场更新。
+description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版与维护流程：版本落点、门禁、双标签、npm 发布、dsh-market 刷新与回滚。触发：用户说要发版 / 版本更新 / 升级版本 / 打 tag / npm publish / 发布插件 / 市场更新。
 ---
 
 # elab-Flow 版本更新与发布
@@ -17,7 +17,7 @@ description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版
 | 插件默认内核 | `src/domain/envpack.ts` `DEFAULT_KERNEL_VERSION` | 跟随内核版本；UI 与宿主半共用 |
 | 最低内核 | `src/domain/bootstrap.ts` `MIN_KERNEL_VERSION` | **兼容下限，不随内核升级**（仅提示、不阻断） |
 | 变更日志 | `CHANGELOG.md` | 两条独立条目：`[Vx.y.z]` 与 `[DSH 插件 a.b.c]` |
-| 文档事实 | `docs/architecture/架构分析和项目仓库的依赖关系.md` §11 | 插件版本 / 镜像 / npm / 市场快照 |
+| 文档事实 | `docs/architecture/架构分析和项目仓库的依赖关系.md` §11 | 插件版本 / npm / 市场快照 |
 | 版本引用 | `README.md`（`@0.4.x` 之类）、`screenshots.json` | 搜 `0\.3\.` / `2\.1\.0` 清残留 |
 
 > 历史 tag（`v2.1.0`、`plugin-v0.3.2`）**不移动、不复用**；新版本永远新 tag。
@@ -59,21 +59,22 @@ python tests/test_serialwidgets.py -v           # unittest（仓库未装 pytest
 ```powershell
 git add <具体路径>            # 不要 git add -A
 git commit -m "release(v3.0.0): ... （插件 0.4.0）"
-git push origin main          # ① 先推 main，等 plugin 工作流转绿（badge 见 §9）
+git push origin main          # ① 先推 main，等 plugin 工作流转绿（badge 见 §8）
 git tag -a v3.0.0 -m "elab-Flow v3.0.0"
 git tag -a plugin-v0.4.0 -m "dsh-elab-cockpit 0.4.0"
 git push origin v3.0.0 plugin-v0.4.0   # ② 绿了再推 tag
 ```
 
-- **顺序很重要**：tag 会再触发一轮 CI；先把 main 推到绿，再打 tag，避免"标签自带红灯"。
-- `v*` tag → 内核发布；`plugin-v*` tag → 触发 `.github/workflows/publish-plugin.yml`。
+- **顺序很重要**：先推 main 等 CI 绿，再打 tag，避免"标签自带红灯"。
+- `v*` tag → 内核版本标记；`plugin-v*` tag → 插件版本标记。两者都**不触发**任何分发工作流
+  （npm 手动发布；市场按子目录安装）。
 - **标签默认不移动**：修问题发下一个版本。唯一例外：tag 刚推送、**未发 GitHub Release、
   未打新 npm 版本**，且只是补齐门禁（类型声明/测试）而非改产物时，可重指：
   ```powershell
   git tag -f -a v3.0.0 -m "elab-Flow v3.0.0" <修复提交>
   git push --force origin v3.0.0          # 逐个 tag 强推，并在发布说明里注明
   ```
-  产物（npm tarball / 镜像）保持不变；若已发 npm 新版本，只改运行时行为就必须发下一版。
+  产物（npm tarball）保持不变；若已发 npm 新版本，只改运行时行为就必须发下一版。
 
 ## 5. 网络与代理（GitHub 推送）
 
@@ -84,29 +85,9 @@ git push origin v3.0.0 plugin-v0.4.0   # ② 绿了再推 tag
   ```
 - 节点抖动时会报 `schannel: failed to receive handshake` 或 `unexpected eof` —— **重试 1–2 次**
   通常就好；持续失败再换节点，不要误判为凭据问题。
-- `scripts/mirror-plugin.ps1` 不接受代理参数，先设环境变量再跑：
-  `$env:HTTP_PROXY='http://127.0.0.1:7890'; $env:HTTPS_PROXY='http://127.0.0.1:7890'`。
 - 无代理时 `api.github.com` 常不可达；`npm publish` 可直连，不用代理。
 
-## 6. 镜像仓（只读）
-
-自动：`plugin-v*` tag → CI `git subtree split --prefix=packages/dsh-elab-cockpit`
-→ `git push --force` 到 `xkk6663/dsh-elab-cockpit:main`（需 secret `PLUGIN_MIRROR_TOKEN`）。
-
-手动（CI 无 secret / 本机代发）：
-
-```powershell
-.\scripts\mirror-plugin.ps1            # 等价逻辑
-.\scripts\mirror-plugin.ps1 -DryRun    # 只切子树不推送
-```
-
-排障：
-
-- 脚本要求**插件子树已提交**（dirty 直接退出）。
-- CI 403 多半是 `PLUGIN_MIRROR_TOKEN` 缺失或 PAT 无镜像仓 `contents:write`。
-- 镜像仓**禁止手工提交**，下次发布会被强推覆盖。
-
-## 7. npm 发布
+## 6. npm 发布
 
 ```powershell
 cd packages/dsh-elab-cockpit
@@ -122,39 +103,36 @@ npm publish                         # 默认 latest
   `icon.svg`、`locale`、`README.md`、`screenshots.json`、`assets`。
 - 回退展示版本：`npm dist-tag add dsh-elab-cockpit@<旧版本> latest`（不是删版本）。
 
-## 8. dsh-market（awesome-dsh-plugin）
+## 7. dsh-market（awesome-dsh-plugin）
 
 - 市场条目 `data/plugins/xkk6663__elab-flow--packages-dsh-elab-cockpit.yml` 只存
   `url/name/category/description`；版本、下载量、截图由**每日探针**从本仓刷新。
-- 因此常规发版**不需要**改市场条目：推镜像 + npm 后等探针即可。
+- 因此常规发版**不需要**改市场条目：npm 发布后等探针即可（市场按主仓子目录取内容）。
 - 只有分类 / 简介 / 名字这类展示信息变化时才提 PR；投稿备份在
   `packages/dsh-elab-cockpit/docs/dsh-market-submission/`。
 - 截图来源：插件根 `screenshots.json`（路径相对包根），新图必须同时进 `assets/`。
 
-## 9. 发布后核对
+## 8. 发布后核对
 
 | 项 | 命令 / 来源 |
 |---|---|
-| CI（main / tag） | `https://github.com/xkk6663/elab-flow/actions/workflows/plugin.yml/badge.svg?branch=main`（**不需要 token、不限流**，注意缓存，加 `&cb=<随机数>`） |
+| CI（main） | `https://github.com/xkk6663/elab-flow/actions/workflows/plugin.yml/badge.svg?branch=main`（**不需要 token、不限流**，注意缓存，加 `&cb=<随机数>`） |
 | 主仓 tag | `git ls-remote --tags origin v3.0.0`（`^{}` 行才是提交） |
-| 镜像版本 | `https://raw.githubusercontent.com/xkk6663/dsh-elab-cockpit/main/package.json` |
-| 镜像内容 | `https://raw.githubusercontent.com/xkk6663/dsh-elab-cockpit/main/<被删/改的文件>` |
 | npm | `npm view dsh-elab-cockpit version dist-tags` |
 | 市场 | `awesome-dsh-plugin.com/p/xkk6663/elab-flow--packages-dsh-elab-cockpit/`（探针有延迟） |
 | 面板 | DSH 里面板标题旁版本 / `GET /api/capabilities` 的 `cockpit.version` |
 
 - **GitHub REST API 未认证时限流（60 次/小时，共享出口 IP 很容易 403）**：核对优先用
-  badge / `raw.githubusercontent.com`，查 `actions/runs` 留给需要查看失败日志时。
+  badge，查 `actions/runs` 留给需要查看失败日志时。
 
-## 10. 回滚
+## 9. 回滚
 
 - 主仓：`git revert <commit>` + 新 tag；**不要**强推 main。
-- 镜像：`scripts/mirror-plugin.ps1` 指向旧提交（脚本按当前 HEAD 切子树，回滚需先 revert）。
 - npm：只能发更高版本修，或用 `dist-tag` 把 `latest` 指回旧版本。
 - 插件降级：用户侧固定旧版本安装；内核 `COCKPIT_VERSION` 与插件 `MIN_KERNEL_VERSION`
   决定兼容提示。
 
-## 11. 纪律
+## 10. 纪律
 
 - 业务层（`services/elab/**`、`cockpit/server.py`）与工具层（`packages/dsh-elab-cockpit/**`）
   不跨层 import；插件只走 loopback HTTP ICD。

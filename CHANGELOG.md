@@ -37,6 +37,10 @@
 
 - 删除临时产物、Python 缓存与未引用截图；文档按四类归档，插件 README 用真实 DSH
   宿主截图重写（行 / 波形 / 参数预览 / 运行 / 暂停 / 停止）。
+- **退役插件镜像仓分发链路**：删除 `.github/workflows/publish-plugin.yml` 与
+  `scripts/mirror-plugin.ps1`；插件市场与 npm 直接取本仓 `packages/dsh-elab-cockpit`
+  子目录，`plugin-v*` tag 仅记录版本、不再触发任何分发工作流。相关文档与发版 skill
+  同步改写，历史设计文档标注「已退役」。
 
 ## [DSH 插件 0.4.0] — 2026-11-02（串口发送组件 · 波形与跟随修复 · README 重写）
 

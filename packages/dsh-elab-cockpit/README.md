@@ -1,9 +1,8 @@
 # dsh-elab-cockpit
 
-> **只读镜像**：本仓源码的唯一事实源在主仓
-> [`xkk6663/elab-flow`](https://github.com/xkk6663/elab-flow) 的 `packages/dsh-elab-cockpit/`。
-> 这里的提交由 CI 用 `git subtree split` 自动推送，**请勿在本仓改代码**——改动会随下次镜像被覆盖。
-> 开发、提 issue、跑门禁请到主仓（`npm test` / `npm run build` 的 cwd 为 `packages/dsh-elab-cockpit`）。
+> 本目录即插件包本体，位于主仓 [`xkk6663/elab-flow`](https://github.com/xkk6663/elab-flow)
+> 的 `packages/dsh-elab-cockpit/`。插件市场按该子目录安装，npm 也从该目录发布 ——
+> 没有额外的镜像/分发仓。开发、提 issue、跑门禁请到主仓（cwd = 本目录）。
 
 elab-Flow 闭环驾驶舱的 DSH 插件 —— 一块**嵌入式闭环开发**面板，也是一个**给用户看的驾驶舱**。
 
@@ -212,13 +211,17 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 
 ## 安装
 
-本仓即插件包本体（`package.json` 自带 `dsh.bundle` / `dsh.client` 声明），仓库已打
-GitHub topic `dsh-plugin` 供 DSH 市场发现。本地开发时把本仓链接进 DSH profile 的
-`node_modules` 即可，无需拷贝源码。
+本目录即插件包本体（`package.json` 自带 `dsh.bundle` / `dsh.client` 声明）。
 
-> 本仓是**只读镜像**：改代码请到主仓 `xkk6663/elab-flow` 的
-> `packages/dsh-elab-cockpit/`，打 `plugin-v*` tag（或手动触发 `publish-plugin`）
-> 后由 CI 强推到这里。
+```bash
+# DSH 市场（条目指向主仓子目录）
+dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit
+
+# npm
+npm install dsh-elab-cockpit
+```
+
+本地开发时把本目录链接进 DSH profile 的 `node_modules` 即可，无需拷贝源码。
 
 ## 开发与验证（cwd = 主仓的 `packages/dsh-elab-cockpit`）
 
