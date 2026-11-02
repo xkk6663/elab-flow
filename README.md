@@ -86,7 +86,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 
 ```text
 主仓 xkk6663/elab-flow ── 唯一事实源（可写）
- ├─ npm publish（cwd = packages/dsh-elab-cockpit，手动）→ npm dsh-elab-cockpit@0.4.x
+ ├─ npm publish（cwd = packages/dsh-elab-cockpit，手动）→ npm dsh-elab-cockpit@latest
  └─ PR → awesome-dsh-plugin 目录仓 → 每日构建 → 市场网页
                                                 （条目指向主仓子目录，安装走 #path:/packages/dsh-elab-cockpit）
 芯片包：本仓 market/index.json + 外置包仓（如 elab-pack-artery-at32，按 commit + sha256 固定）
