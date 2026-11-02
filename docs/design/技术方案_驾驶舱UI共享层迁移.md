@@ -110,8 +110,8 @@ dsh-elab-cockpit ┘        ↑ 只被构建期内联/打包，不成为任何�
 
 | # | 源 | 目标 | 处理 |
 |---|---|---|---|
-| 1 | `cockpit/web/src/api/types.ts`（566 行） | `core/src/icd.ts` | 抽纯类型；web 保留 `api/types.ts` 作为 `export * from '@elab/cockpit-ui-core'` 的兼容壳 |
-| 2 | `packages/dsh-elab-cockpit/src/domain/icd.ts` | `core/src/icd.ts` | 同上；**门禁加白名单**（见 §6.2） |
+| 1 | `cockpit/web/src/api/types.ts`（566 行） | `core/src/icd.ts` | 抽纯类型（含 `EVENT_SCHEMA_VERSION` / `KNOWN_TOPICS`，Python 守卫改读共享层）；web `api/types.ts` 只留 `export * from '@elab/cockpit-ui-core'` |
+| 2 | `packages/dsh-elab-cockpit/src/domain/icd.ts` | 暂不转发 | **例外**：icd 是 host 半也引用的合同，host 构建（`tsc -p tsconfig.host.json`，`rootDir=src`）无法把 core 源文件纳入同一 program（TS6059）→ 保留自包含镜像，改字段需与 core 两处同步；边界门禁白名单只放行纯 client 侧的 channels/run |
 | 3 | 两侧 `store/logs.ts`（214 / 214，99%） | `core/src/log-buffer.ts` | 直接合并为一份；两侧改为薄适配（各自导出原函数名，避免改调用点） |
 
 验收：两侧行为不变；日志截断/序号用例在共享包里跑。
@@ -122,6 +122,7 @@ dsh-elab-cockpit ┘        ↑ 只被构建期内联/打包，不成为任何�
 |---|---|---|---|
 | 4 | 两侧 `theme/ansi.ts`（84%） | `core/src/ansi.ts` | 拆成 `parseSgr()` 纯函数 + `palette` 参数；web 传自带色板，插件传 `dsw-map` 映射后的色板 |
 | 5 | 两侧 `serial/bytes.ts`（40%） | `core/src/bytes.ts` | 以 web 版为基准（功能更全），插件侧删掉分叉实现；差异点先列清单再合并 |
+| 5b | 插件 `domain/channels.ts` | `core/src/channels.ts` | 通道归类迁入；`debug_verify` 的宿主差异参数化（web 默认并进 flash，插件传 `debugChannel:true` 拆出调试） |
 
 验收：ANSI 双主题截图对比（终端里跑同一段带 SGR 的字节流），HEX 视图一致。
 
@@ -137,6 +138,15 @@ dsh-elab-cockpit ┘        ↑ 只被构建期内联/打包，不成为任何�
 
 `serial/useSerialStream.ts`、`events/sse.ts`、`SerialWorkspace.tsx` / `SerialPane.tsx`、全部布局组件。
 理由：它们承载"传输 + 会话 + 形态"三件事，共享会把两套产品的差异压进参数，反而更难维护。
+
+### 5.5 批次状态（2026-11-02）
+
+| 批次 | 状态 | 落点 |
+|---|---|---|
+| 第 1 批（类型 + 日志环） | ✅ | `core/src/{icd,log-buffer}.ts`；web `api/types.ts` 转发、`store/runStore.ts` 走 core 归约；插件 `domain/icd.ts` 保留自包含（见 5.1-2） |
+| 第 2 批（ANSI + 字节面 + 通道） | ✅ | `core/src/{ansi,bytes,channels}.ts`；插件 `domain/channels.ts` 变薄包装（`debugChannel:true`） |
+| 第 3 批（事件归约） | ✅ | `core/src/run-events.ts`；两侧 store 外壳保留，纯函数（`IDLE/reduce/markStreamClosed`）来自 core |
+| 暂不迁移 | 维持 | 见 5.4；另 `app/ports.ts` 客户端端口段**暂缓**：`SerialPort` 与 icd 同名硬件端口类型冲突，且 web 侧暂无消费者 |
 
 ---
 
@@ -172,10 +182,12 @@ alias: { '@elab/cockpit-ui-core': resolve(pkg, '../cockpit-ui-core/src/index.ts'
 "paths": { "@elab/cockpit-ui-core": ["../cockpit-ui-core/src/index.ts"] }
 ```
 
-3. `domain/icd.ts` 改为 `export * from '@elab/cockpit-ui-core'` 会导致 §4.4-1 失败，
-   因此 [boundary.test.mjs](../../packages/dsh-elab-cockpit/test/boundary.test.mjs#L83-L94) 需加一条**显式白名单**：
-   `domain/**` 允许 `@elab/cockpit-ui-core`（并在注释里写明"纯类型，无 React/I/O"）。
-4. `package.json` 的 `files` **不变**（`lib/` 已内联）；`dependencies` **不变**。
+3. `domain/icd.ts` **不转发**（host 构建 `rootDir=src` 会 TS6059，见 §5.1-2）；
+   [boundary.test.mjs](../../packages/dsh-elab-cockpit/test/boundary.test.mjs) 的白名单只放行
+   `domain/{channels,run}.ts` 引用 `@elab/cockpit-ui-core`（纯类型/常量，无 React/I/O）。
+4. `npm test` 跑的是**源码**，Node 不知道 esbuild 别名 → 加测试期解析钩子
+   `test/core-hooks.mjs`（`--import` 预载 `test/core-resolver.mjs`，把裸包名指向 core `src/index.ts`）。
+5. `package.json` 的 `files` **不变**（`lib/` 已内联）；`dependencies` **不变**。
 
 ### 6.3 WebUI 侧接线
 

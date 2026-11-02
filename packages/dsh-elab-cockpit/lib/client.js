@@ -59,7 +59,182 @@ var useMemo = globalThis.__ELAB_HOST_REACT__.useMemo;
 var useCallback = globalThis.__ELAB_HOST_REACT__.useCallback;
 var useSyncExternalStore = globalThis.__ELAB_HOST_REACT__.useSyncExternalStore;
 
-// src/domain/run.ts
+// ../cockpit-ui-core/src/ansi.ts
+var FG = {
+  30: "black",
+  31: "red",
+  32: "green",
+  33: "yellow",
+  34: "blue",
+  35: "magenta",
+  36: "cyan",
+  37: "white",
+  90: "bright-black",
+  91: "bright-red",
+  92: "bright-green",
+  93: "bright-yellow",
+  94: "bright-blue",
+  95: "bright-magenta",
+  96: "bright-cyan",
+  97: "bright-white"
+};
+var ESC = "\x1B";
+var SGR_RE = new RegExp(`${ESC}\\[([0-9;]*)m`, "g");
+function parseAnsi(input) {
+  if (!input) return [];
+  if (!input.includes(ESC)) return [{ text: input, cls: "" }];
+  const out = [];
+  let bold = false;
+  let colorCls = "";
+  let cursor = 0;
+  SGR_RE.lastIndex = 0;
+  const push = (text) => {
+    if (!text) return;
+    const parts = [];
+    if (colorCls !== "") parts.push(colorCls);
+    if (bold) parts.push("a-bold");
+    out.push({ text, cls: parts.join(" ") });
+  };
+  let m;
+  while ((m = SGR_RE.exec(input)) !== null) {
+    push(input.slice(cursor, m.index));
+    cursor = SGR_RE.lastIndex;
+    const codes = (m[1] || "0").split(";").map((s) => parseInt(s || "0", 10));
+    for (const code of codes) {
+      if (code === 0) {
+        bold = false;
+        colorCls = "";
+      } else if (code === 1) bold = true;
+      else if (code === 22) bold = false;
+      else if (FG[code]) colorCls = `a-${FG[code]}`;
+      else if (code === 39) colorCls = "";
+    }
+  }
+  push(input.slice(cursor));
+  return out;
+}
+function stripAnsi(text) {
+  return text.replace(SGR_RE, "");
+}
+
+// ../cockpit-ui-core/src/bytes.ts
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function printable(byte) {
+  return byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ".";
+}
+function hexOf(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    out.push(bytes[i].toString(16).padStart(2, "0").toUpperCase());
+  }
+  return out.join(" ");
+}
+function asciiOf(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += printable(bytes[i]);
+  return out;
+}
+function textOf(bytes, repr) {
+  if (repr === "hex") return hexOf(bytes);
+  if (repr === "ascii") return asciiOf(bytes);
+  const label = repr === "gbk" ? "gbk" : "utf-8";
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+}
+function hexDump(bytes, perRow = 16) {
+  const rows = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const hex = [];
+    for (let j = 0; j < perRow; j++) {
+      hex.push(j < slice.length ? slice[j].toString(16).padStart(2, "0").toUpperCase() : "..");
+    }
+    rows.push(
+      `${i.toString(16).padStart(4, "0")}  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  |${asciiOf(slice)}|`
+    );
+  }
+  return rows;
+}
+function byteClass(b) {
+  if (b < 32) return "ctl";
+  if (b === 127) return "del";
+  if (b <= 126) return "print";
+  return "high";
+}
+function hexDumpRows(bytes, perRow = 16) {
+  const rows = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const cells = [];
+    const ascii = [];
+    for (let j = 0; j < perRow; j++) {
+      if (j < slice.length) {
+        const b = slice[j];
+        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
+        ascii.push({ text: printable(b), cls: byteClass(b) });
+      } else {
+        cells.push({ text: "..", cls: "pad" });
+        ascii.push({ text: ".", cls: "pad" });
+      }
+    }
+    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
+  }
+  return rows;
+}
+function captureText(chunks) {
+  const head = [
+    "# elab serial capture",
+    `# chunks: ${chunks.length}`,
+    `# exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
+    ""
+  ];
+  const body = chunks.map(
+    (c) => `#${String(c.seq).padStart(5, "0")} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)
+` + hexDump(c.bytes).join("\n")
+  );
+  return head.join("\n") + body.join("\n\n") + "\n";
+}
+
+// ../cockpit-ui-core/src/channels.ts
+var LOG_CHANNELS = ["build", "flash", "debug", "serial", "tools"];
+var CHANNEL_LABEL = {
+  build: "\u6784\u5EFA",
+  flash: "\u70E7\u5F55",
+  debug: "\u8C03\u8BD5",
+  serial: "\u4E32\u53E3",
+  tools: "\u5DE5\u5177"
+};
+function channelOfStep(step, opts = {}) {
+  if (step.startsWith("tool:")) return "tools";
+  if (step === "flash") return "flash";
+  if (step === "debug_verify") return opts.debugChannel === true ? "debug" : "flash";
+  if (step === "monitor") return "serial";
+  return "build";
+}
+function channelOfEvent(e, opts = {}) {
+  const topic = String(e.topic ?? "");
+  const step = String(e.step ?? "");
+  if (topic.startsWith("serial/")) return "serial";
+  const isLogish = topic === "proc/stdout" || topic === "proc/stderr" || topic === "proc/stdout-batch" || topic === "run/step-enter" || topic === "run/step-exit";
+  if (!isLogish) return null;
+  if (step === "") return null;
+  return channelOfStep(step, opts);
+}
+
+// ../cockpit-ui-core/src/run-events.ts
 var IDLE = {
   run: null,
   project: "",
@@ -831,29 +1006,12 @@ function createCockpitService(deps) {
 }
 
 // src/domain/channels.ts
-var LOG_CHANNELS = ["build", "flash", "debug", "serial", "tools"];
-var CHANNEL_LABEL = {
-  build: "\u6784\u5EFA",
-  flash: "\u70E7\u5F55",
-  debug: "\u8C03\u8BD5",
-  serial: "\u4E32\u53E3",
-  tools: "\u5DE5\u5177"
-};
-function channelOfStep(step) {
-  if (step.startsWith("tool:")) return "tools";
-  if (step === "flash") return "flash";
-  if (step === "debug_verify") return "debug";
-  if (step === "monitor") return "serial";
-  return "build";
+var HOST_OPTIONS = { debugChannel: true };
+function channelOfStep2(step) {
+  return channelOfStep(step, HOST_OPTIONS);
 }
-function channelOfEvent(e) {
-  const topic = String(e.topic ?? "");
-  const step = String(e.step ?? "");
-  if (topic.startsWith("serial/")) return "serial";
-  const isLogish = topic === "proc/stdout" || topic === "proc/stderr" || topic === "proc/stdout-batch" || topic === "run/step-enter" || topic === "run/step-exit";
-  if (!isLogish) return null;
-  if (step === "") return null;
-  return channelOfStep(step);
+function channelOfEvent2(e) {
+  return channelOfEvent(e, HOST_OPTIONS);
 }
 
 // src/adapters/kernel-http/icd-client.ts
@@ -1877,155 +2035,6 @@ function ManualBar(props) {
     /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: confirm, style: { ...chipFor(true, false), padding: "2px 8px" } }, "\u786E\u8BA4"),
     /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: cancelConfirm, style: { ...chipFor(false, false), padding: "2px 8px" } }, "\u53D6\u6D88")
   ) : null);
-}
-
-// ../cockpit-ui-core/src/ansi.ts
-var FG = {
-  30: "black",
-  31: "red",
-  32: "green",
-  33: "yellow",
-  34: "blue",
-  35: "magenta",
-  36: "cyan",
-  37: "white",
-  90: "bright-black",
-  91: "bright-red",
-  92: "bright-green",
-  93: "bright-yellow",
-  94: "bright-blue",
-  95: "bright-magenta",
-  96: "bright-cyan",
-  97: "bright-white"
-};
-var ESC = "\x1B";
-var SGR_RE = new RegExp(`${ESC}\\[([0-9;]*)m`, "g");
-function parseAnsi(input) {
-  if (!input) return [];
-  if (!input.includes(ESC)) return [{ text: input, cls: "" }];
-  const out = [];
-  let bold = false;
-  let colorCls = "";
-  let cursor = 0;
-  SGR_RE.lastIndex = 0;
-  const push = (text) => {
-    if (!text) return;
-    const parts = [];
-    if (colorCls !== "") parts.push(colorCls);
-    if (bold) parts.push("a-bold");
-    out.push({ text, cls: parts.join(" ") });
-  };
-  let m;
-  while ((m = SGR_RE.exec(input)) !== null) {
-    push(input.slice(cursor, m.index));
-    cursor = SGR_RE.lastIndex;
-    const codes = (m[1] || "0").split(";").map((s) => parseInt(s || "0", 10));
-    for (const code of codes) {
-      if (code === 0) {
-        bold = false;
-        colorCls = "";
-      } else if (code === 1) bold = true;
-      else if (code === 22) bold = false;
-      else if (FG[code]) colorCls = `a-${FG[code]}`;
-      else if (code === 39) colorCls = "";
-    }
-  }
-  push(input.slice(cursor));
-  return out;
-}
-function stripAnsi(text) {
-  return text.replace(SGR_RE, "");
-}
-
-// ../cockpit-ui-core/src/bytes.ts
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
-  return out;
-}
-function bytesToB64(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-function printable(byte) {
-  return byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ".";
-}
-function hexOf(bytes) {
-  const out = [];
-  for (let i = 0; i < bytes.length; i++) {
-    out.push(bytes[i].toString(16).padStart(2, "0").toUpperCase());
-  }
-  return out.join(" ");
-}
-function asciiOf(bytes) {
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) out += printable(bytes[i]);
-  return out;
-}
-function textOf(bytes, repr) {
-  if (repr === "hex") return hexOf(bytes);
-  if (repr === "ascii") return asciiOf(bytes);
-  const label = repr === "gbk" ? "gbk" : "utf-8";
-  try {
-    return new TextDecoder(label, { fatal: false }).decode(bytes);
-  } catch {
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  }
-}
-function hexDump(bytes, perRow = 16) {
-  const rows = [];
-  for (let i = 0; i < bytes.length; i += perRow) {
-    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
-    const hex = [];
-    for (let j = 0; j < perRow; j++) {
-      hex.push(j < slice.length ? slice[j].toString(16).padStart(2, "0").toUpperCase() : "..");
-    }
-    rows.push(
-      `${i.toString(16).padStart(4, "0")}  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  |${asciiOf(slice)}|`
-    );
-  }
-  return rows;
-}
-function byteClass(b) {
-  if (b < 32) return "ctl";
-  if (b === 127) return "del";
-  if (b <= 126) return "print";
-  return "high";
-}
-function hexDumpRows(bytes, perRow = 16) {
-  const rows = [];
-  for (let i = 0; i < bytes.length; i += perRow) {
-    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
-    const cells = [];
-    const ascii = [];
-    for (let j = 0; j < perRow; j++) {
-      if (j < slice.length) {
-        const b = slice[j];
-        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
-        ascii.push({ text: printable(b), cls: byteClass(b) });
-      } else {
-        cells.push({ text: "..", cls: "pad" });
-        ascii.push({ text: ".", cls: "pad" });
-      }
-    }
-    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
-  }
-  return rows;
-}
-function captureText(chunks) {
-  const head = [
-    "# elab serial capture",
-    `# chunks: ${chunks.length}`,
-    `# exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
-    ""
-  ];
-  const body = chunks.map(
-    (c) => `#${String(c.seq).padStart(5, "0")} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)
-` + hexDump(c.bytes).join("\n")
-  );
-  return head.join("\n") + body.join("\n\n") + "\n";
 }
 
 // src/adapters/dsh-web/EvidenceTail.tsx
@@ -4730,7 +4739,7 @@ function CockpitPane(props) {
     const ingest = (e) => {
       const topic = String(e.topic ?? "");
       const step = String(e.step ?? "");
-      const ch = channelOfEvent({ topic, step: e.step });
+      const ch = channelOfEvent2({ topic, step: e.step });
       if (ch === null) return;
       const buf = buffersRef.current[ch] ?? (buffersRef.current[ch] = []);
       if (topic === "proc/stdout-batch") {
@@ -4891,7 +4900,7 @@ function CockpitPane(props) {
   );
   const onRunOne = useCallback(
     (id) => {
-      setChannel(channelOfStep(id));
+      setChannel(channelOfStep2(id));
       void service.runOne(id);
     },
     [service]
@@ -5144,7 +5153,7 @@ function CockpitPane(props) {
           density: tier,
           onFocus: (id) => {
             setFocusStep(id);
-            setChannel(channelOfStep(id));
+            setChannel(channelOfStep2(id));
           },
           onRunOne,
           progressOf: (id) => id === steps.find((s) => s.state === "running")?.id && snap.progress !== null ? { current: snap.progress.current, total: snap.progress.total } : null

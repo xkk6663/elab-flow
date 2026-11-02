@@ -37,6 +37,21 @@ const CROSS_ADAPTER_ALLOWED = [
   ['adapters/dsh-web/PackSettingsView.tsx', 'adapters/kernel-http/icd-client.ts'],
 ]
 
+/**
+ * domain/ 的白名单：只允许这几个文件引用**中性共享层**。
+ * `@elab/cockpit-ui-core` 是纯 TS（零 React、零 I/O、零业务/宿主依赖，
+ * 见 packages/cockpit-ui-core/test/purity.test.mjs）；它是"共享合同"，
+ * 不是第三层业务代码。除此之外 domain 仍只准 `./xxx`。
+ *
+ * ★ `domain/icd.ts` **不在**白名单：它是 host 半也引用的类型合同，而
+ *   host 构建（`tsc -p tsconfig.host.json`，rootDir=src）无法把 core 源文件
+ *   纳入同一 program（TS6059）。故 icd 仍是自包含镜像（与 core `src/icd.ts`
+ *   内容同源，改动需两处同步）；只有纯 client 侧的 channels/run 走共享层
+ *   （客户端半由 esbuild alias 内联，不受 rootDir 约束）。
+ */
+const DOMAIN_CORE_ALLOWED = ['domain/channels.ts', 'domain/run.ts']
+const CORE_PKG = '@elab/cockpit-ui-core'
+
 function walk(dir) {
   const out = []
   for (const name of readdirSync(dir)) {
@@ -80,14 +95,18 @@ test('§4.4-5 工具层 src 的相对 import 不得逃出包根', () => {
   }
 })
 
-test('§4.4-1 domain/ 纯净：只准 import 同目录与外部纯类型（零 I/O / 零宿主）', () => {
+test('§4.4-1 domain/ 纯净：只准 import 同目录与 `@elab/cockpit-ui-core`（白名单文件）', () => {
   for (const f of files.filter((f) => rel(f).startsWith('domain/'))) {
     const src = readFileSync(f, 'utf8')
     for (const m of src.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
       const spec = m[1]
+      const ok =
+        spec.startsWith('./') ||
+        (spec === CORE_PKG && DOMAIN_CORE_ALLOWED.includes(rel(f)))
       assert.ok(
-        spec.startsWith('./'),
-        `${rel(f)} 违反 domain 纯净：import '${spec}'（domain 只准同目录 './xxx'）`,
+        ok,
+        `${rel(f)} 违反 domain 纯净：import '${spec}'（domain 只准同目录 './xxx'；` +
+          `共享层仅在 ${DOMAIN_CORE_ALLOWED.join(' / ')} 白名单内）`,
       )
     }
   }

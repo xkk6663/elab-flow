@@ -33,7 +33,7 @@
     "dsh": "^0.2.0-rc.1"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test \"test/*.test.mjs\"",
+    "test": "node --experimental-strip-types --import ./test/core-hooks.mjs --test \"test/*.test.mjs\"",
     "build:host": "tsc -p tsconfig.host.json --outDir lib",
     "build:client": "node scripts/build-client.mjs",
     "verify:contract": "node scripts/verify-client-contract.mjs",

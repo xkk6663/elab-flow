@@ -10,7 +10,12 @@
 
 import { useSyncExternalStore } from 'react';
 
-import { IDLE, patch, reduce, type RunSnapshot } from '../../../domain/run.ts';
+import {
+  IDLE,
+  markStreamClosed as markStreamClosedPure,
+  reduce,
+  type RunSnapshot,
+} from '../../../domain/run.ts';
 import type { ElabEvent } from '../../../domain/icd.ts';
 
 let snapshot: RunSnapshot = IDLE;
@@ -61,17 +66,9 @@ export function lastSeq(): number {
  *   而实际上进程早就没了。宁可显式判失败，也不留一个假装在跑的界面。
  */
 export function markStreamClosed(reason: string): void {
-  if (snapshot.status !== 'running') return;
-  snapshot = patch(snapshot, {
-    status: 'failed',
-    endedAt: Date.now() / 1000,
-    currentStep: null,
-    steps: snapshot.steps.map((v) =>
-      v.state === 'running' || v.state === 'pending'
-        ? { ...v, state: 'failed' as const, detail: v.detail || `流已关闭（${reason}），未见收尾事件` }
-        : v,
-    ),
-  });
+  const next = markStreamClosedPure(snapshot, reason);
+  if (next === snapshot) return;
+  snapshot = next;
   emit();
 }
 

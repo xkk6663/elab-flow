@@ -15,7 +15,7 @@
  * 不改任何数据层语义（C24 SSE 单路 / C26 stream/closed / C28 留档非 state）。
  */
 
-import type { Capabilities, ElabEvent, ProjectCard } from "./api/types";
+import type { Capabilities, ProjectCard } from "./api/types";
 
 export type WorkspaceId = string;
 
@@ -158,45 +158,19 @@ export function workspaceById(
   return workspacesFor(card, caps).find((w) => w.id === id) ?? null;
 }
 
-/* ── 事件 → 通道归类（唯一规则，tabOfEvent 的继任者）───────── */
+/* ── 事件 → 通道归类（唯一规则在共享层，本宿主用默认口径）───────── */
 
 /**
  * 事件 → 日志通道名。null = 不属于任何日志通道（如 run/start、心跳类）。
  *
- * 规则（自上而下首条命中）：
+ * ★ 规则本体在 `@elab/cockpit-ui-core`（与 DSH 插件面板同一份）；
+ *   本宿主用默认口径：`debug_verify` 与 `flash` 共用「烧录」通道
+ *   （三列布局里烧录轨一并展示编程与调试校验输出）。
+ *
  *   1. `serial/*`                    → 串口
- *   2. step 为 `tool:<name>`         → 「工具」通道（所有工具共用一个工作区；
- *      step-enter/exit marker（"▶ 进入步骤 tool:ota"）区分是哪次工具）
+ *   2. step 为 `tool:<name>`         → 「工具」通道
  *   3. proc/* 与 run/step-* 按 step：
  *      flash / debug_verify → 烧录；monitor → 串口；其余 → 构建
  *      （doctor 归"构建"是有意的：宿主侧纯文本步骤共用一个面板）
  */
-export function channelOfEvent(e: ElabEvent): string | null {
-  const topic = String(e.topic || "");
-  const step = String(e.step || "");
-  if (topic.startsWith("serial/")) return "serial";
-  if (step.startsWith("tool:")) {
-    if (
-      topic === "proc/stdout" ||
-      topic === "proc/stderr" ||
-      topic === "proc/stdout-batch" ||
-      topic === "run/step-enter" ||
-      topic === "run/step-exit"
-    ) {
-      return "tools";
-    }
-    return null;
-  }
-  if (
-    topic === "proc/stdout" ||
-    topic === "proc/stderr" ||
-    topic === "proc/stdout-batch" ||
-    topic === "run/step-enter" ||
-    topic === "run/step-exit"
-  ) {
-    if (step === "flash" || step === "debug_verify") return "flash";
-    if (step === "monitor") return "serial";
-    return "build";
-  }
-  return null;
-}
+export { channelOfEvent } from "@elab/cockpit-ui-core";

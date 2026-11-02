@@ -386,10 +386,13 @@ class CockpitIntegration(unittest.TestCase):
         （服务端走"按 seq 重放"分支、发的是逐条 `proc/stdout`）却一切正常。
         这个"历史有、实时没有"的不对称，是本次排查里最费时的一环。
         """
-        ts = (ROOT / "cockpit" / "web" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
+        # 前端侧镜像已迁到中性共享层（packages/cockpit-ui-core/src/icd.ts）；
+        # cockpit/web/src/api/types.ts 只是薄转发壳，不再承载这张表。
+        ts = (ROOT / "packages" / "cockpit-ui-core" / "src" / "icd.ts").read_text(
+            encoding="utf-8")
         m = re.search(r"export const KNOWN_TOPICS\s*=\s*\[(.*?)\]\s*as const", ts, re.S)
         self.assertIsNotNone(
-            m, "解析不到 KNOWN_TOPICS —— types.ts 的形状变了，请同步本用例的解析方式")
+            m, "解析不到 KNOWN_TOPICS —— 共享层 icd.ts 的形状变了，请同步本用例的解析方式")
         frontend = set(re.findall(r'"([^"]+)"', m.group(1)))
 
         missing = sorted(srv_mod.SSE_TOPICS - frontend)
