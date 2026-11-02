@@ -601,3 +601,113 @@ export interface AdaptResponse {
    */
   next: { steps: string[]; hint: string };
 }
+
+// ── 适配包 / 社区市场（GET /api/packs、POST /api/pkg/*、GET /api/pkg/job）──
+// 事实源是内核 `elab.pkg.status()`（`services/elab/pkg.py`）；本文件只做镜像。
+// ★ 消费纪律与事件信封一致：不认识的字段一律忽略（内核可先行加字段）。
+
+/** pack.yaml 的 requires 握手（内核版本 / schema 版本）。 */
+export interface PkgRequires {
+  kernel_api?: string;
+  schema_version?: number;
+}
+
+/** 兼容性判定结果（不兼容时 reasons 是逐条原因，界面直接展示）。 */
+export interface PkgCompatibility {
+  ok: boolean;
+  reasons: string[];
+}
+
+/** 一条已装（或已发现）的适配包记录。 */
+export interface InstalledPack {
+  name: string;
+  version: string | null;
+  vendor: string | null;
+  platform: string | null;
+  status: "official" | "community";
+  license: string | null;
+  description: string;
+  dir: string;
+  installed: boolean;
+  /** 是否为**当前启用**的那一套（一次只启用一套） */
+  active: boolean;
+  sha256: string;
+  chips: string[];
+  requires: PkgRequires;
+  compatible: PkgCompatibility;
+}
+
+/** 市场索引里的一个条目（内容在作者仓库，索引只记元数据）。 */
+export interface MarketPack {
+  name: string;
+  vendor?: string;
+  platform?: string;
+  version: string;
+  description?: string;
+  status?: "official" | "community";
+  license?: string;
+  requires?: PkgRequires;
+  chips?: string[];
+  source?: {
+    type?: "git" | "archive" | "local";
+    url?: string;
+    ref?: string;
+    subdir?: string;
+    path?: string;
+  };
+  sha256?: string;
+  installed: boolean;
+  compatible: PkgCompatibility;
+}
+
+/** GET /api/packs 的响应（内核 `pkg.status()` 的投影）。 */
+export interface PacksStatus {
+  roots: string[];
+  install_root: string;
+  official_root: string;
+  /** 当前启用的包名；空串 = 没有启用任何包 */
+  active: string;
+  installed: InstalledPack[];
+  /** 芯片只来自当前启用包（与 Config.chips 同一事实源） */
+  chips: string[];
+  schema_version: number;
+  kernel_api: number;
+  /** market=0 时缺省 */
+  market?: {
+    path: string;
+    error: string | null;
+    warning: string | null;
+    packs: MarketPack[];
+  };
+}
+
+/** 包写动作（POST /api/pkg/<action>）。 */
+export type PkgAction = "install" | "remove" | "update" | "verify" | "activate" | "market";
+
+/** 包操作任务状态（异步 job：install/remove/update 走 202 + 轮询）。 */
+export type PkgJobState = "queued" | "running" | "ok" | "failed";
+
+/** GET /api/pkg/job 的响应（内核 PkgJobManager 快照）。 */
+export interface PkgJob {
+  id: string;
+  action: PkgAction;
+  name: string;
+  state: PkgJobState;
+  /** 人类可读的当前阶段（"安装：校验清单与来源" / "完成" / "失败"） */
+  stage: string;
+  /** 最近 200 行日志（服务端有界） */
+  log: string[];
+  started_at: string;
+  finished_at: string | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+}
+
+/** 单包校验结果（POST /api/pkg/verify）。 */
+export interface PkgVerifyResult {
+  name: string;
+  ok: boolean;
+  sha256: string;
+  problems: string[];
+  dir: string;
+}

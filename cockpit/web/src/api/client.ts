@@ -13,6 +13,9 @@ import type {
   SerialMonitorTail,
   SerialWriteResult,
   StepId,
+  PacksStatus,
+  PkgJob,
+  PkgVerifyResult,
 } from "./types";
 
 /** 后端契约版本；与 ICD 的 EVENT_SCHEMA_VERSION 比对，不一致就显式报错而不是渲染错位界面 */
@@ -35,6 +38,14 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(msg);
   }
   return body as T;
+}
+
+function post<T>(path: string, body: unknown): Promise<T> {
+  return req<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 export const api = {
@@ -260,6 +271,45 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts),
     }),
+
+  // ── 适配包 / 社区市场（与 DSH 面板同形；逻辑全在内核）──────────────
+  /** GET /api/packs：已装包 + （可选）市场条目。market=false 跳过市场索引读取。 */
+  packs: (opts?: { market?: boolean; q?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.market === false) q.set("market", "0");
+    if (opts?.q !== undefined && opts.q !== "") q.set("q", opts.q);
+    const qs = q.toString();
+    return req<PacksStatus>(`/api/packs${qs === "" ? "" : `?${qs}`}`);
+  },
+  /** GET /api/pkg/job：包操作任务快照（202 后 500ms 轮询）。 */
+  pkgJob: (jobId: string) =>
+    req<PkgJob>(`/api/pkg/job?job=${encodeURIComponent(jobId)}`),
+  /**
+   * POST /api/pkg/install：**只收包名**（来源与 sha256 由内核从市场索引解析）。
+   * official=true → 装本仓 `packs/official` 里的内置包（离线）。
+   */
+  pkgInstall: (opts: { name: string; official?: boolean; force?: boolean }) =>
+    post<PkgJob>("/api/pkg/install", {
+      name: opts.name,
+      ...(opts.official === true ? { official: true } : {}),
+      ...(opts.force === true ? { force: true } : {}),
+    }),
+  pkgRemove: (opts: { name: string }) => post<PkgJob>("/api/pkg/remove", { name: opts.name }),
+  pkgUpdate: (opts: { name?: string; force?: boolean } = {}) =>
+    post<PkgJob>("/api/pkg/update", {
+      ...(opts.name !== undefined && opts.name !== "" ? { name: opts.name } : {}),
+      ...(opts.force === true ? { force: true } : {}),
+    }),
+  /** verify 是同步 200（只读、快）。name 缺省 = 全部已装包。 */
+  pkgVerify: (opts: { name?: string } = {}) =>
+    post<{ ok: boolean; results: PkgVerifyResult[] }>("/api/pkg/verify", {
+      ...(opts.name !== undefined && opts.name !== "" ? { name: opts.name } : {}),
+    }),
+  /** 首次进入市场：现场遍历 GitHub 上现有 elab-pack 仓库（202 + job）。 */
+  marketRefresh: () => post<PkgJob>("/api/pkg/market", {}),
+  /** activate 是同步 200：启用一套已装包 + 重生成平台 skill + 重载 Config。 */
+  pkgActivate: (opts: { name: string }) =>
+    post<Record<string, unknown>>("/api/pkg/activate", { name: opts.name }),
 };
 
 /**

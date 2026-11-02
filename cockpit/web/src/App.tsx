@@ -19,10 +19,11 @@ import { AppFrame } from "./AppFrame";
 import { ProjectsRail } from "./rails/ProjectsRail";
 import { StageRail, fullLoopSteps } from "./rails/StageRail";
 import { EvidenceRail } from "./rails/EvidenceRail";
+import { PacksView } from "./rails/PacksView";
 import { Button } from "./primitives/Button";
 import { Pill } from "./primitives/Tag";
 import { Tooltip } from "./primitives/Tooltip";
-import { IconAlert, IconMoon, IconMonitor, IconSun, IconTerminal } from "./icons";
+import { IconAlert, IconChip, IconMoon, IconMonitor, IconSun, IconTerminal } from "./icons";
 import s from "./App.module.css";
 
 function errmsg(e: unknown): string {
@@ -77,6 +78,8 @@ export default function App() {
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
   const [conn, setConn] = useState<"idle" | "connecting" | "open" | "reconnecting">("idle");
+  /** 芯片适配包视图（市场 / 已安装；与 DSH 面板同形）。 */
+  const [packsOpen, setPacksOpen] = useState(false);
   // ★ 工作区化瘦身（2026-10-08）：autoScroll → EvidenceRail 本地态；
   //   clean/jobs → StageRail 本地态（随 onRunAll 上交）；波特率覆写与串口手写
   //   → 串口工作区本地态。App 只留连接/目录/选中/run 编排 —— SSE 编排
@@ -353,6 +356,11 @@ export default function App() {
         </Tooltip>
       ) : null}
       <span className={s.headerSpacer} />
+      <Tooltip side="bottom" tip="芯片适配包：市场搜索 / 已安装（一次只启用一套）">
+        <Button variant="toolbar" onClick={() => setPacksOpen(true)} aria-label="芯片适配包">
+          <IconChip />
+        </Button>
+      </Tooltip>
       {caps ? (
         <Tooltip
           side="bottom"
@@ -456,6 +464,14 @@ export default function App() {
         }
         projectsStripLabel={selected}
       />
+
+      {packsOpen ? (
+        <PacksView
+          runActive={run.status === "running"}
+          onClose={() => setPacksOpen(false)}
+          onActivated={() => void loadAll(false)}
+        />
+      ) : null}
 
       {notice ? (
         <div className={s.notice} role="status">

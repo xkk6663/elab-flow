@@ -1,0 +1,242 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--elab-space-4);
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  height: min(760px, 100%);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-lg);
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg-primary);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.title {
+  font-size: var(--elab-fs-md);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.active {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.tabs {
+  flex: 0 0 auto;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.frozen {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-run);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.job {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-raised);
+  font-size: var(--elab-fs-xs);
+}
+
+.jobHead {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+}
+
+.jobRun {
+  color: var(--elab-accent);
+}
+
+.jobOk {
+  color: var(--elab-status-ok);
+}
+
+.jobFail {
+  color: var(--elab-status-fail);
+}
+
+.jobLog {
+  margin-top: 3px;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--elab-font-mono);
+  color: var(--elab-fg-muted);
+}
+
+.notice {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-ok);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.error {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-fail);
+  border-bottom: 1px solid var(--elab-border);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sectionLabel {
+  margin: 6px 0 2px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+}
+
+.mutedText {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+
+.empty {
+  font-size: var(--elab-fs-xs);
+  line-height: 1.6;
+  color: var(--elab-fg-muted);
+}
+
+.footnote {
+  margin-top: 6px;
+  font-size: var(--elab-fs-xs);
+  line-height: 1.6;
+  color: var(--elab-fg-faint);
+}
+
+.warn {
+  margin-bottom: 4px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-run);
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-surface);
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.name {
+  font-size: var(--elab-fs-sm);
+  font-weight: 600;
+}
+
+.desc {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ver {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+
+.license {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+.chips {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+}
+
+.path {
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  word-break: break-all;
+  color: var(--elab-fg-faint);
+}
+
+.compatFail,
+.verifyFail {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-fail);
+}
+
+.verifyOk {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-status-ok);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
