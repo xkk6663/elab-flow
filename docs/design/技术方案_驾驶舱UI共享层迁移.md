@@ -162,14 +162,14 @@ dsh-elab-cockpit ┘        ↑ 只被构建期内联/打包，不成为任何�
 1. `build-client.mjs` 的 esbuild 配置加别名（内联，不产生运行时依赖）：
 
 ```js
-alias: { '@elab/cockpit-ui-core': resolve(pkg, '../../cockpit-ui-core/src/index.ts') }
+alias: { '@elab/cockpit-ui-core': resolve(pkg, '../cockpit-ui-core/src/index.ts') }
 ```
 
 2. `tsconfig.client.json` 加 `paths` 供编辑器与类型检查：
 
 ```json
 "baseUrl": ".",
-"paths": { "@elab/cockpit-ui-core": ["../../cockpit-ui-core/src/index.ts"] }
+"paths": { "@elab/cockpit-ui-core": ["../cockpit-ui-core/src/index.ts"] }
 ```
 
 3. `domain/icd.ts` 改为 `export * from '@elab/cockpit-ui-core'` 会导致 §4.4-1 失败，

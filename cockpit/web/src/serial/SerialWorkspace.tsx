@@ -15,7 +15,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { api } from "../api/client";
 import type { Capabilities, SerialChunk, SerialFormat } from "../api/types";
-import { parseAnsi } from "../theme/ansi";
+import { asciiOf, captureText, hexDump, hexDumpRows, parseAnsi, textOf } from "@elab/cockpit-ui-core";
+import type { SerialRepr } from "@elab/cockpit-ui-core";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { SegmentedTabs } from "../primitives/SegmentedTabs";
@@ -27,8 +28,6 @@ import {
   b64ToBytes,
   bytesToB64,
 } from "./ansiTerminal";
-import { asciiOf, captureText, hexDump, hexDumpRows, textOf } from "./bytes";
-import type { SerialRepr } from "./bytes";
 import type { SerialStream } from "./useSerialStream";
 import s from "./SerialWorkspace.module.css";
 

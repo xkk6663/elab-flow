@@ -1879,7 +1879,7 @@ function ManualBar(props) {
   ) : null);
 }
 
-// src/adapters/dsh-web/theme/ansi.ts
+// ../cockpit-ui-core/src/ansi.ts
 var FG = {
   30: "black",
   31: "red",
@@ -1935,6 +1935,97 @@ function parseAnsi(input) {
 }
 function stripAnsi(text) {
   return text.replace(SGR_RE, "");
+}
+
+// ../cockpit-ui-core/src/bytes.ts
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+function printable(byte) {
+  return byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ".";
+}
+function hexOf(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    out.push(bytes[i].toString(16).padStart(2, "0").toUpperCase());
+  }
+  return out.join(" ");
+}
+function asciiOf(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += printable(bytes[i]);
+  return out;
+}
+function textOf(bytes, repr) {
+  if (repr === "hex") return hexOf(bytes);
+  if (repr === "ascii") return asciiOf(bytes);
+  const label = repr === "gbk" ? "gbk" : "utf-8";
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+}
+function hexDump(bytes, perRow = 16) {
+  const rows = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const hex = [];
+    for (let j = 0; j < perRow; j++) {
+      hex.push(j < slice.length ? slice[j].toString(16).padStart(2, "0").toUpperCase() : "..");
+    }
+    rows.push(
+      `${i.toString(16).padStart(4, "0")}  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  |${asciiOf(slice)}|`
+    );
+  }
+  return rows;
+}
+function byteClass(b) {
+  if (b < 32) return "ctl";
+  if (b === 127) return "del";
+  if (b <= 126) return "print";
+  return "high";
+}
+function hexDumpRows(bytes, perRow = 16) {
+  const rows = [];
+  for (let i = 0; i < bytes.length; i += perRow) {
+    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
+    const cells = [];
+    const ascii = [];
+    for (let j = 0; j < perRow; j++) {
+      if (j < slice.length) {
+        const b = slice[j];
+        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
+        ascii.push({ text: printable(b), cls: byteClass(b) });
+      } else {
+        cells.push({ text: "..", cls: "pad" });
+        ascii.push({ text: ".", cls: "pad" });
+      }
+    }
+    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
+  }
+  return rows;
+}
+function captureText(chunks) {
+  const head = [
+    "# elab serial capture",
+    `# chunks: ${chunks.length}`,
+    `# exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
+    ""
+  ];
+  const body = chunks.map(
+    (c) => `#${String(c.seq).padStart(5, "0")} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)
+` + hexDump(c.bytes).join("\n")
+  );
+  return head.join("\n") + body.join("\n\n") + "\n";
 }
 
 // src/adapters/dsh-web/EvidenceTail.tsx
@@ -2169,96 +2260,6 @@ function EvidenceTail(props) {
       renderLine(line.text)
     ))
   )));
-}
-
-// src/adapters/dsh-web/serial/bytes.ts
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
-  return out;
-}
-function bytesToB64(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
-function printable(byte) {
-  return byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ".";
-}
-function hexOf(bytes) {
-  const out = [];
-  for (let i = 0; i < bytes.length; i += 1) out.push(bytes[i].toString(16).padStart(2, "0").toUpperCase());
-  return out.join(" ");
-}
-function asciiOf(bytes) {
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 1) out += printable(bytes[i]);
-  return out;
-}
-function textOf(bytes, repr) {
-  if (repr === "hex") return hexOf(bytes);
-  if (repr === "ascii") return asciiOf(bytes);
-  const label = repr === "gbk" ? "gbk" : "utf-8";
-  try {
-    return new TextDecoder(label, { fatal: false }).decode(bytes);
-  } catch {
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  }
-}
-function hexDump(bytes, perRow = 16) {
-  const rows = [];
-  for (let i = 0; i < bytes.length; i += perRow) {
-    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
-    const hex = [];
-    for (let j = 0; j < perRow; j += 1) {
-      hex.push(j < slice.length ? slice[j].toString(16).padStart(2, "0").toUpperCase() : "..");
-    }
-    rows.push(
-      `${i.toString(16).padStart(4, "0")}  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  |${asciiOf(slice)}|`
-    );
-  }
-  return rows;
-}
-function byteClass(b) {
-  if (b < 32) return "ctl";
-  if (b === 127) return "del";
-  if (b <= 126) return "print";
-  return "high";
-}
-function hexDumpRows(bytes, perRow = 16) {
-  const rows = [];
-  for (let i = 0; i < bytes.length; i += perRow) {
-    const slice = bytes.subarray(i, Math.min(i + perRow, bytes.length));
-    const cells = [];
-    const ascii = [];
-    for (let j = 0; j < perRow; j += 1) {
-      if (j < slice.length) {
-        const b = slice[j];
-        cells.push({ text: b.toString(16).padStart(2, "0").toUpperCase(), cls: byteClass(b) });
-        ascii.push({ text: printable(b), cls: byteClass(b) });
-      } else {
-        cells.push({ text: "..", cls: "pad" });
-        ascii.push({ text: ".", cls: "pad" });
-      }
-    }
-    rows.push({ offset: i.toString(16).padStart(4, "0"), cells, ascii });
-  }
-  return rows;
-}
-function captureText(chunks) {
-  const head = [
-    "# elab serial capture",
-    `# chunks: ${chunks.length}`,
-    `# exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
-    ""
-  ];
-  const body = chunks.map(
-    (c) => `#${String(c.seq).padStart(5, "0")} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)
-` + hexDump(c.bytes).join("\n")
-  );
-  return `${head.join("\n") + body.join("\n\n")}
-`;
 }
 
 // src/adapters/dsh-web/serial/ansiTerminal.ts

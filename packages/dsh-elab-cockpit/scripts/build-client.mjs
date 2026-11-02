@@ -34,6 +34,10 @@ const result = await build({
   jsxFragment: 'React.Fragment',
   // React 由宿主模块表提供，绝不打包进来
   external: ['react'],
+  // 中性共享层（与 cockpit/web 同一份纯逻辑）：源码内联，不产生运行时依赖
+  alias: {
+    '@elab/cockpit-ui-core': resolve(pkg, '../cockpit-ui-core/src/index.ts'),
+  },
   loader: { '.tsx': 'tsx', '.ts': 'ts' },
   // 关键：把 react 的 import 保留为运行时 require
   plugins: [

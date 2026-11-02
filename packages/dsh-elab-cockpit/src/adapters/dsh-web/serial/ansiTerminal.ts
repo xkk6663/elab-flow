@@ -1,7 +1,7 @@
 /**
  * ANSI **流式**终端解析器 —— 移植自 `cockpit/web/src/serial/ansiTerminal.ts`。
  *
- * 与 `theme/ansi.ts` 的区别：那边是"一行日志 → span"，无状态、逐行；
+ * 与 `@elab/cockpit-ui-core` 的 ansi.ts 区别：那边是"一行日志 → span"，无状态、逐行；
  * 这里要按**字节流**维护屏幕状态 —— `\r` 覆写同一行、`\b` 退格、
  * CSI SGR/K/J 改色清屏，多字节字符跨批次也不能被截断成乱码。
  */

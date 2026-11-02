@@ -3,10 +3,25 @@
  *
  * 原文永远在 `SerialChunk.data_b64`；这里只做显示与导出，不改变任何采集语义。
  * 注意：逐批独立解码在**多字节字符跨批次**时可能产生 `�` —— 终端视图因此
- * 走 `StreamTextDecoder`（保持状态），这里只服务"字节/行"这类无状态视图。
+ * 走带状态的流式解码器（各宿主自带），这里只服务"字节/行"这类无状态视图。
  */
 
 export type SerialRepr = "hex" | "ascii" | "utf8" | "gbk";
+
+/** base64 → 字节（浏览器/Node 18+ 自带 atob，不引依赖）。 */
+export function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** 字节 → base64（解码请求/导出用）。 */
+export function bytesToB64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
 
 export function printable(byte: number): string {
   return byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ".";
@@ -116,7 +131,7 @@ export function captureText(chunks: Array<{ seq: number; dir: string; t: string;
   ];
   const body = chunks.map(
     (c) =>
-      `#000${c.seq} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)\n` +
+      `#${String(c.seq).padStart(5, "0")} ${c.dir.toUpperCase()} ${c.t} (${c.bytes.length} B)\n` +
       hexDump(c.bytes).join("\n"),
   );
   return head.join("\n") + body.join("\n\n") + "\n";

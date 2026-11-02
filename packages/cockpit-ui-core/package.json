@@ -1,0 +1,13 @@
+{
+  "name": "@elab/cockpit-ui-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "驾驶舱 UI 中性共享层：纯 TS 逻辑（ANSI / 字节面 / 日志环），供 cockpit/web 与 dsh-elab-cockpit 构建期共用",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/*.test.mjs\""
+  }
+}

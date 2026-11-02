@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
+import { parseAnsi } from "@elab/cockpit-ui-core";
 import type { LogLine, LogRing } from "../store/logs";
-import { parseAnsi } from "../theme/ansi";
 import s from "./LogView.module.css";
 
 /**

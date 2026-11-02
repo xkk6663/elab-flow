@@ -16,9 +16,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { SerialPort } from '../../app/ports.ts'
 import type { SerialChunk } from '../../domain/icd.ts'
-import { parseAnsi } from './theme/ansi.ts'
-import { b64ToBytes, bytesToB64, captureText, hexDump, hexDumpRows, textOf } from './serial/bytes.ts'
-import type { HexRow, SerialRepr } from './serial/bytes.ts'
+import {
+  b64ToBytes,
+  bytesToB64,
+  captureText,
+  hexDump,
+  hexDumpRows,
+  parseAnsi,
+  textOf,
+} from '@elab/cockpit-ui-core'
+import type { HexRow, SerialRepr } from '@elab/cockpit-ui-core'
 import { AnsiTerminal, StreamTextDecoder } from './serial/ansiTerminal.ts'
 import type { TermLine } from './serial/ansiTerminal.ts'
 import type { SerialStream } from './serial/useSerialStream.ts'

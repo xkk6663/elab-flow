@@ -4,8 +4,11 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "rewriteRelativeImportExtensions": true,
-    "outDir": "build/client",
-    "rootDir": "src",
+    // 只做类型检查（CI: tsc --noEmit）；不设 rootDir —— 会 import 包外的共享层源码
+    "baseUrl": ".",
+    "paths": {
+      "@elab/cockpit-ui-core": ["../cockpit-ui-core/src/index.ts"]
+    },
     "strict": true,
     "skipLibCheck": true,
     "jsx": "react",

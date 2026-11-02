@@ -18,7 +18,7 @@ import type { ReactNode } from 'react'
 
 import type { LogChannelId } from '../../domain/channels.ts'
 import { CHANNEL_LABEL, LOG_CHANNELS } from '../../domain/channels.ts'
-import { parseAnsi, stripAnsi } from './theme/ansi.ts'
+import { parseAnsi, stripAnsi } from '@elab/cockpit-ui-core'
 
 /** 日志尾可见的最大行数（窄栏；原驾驶舱 4000，实测单 run 最大 12KB 可承受）。 */
 /** ANSI → span 序列；无 ESC 时原样返回字符串，避免多余节点（§5.5.3）。 */
