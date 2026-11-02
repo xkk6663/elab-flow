@@ -1,7 +1,7 @@
 # AGENTS.md — elab-Flow 仓库工作规则（给本仓工作的 agent）
 
 本仓库 = **业务层（elab 内核）+ 工具层（DSH 插件）**。分层边界见
-`docs/技术方案_dsh-elab-flow插件移植.md` §16。
+`docs/design/技术方案_dsh-elab-flow插件移植.md` §16。
 
 ## 层与归属
 
@@ -13,7 +13,6 @@
 | **数据层（适配包）** | `packs/official/**`、`packs/installed/**` | 芯片参数 / 厂商指纹 / 平台坑位 —— **芯片知识的唯一宿主**；骨架仓不内置任何芯片 |
 | **数据层（市场）** | `market/index.json` | 零服务器社区市场索引（包内容留在作者仓库，索引只记 name/version/source/sha256/requires/license） |
 | **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件（开发工具整合器）：面板可视化、进程托管、`elab_*` agent 工具；源码在本仓。对外分发仓 [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit) 是**只读镜像**，由 CI 自动推送 |
-| **工具层** | `packages/dsh-elab-iframe/**` | 历史探针包（已退役，仅存档） |
 
 ## Agent 边界规则（硬）
 

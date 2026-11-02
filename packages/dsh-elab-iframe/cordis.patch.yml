@@ -1,8 +1,0 @@
-# dsh-elab-iframe bundle patch
-#
-# P0 探针包：与 dsh-elab-cockpit 平级、互不依赖。
-# 探针测完保留，升级为「大屏模式」入口（§8.0.3）。
-- insert:
-    - id: elab-iframe
-      name: 'dsh-elab-iframe'
-      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-elab-iframe' && e.options.id !== 'elab-iframe' && !e.disabled)"

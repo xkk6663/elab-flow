@@ -46,7 +46,7 @@
 |---|---|---:|---|
 | Host 服务 | `cockpit/server.py` | 1352 | **不迁移**；进程托管 + 反代 |
 | 业务内核 | `services/elab/**` | 1.2 MB | **不迁移**；保持 Python 侧唯一实现 |
-| 事件契约 | `docs/ICD_cockpit_events.md` + `kernel/events.py` | — | **不动**（兼容性承诺） |
+| 事件契约 | `docs/design/ICD_cockpit_events.md` + `kernel/events.py` | — | **不动**（兼容性承诺） |
 | API 类型 | `cockpit/web/src/api/types.ts` | 486 | **原样复用** |
 | API 客户端 | `api/client.ts` | 188 | 改 baseURL（`/api/` → `/elab/api/`），逻辑不动 |
 | 事件通道 | `events/sse.ts` | 161 | **保留 SSE**，仅改端点 + 重连语义对齐 Host 半 |
@@ -228,7 +228,7 @@ function spawnCockpit(opts: { python: string; root: string; dist?: string }): Pr
 |---|---|---|
 | 改动面 | Host 半 ~80 行（`pipe` + 头透传），前端 `sse.ts` 仅改 URL | Host 半 ~250 行（升级、心跳、背压、二进制帧、重连状态机）+ 前端换 `EventSource`→`WebSocket` |
 | 断线续传 | 天然：浏览器/自实现客户端带 `Last-Event-ID`，服务端 `max(from, leid)` 已实现 | 必须自己在握手 query 里带 `from`，并复刻服务端的 `max()` 语义 |
-| 服务端已做的两件难事 | `proc/stdout-batch` 100ms 合帧 + `stream/overrun` 背压丢弃计数 + `stream/closed` 显式收尾 —— **全部免费继承** | 需要重写同语义（已知它们是踩过坑才有的，见 `docs/技术方案_闭环驾驶舱.md` §17.3） |
+| 服务端已做的两件难事 | `proc/stdout-batch` 100ms 合帧 + `stream/overrun` 背压丢弃计数 + `stream/closed` 显式收尾 —— **全部免费继承** | 需要重写同语义（已知它们是踩过坑才有的，见 `docs/design/技术方案_闭环驾驶舱.md` §17.3） |
 | 风险 | 面板不可见（tab 未选中）时 `EventSource` 仍连，浪费连接（`MAX_SSE_CONNS` 上限）→ 用"不可见即断开、可见即 `from=lastSeq` 重连"解决 | 无此问题（可主动 close） |
 | 结论 | **首选**，并把"可见性驱动的连接开关"写进 P2 验收 | 仅当未来要跨进程/跨设备推送时再考虑 |
 
@@ -1275,8 +1275,8 @@ run r-ca3ffae4:  proc.jsonl 12.4 KB（改前 0.9 KB）
 | iframe 嵌入 cockpit 页面 | ❌ 拿不到 `--dsw-alias-*`、深浅色、locale | **否决** |
 | 宿主 React 树内渲染 | ✅ 原生令牌 | **采用** |
 
-**处置**：`packages/dsh-elab-iframe/` 已从 profile 卸载（包体保留在仓库里作为历史记录，
-其 Host 半代码可复用于"独立窗口"跳转，但**不再作为面板形态**）。
+**处置**：`packages/dsh-elab-iframe/` 已从 profile 卸载，**2026-11-02 整包删除**
+（其 Host 半代码可在 git 历史中查阅，但**不再作为面板形态**）。
 宽度测量改为 `dsh-elab-cockpit` 内的一个临时 React 面板（同槽位、同令牌），
 测完即删，读数回填 §5.4。
 

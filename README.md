@@ -14,7 +14,7 @@
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
 
-[项目定位](#position) · [快速上手](#quickstart) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
+[项目定位](#position) · [架构与仓库依赖](#arch) · [快速上手](#quickstart) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
 
 <img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱" width="100%">
 
@@ -61,7 +61,11 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 - **步骤 / 档位 / 串口词汇的唯一事实源在内核**（`cockpit/server.py` 的
   `STEP_META` / `KERNEL_PLANS` / `SERIAL_META`）。工具层只渲染；内核加一步，面板与 agent 工具自动跟上。
 
-### 两层结构
+<a id="arch"></a>
+
+### 架构与仓库依赖
+
+四层依赖严格单向（反向依赖被 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 拦截）：
 
 | 层 | 路径 | 职责 |
 |---|---|---|
@@ -70,6 +74,27 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 | **数据层** | `packs/official/**`、`packs/installed/**`、`market/index.json` | 芯片参数 / 厂商指纹 / 平台坑位（芯片知识的唯一宿主）；零服务器社区市场索引 |
 | **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件：右栏面板可视化、进程托管、`elab_*` agent 工具。与内核**只通过 loopback HTTP ICD 通信**，不 import 源码。分发仓 [`xkk6663/dsh-elab-cockpit`](https://github.com/xkk6663/dsh-elab-cockpit) 是**只读镜像**（CI `subtree split` 自动推送） |
 | 工程 | `projects/**`、`examples/**` | 工程接入 YAML 与实弹样例 |
+
+```text
+工具层  packages/dsh-elab-cockpit      面板 / elab_* 工具 / 进程托管（可卸载）
+   │  唯一缝隙：loopback HTTP ICD（/api/* 命令 + /api/events SSE）
+业务层  services/elab/** + cockpit/server.py
+   │  编排 / 编译 / 烧录 / 调试 / 串口；STEP_META、KERNEL_PLANS、SERIAL_META 是词汇唯一事实源
+   │  只读协议：pack.yaml（elab.pkg），不 import 包内文件
+数据层  packs/official|installed/** + market/index.json   芯片参数 / 厂商指纹 / 市场索引
+```
+
+```text
+主仓 xkk6663/elab-flow ── 唯一事实源（可写）
+ ├─ tag plugin-v* → CI subtree split --force → 镜像仓 xkk6663/dsh-elab-cockpit（只读）
+ ├─ npm publish（手动） ─────────────────────→ npm dsh-elab-cockpit@0.3.x（安装入口）
+ └─ PR → awesome-dsh-plugin 目录仓 → 每日构建 → 市场网页
+                                                （条目指向主仓子包路径，非镜像仓）
+芯片包：本仓 market/index.json + 外置包仓（如 elab-pack-artery-at32，按 commit + sha256 固定）
+```
+
+完整分析（源码锚点、发布 Playbook、门禁清单、事实核对）见
+[docs/architecture/架构分析和项目仓库的依赖关系.md](docs/architecture/架构分析和项目仓库的依赖关系.md)。
 
 <a id="quickstart"></a>
 
@@ -377,7 +402,7 @@ $ ./elab loop -p at32_test --clean
 
 ## 设计约束（精选）
 
-完整 **C1–C35** 见 [docs/设计约束.md](docs/设计约束.md)。
+完整 **C1–C35** 见 [docs/design/设计约束.md](docs/design/设计约束.md)。
 
 | # | 一句话 |
 |---|---|
@@ -395,15 +420,17 @@ $ ./elab loop -p at32_test --clean
 
 | 目标 | 入口 |
 |---|---|
+| **分类索引**（architecture / design / reports / requirements） | [docs/README.md](docs/README.md) |
 | 版本发布说明 | [CHANGELOG.md](CHANGELOG.md) |
-| **需求逐项对照与后续改进**（驾驶舱 R1–R10 / 插件目标 / 串口 P1–P3.5 / 市场 R1–R4 + backlog） | [docs/需求对照与改进.md](docs/需求对照与改进.md) |
-| 设计约束 C1–C35 | [docs/设计约束.md](docs/设计约束.md) |
-| **串口监视与调试可视化迁移方案**（P1/P2/P3、数据面契约、Agent 工具） | [docs/技术迁移方案_串口监视与调试可视化.md](docs/技术迁移方案_串口监视与调试可视化.md) |
-| **DSH 插件移植技术方案**（分层边界 / 面板 / ICD） | [docs/技术方案_dsh-elab-flow插件移植.md](docs/技术方案_dsh-elab-flow插件移植.md) |
-| 事件契约 ICD（topic 全集 / SSE 帧格式 / 兼容承诺） | [docs/ICD_cockpit_events.md](docs/ICD_cockpit_events.md) |
-| 驾驶舱方案与实现记录（决策 D / 约束 N / 串口判据） | [docs/技术方案_闭环驾驶舱.md](docs/技术方案_闭环驾驶舱.md) |
+| **需求逐项对照与后续改进**（驾驶舱 R1–R10 / 插件目标 / 串口 P1–P3.5 / 市场 R1–R4 + backlog） | [docs/requirements/需求对照与改进.md](docs/requirements/需求对照与改进.md) |
+| 设计约束 C1–C35 | [docs/design/设计约束.md](docs/design/设计约束.md) |
+| **串口监视与调试可视化迁移方案**（P1/P2/P3、数据面契约、Agent 工具） | [docs/design/技术迁移方案_串口监视与调试可视化.md](docs/design/技术迁移方案_串口监视与调试可视化.md) |
+| **DSH 插件移植技术方案**（分层边界 / 面板 / ICD） | [docs/design/技术方案_dsh-elab-flow插件移植.md](docs/design/技术方案_dsh-elab-flow插件移植.md) |
+| **架构分析与仓库依赖关系**（分层总览 / 仓库拓扑 / 发版 Playbook / 门禁） | [docs/architecture/架构分析和项目仓库的依赖关系.md](docs/architecture/架构分析和项目仓库的依赖关系.md) |
+| 事件契约 ICD（topic 全集 / SSE 帧格式 / 兼容承诺） | [docs/design/ICD_cockpit_events.md](docs/design/ICD_cockpit_events.md) |
+| 驾驶舱方案与实现记录（决策 D / 约束 N / 串口判据） | [docs/design/技术方案_闭环驾驶舱.md](docs/design/技术方案_闭环驾驶舱.md) |
 | OTA 双槽回滚技术方案 | [examples/STM32F411CEU6/doc/OTA_双槽回滚技术方案.md](examples/STM32F411CEU6/doc/OTA_双槽回滚技术方案.md) |
-| 社区适配包市场与芯片适配包 | [docs/可行性研究_社区插件市场与芯片适配包.md](docs/可行性研究_社区插件市场与芯片适配包.md) |
+| 社区适配包市场与芯片适配包 | [docs/reports/可行性研究_社区插件市场与芯片适配包.md](docs/reports/可行性研究_社区插件市场与芯片适配包.md) |
 
 ## 已知限制
 

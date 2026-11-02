@@ -345,7 +345,7 @@ add_link_options(-T ${ELAB_ROOT}/chips/artery/ld/AT32F421x8_FLASH.ld)
 > **没有这个机制会怎样**：AT32 这类工程会把自带工具链的 `-mcpu=cortex-m4` 重新盖回来，
 > elab 的芯片参数失效 → 烧进去的是"参数不对"的固件。`CMAKE_PROJECT_INCLUDE` 是**不改源码也能盖章**的唯一干净位置。
 
-**★ 已实测验证（见 `docs/干跑验证报告_AT32接入.md`）**，得出 4 条硬约束：
+**★ 已实测验证（见 `docs/reports/干跑验证报告_AT32接入.md`）**，得出 4 条硬约束：
 
 | # | 约束 | 依据 |
 |---|---|---|
@@ -362,7 +362,7 @@ add_link_options(-T ${ELAB_ROOT}/chips/artery/ld/AT32F421x8_FLASH.ld)
 > 并顺带证实断点 G2：**本机并存三套 arm-gcc**（DevEnv 13.3.1 / at32-tools 10.3 / Qt 不存在），
 > `AT32_TEST/build/compile_commands.json` 还指向已搬迁的旧绝对路径。
 
-**★ 跨芯片验证（见 `docs/干跑验证报告_STM32与跨芯片.md`）**：用**同一套工具链**（DevEnv 13.3.1 + at32-tools ninja）
+**★ 跨芯片验证（见 `docs/reports/干跑验证报告_STM32与跨芯片.md`）**：用**同一套工具链**（DevEnv 13.3.1 + at32-tools ninja）
 驱动两个形态完全不同的工程，均一次通过、零改动：
 
 | | AT32_TEST（B 类） | STM32_TEST（A 类） |
@@ -550,7 +550,7 @@ elab-flow/                                ← ★ 项目根 / 未来的 git 仓�
 >
 > **M2′ 也已闭环**：`elab loop -p at32_test` 在真机上走通
 > 体检 → 编译 → 烧录（`Verified OK`）→ 断在 `main`。
-> 见 `docs/干跑验证报告_上板闭环.md`。
+> 见 `docs/reports/干跑验证报告_上板闭环.md`。
 >
 > 仍未验证的两项：**STM32 上板**（探针与芯片正交 —— 同一个 AT-Link/DAP-Link 只换 target cfg 即可连 STM32，
 > 尚未实机跑 `elab loop -p stm32_test` 补证据，**不是缺探针**）

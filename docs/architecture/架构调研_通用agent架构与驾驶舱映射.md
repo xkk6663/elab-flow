@@ -207,4 +207,4 @@ packages/dsh-elab-cockpit/src/
 | L0/L1/L2 串口适配退化层级 | `services/elab/serialport.py` + `capabilities()` 的 layer 字段 |
 | 事件契约版本化 | `cockpit/server.py` capabilities 的 `schema_version`（EVENT_SCHEMA_VERSION） |
 | 插件组装根/端口/适配器盘点 | §2.1（31 文件 / 5,592 行逐文件判定） |
-| keyed 槽位 / ctx 代理陷阱 / meta 自描述 | `docs/技术方案_dsh-elab-flow插件移植.md` §15.5b/c、§16 |
+| keyed 槽位 / ctx 代理陷阱 / meta 自描述 | `docs/design/技术方案_dsh-elab-flow插件移植.md` §15.5b/c、§16 |
