@@ -54,7 +54,7 @@ export interface CockpitSnapshot {
   hostError: string | null
   /** §16 内核自描述探测：meta 缺失 = 内核较旧（标签/档位退回插件内置默认）。 */
   kernelOld: boolean
-  projects: Array<{ name: string; root?: string }>
+  projects: Array<{ name: string; root?: string; probe?: string }>
   project: string
   discover: DiscoverResponse | null
   availability: StepAvailability
@@ -96,12 +96,16 @@ export interface CockpitService {
   onPreview(l: (p: PlanPreview) => void): () => void
   reloadProjects(): Promise<void>
   selectProject(name: string): void
+  /** 切换当前工程的探针（只改 `debug.probe`；调试会话打开时内核回 409）。 */
+  setProjectProbe(probe: string): Promise<void>
   startPlan(planId: string, opts: { clean: boolean; jobs: number | null }): Promise<void>
   runOne(step: string): Promise<void>
   cancel(): Promise<void>
   preview(opts: { clean: boolean; jobs: number | null }): Promise<void>
   /** 批 3 一键适配：write → 重载工程 → 绑定新工程 → 刷新发现。 */
   adaptProject(path: string): Promise<void>
+  /** 候选工程只读探测（probe，不写盘）：面板一打开就能看到"它会接成什么样"。 */
+  probeAdapt(path: string): Promise<void>
   /** 适配复探测（只读）：重新探测并比对已写入的 projects/<name>.yaml（drift 判据）。 */
   checkAdapt(name: string, root: string): Promise<void>
   /** 引导向导：只读环境探测（不 spawn 内核）。 */
@@ -168,6 +172,8 @@ export function createCockpitService(deps: {
   // agent 自动跟随：只处理**新出现**的 agent run（记 id），不做持续抢占 ——
   // 否则人手动切到别的工程看历史时，每 2s 会被拽回去。
   const followedRuns = new Set<string>()
+  // 自动只读探测：同一个候选只自动探一次（用户手动重探不受限）
+  const autoProbed = new Set<string>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   function set(p: Partial<CockpitSnapshot>): void {
@@ -343,6 +349,7 @@ export function createCockpitService(deps: {
       const list = cards.map((p) => ({
         name: String(p.name ?? ''),
         root: typeof p.root === 'string' ? p.root : undefined,
+        probe: typeof p.probe === 'string' ? p.probe : undefined,
       }))
       const keep = snap.project !== '' && list.some((p) => p.name === snap.project)
       const nextProject = keep ? snap.project : (list[0]?.name ?? '')
@@ -359,6 +366,20 @@ export function createCockpitService(deps: {
     if (!cards.some((c) => String(c.name ?? '') === name)) return
     set({ project: name })
     applyAvailability(name)
+  }
+
+  async function setProjectProbe(probe: string): Promise<void> {
+    const name = snap.project
+    if (name === '' || snap.busy) return
+    set({ busy: true, error: null })
+    try {
+      await api.setProjectProbe(name, probe, sessionId)
+      await reloadProjects()
+    } catch (e) {
+      set({ error: message(e) })
+    } finally {
+      set({ busy: false })
+    }
   }
 
   async function launch(
@@ -424,6 +445,19 @@ export function createCockpitService(deps: {
       const r = await api.discover(sessionId)
       set({ discover: r })
       dispatchAdapt({ type: 'discover/result', candidates: r.candidates })
+      // 扫描根 = 会话工作区（见 discover-route.resolveRoot）。若其中恰好只有
+      // **一个**未接入工程，那就是用户当前打开的工程 → 自动只读探测一次
+      // （probe 不写盘），面板一打开就能看到它会被接成什么样；多候选不猜。
+      const pending = r.candidates.filter((c) => c.adaptedAs === undefined)
+      if (pending.length === 1 && !autoProbed.has(pending[0].path)) {
+        autoProbed.add(pending[0].path)
+        void probeAdapt(pending[0].path)
+      } else if (pending.length === 0 && r.candidates.length === 1) {
+        // 工作区就是**已接入**的那个工程 → 面板直接绑到它（而不是工程列表第一个），
+        // "打开哪个工作区，就操作哪个工程"。
+        const name = r.candidates[0].adaptedAs
+        if (name !== undefined) selectProject(name)
+      }
     } catch {
       /* 发现失败不阻塞主流程 */
     }
@@ -588,6 +622,33 @@ export function createCockpitService(deps: {
 
   // ── 服务对象 ────────────────────────────────────────────────────
 
+  /**
+   * 只读探测（`action=probe`，不写盘）：候选工程"接进来会是什么样"。
+   * 独立函数而不是 return 对象里的方法 —— `initFlow` 要在自动探测时直接调它。
+   */
+  async function probeAdapt(path: string): Promise<void> {
+    dispatchAdapt({ type: 'adapt/probe-start', path })
+    try {
+      const r = await api.adapt({ action: 'probe', path, sessionId })
+      dispatchAdapt({
+        type: 'adapt/probe-result',
+        probe: {
+          path,
+          name: r.name,
+          tier: r.tier,
+          confidence: r.confidence,
+          chip: r.probe.chip_ref,
+          generator: r.probe.generator,
+          projectName: r.probe.project_name,
+          canPrint: r.probe.can_print,
+          ambiguities: [...(r.probe.ambiguities ?? [])],
+        },
+      })
+    } catch (e) {
+      dispatchAdapt({ type: 'adapt/probe-failed', error: message(e) })
+    }
+  }
+
   return {
     subscribe(l) {
       listeners.add(l)
@@ -625,6 +686,8 @@ export function createCockpitService(deps: {
 
     selectProject,
 
+    setProjectProbe,
+
     async startPlan(planId, opts) {
       if (snap.project === '') return
       const plan = snap.plans.find((p) => p.id === planId)
@@ -661,6 +724,8 @@ export function createCockpitService(deps: {
         set({ error: message(e) })
       }
     },
+
+    probeAdapt,
 
     async adaptProject(path) {
       dispatchAdapt({ type: 'adapt/start', path })

@@ -1,4 +1,4 @@
-"""elab.project_admin —— `projects/*.yaml` 的生命周期管理（重命名 / 移除）。
+"""elab.project_admin —— `projects/*.yaml` 的生命周期管理（重命名 / 移除 / 切换探针）。
 
 ★ 只动**接入层文件**，业务工程一个字节都不碰（guard 文件树快照不受影响）。
 ★ 每次成功操作后由调用方重载 ``Config``（`/api/adapt` 写盘后同源）：
@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .config import Config, ElabError, to_fwd
+from .config import Config, ElabError, Host, to_fwd
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -73,6 +73,53 @@ def rename(cfg: Config, old: str, new: str) -> dict:
     dst.write_text(text2, encoding="utf-8")
     src.unlink()
     return {"status": "renamed", "name": new, "old": old, "path": to_fwd(dst)}
+
+
+def set_probe(cfg: Config, name: str, probe: str) -> dict:
+    """切换 ``projects/<name>.yaml`` 的 ``debug.probe``（保留注释与其它字段）。
+
+    ★ 只改 ``debug:`` 块里的 probe 行，**不重新生成** yaml（避免覆盖手工调整）。
+    ★ 探针必须已在 ``elab.host.yaml`` 的 ``probes.list`` 中声明，且接口文件存在。
+    """
+    name = (name or "").strip()
+    probe = (probe or "").strip()
+    if not name or not probe:
+        raise ElabError("切换探针需要 name 与 probe")
+
+    src = _yaml_path(cfg, name)
+    if not src.is_file():
+        raise ElabError(f"工程不存在：{name}（没有 projects/{name}.yaml）")
+    host = Host(cfg)
+    if probe not in host.probes:
+        opts = ", ".join(sorted(host.probes)) or "（空）"
+        raise ElabError(f"未知探针：{probe}（elab.host.yaml 可选：{opts}）")
+
+    icfg = str((host.probe(probe) or {}).get("interface_cfg") or "").strip()
+    scripts = host.openocd_scripts
+    if icfg and scripts and not (Path(scripts) / icfg).is_file():
+        raise ElabError(
+            f"探针 {probe} 的接口文件不存在：{icfg}（OpenOCD scripts：{scripts}）")
+
+    text = src.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^debug:[ \t]*(?:#.*)?\r?\n", text)
+    if m is None:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += f"debug:\n  probe: {probe}\n"
+    else:
+        start = m.end()
+        nxt = re.search(r"(?m)^[A-Za-z_][A-Za-z0-9_-]*:", text[start:])
+        end = start + nxt.start() if nxt else len(text)
+        block = text[start:end]
+        block2, n = re.subn(
+            r"(?m)^([ \t]+probe:[ \t]*)(\S+)([ \t]*(?:#.*)?)$",
+            rf"\g<1>{probe}\g<3>", block, count=1)
+        if n == 0:
+            block2 = f"  probe: {probe}\n" + block
+        text = text[:start] + block2 + text[end:]
+
+    src.write_text(text, encoding="utf-8")
+    return {"status": "probe-set", "name": name, "probe": probe, "path": to_fwd(src)}
 
 
 def remove(cfg: Config, name: str) -> dict:

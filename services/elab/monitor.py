@@ -10,8 +10,10 @@
     ok            命中 ``close_on`` 任意一条 → 有**正面证据**证明板子活到了某一步
     failed        命中 ``fail_on``（优先于 close_on），或已收到行但静默超 ``idle_timeout_s``
                   → 有**正面证据**证明它坏了
-    inconclusive  两者都没有：没输出、没配判据、串口不可用、超时而关键字未出现
+    inconclusive  端口**能打开**但两者都没有：没输出、没配判据、超时而关键字未出现
                   → **不假装成功，也不冤枉它失败**
+    failed（环境） 串口后端不可用 / 选不到端口（没接、auto 有歧义）/ 打开失败
+                  → 是**用户能修的环境问题**，不是"缺证据"，必须显式报错
 
 "没有证据"必须与"有失败证据"分开 —— 否则"固件没写 printf"会被误报成"固件崩了"。
 
@@ -273,6 +275,9 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
     caps = sp.capabilities()
     v = Verdict(layer=caps["layer"])
     if not caps["available"]:
+        # ★ 环境缺失 = 失败（2026-11-03）：这不是"固件没输出证据"，而是本机
+        #   根本没能力做串口校验 —— 说不清就等于没闭环，必须显式报错。
+        v.status = _FAILED
         v.reason = f"串口后端不可用（layer={caps['layer']}）：{caps.get('hint')}"
         log(f"[monitor] — {v.reason}")
         return v
@@ -283,6 +288,10 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
     v.port = chosen
     log(f"[monitor] 端口：{why}")
     if not chosen:
+        # ★ 选不到口 = 失败（2026-11-03）：没接串口 / auto 有歧义 / 端口被占用，
+        #   都属于"用户能修"的环境问题。此前记 inconclusive，闭环总账仍显示通过，
+        #   正是"没接串口却没报错"的来源。
+        v.status = _FAILED
         v.reason = why
         log(f"[monitor] — {v.reason}")
         return v
@@ -357,7 +366,8 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
                 except Exception as exc:          # noqa: BLE001
                     log(f"[monitor] — on_close 回调异常（未掩盖原异常）：{exc}")
     except OSError as exc:
-        v.status = _INCONCL
+        # ★ 打不开 = 失败（同上）：端口被别的程序占用 / 设备刚拔掉，都有明确原因可修。
+        v.status = _FAILED
         v.reason = f"打开串口失败：{exc}"
         log(f"[monitor] — {v.reason}")
         return v

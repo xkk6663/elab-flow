@@ -19,7 +19,7 @@ export type RailId = "projects" | "evidence";
  *    已收敛为单一 "tools" 页（workspaces.ts 二次收敛）——
  *    旧持久化值不能把人带到不存在的界面，sanitize 里迁移映射到 "tools"。 */
 function isWs(v: unknown): boolean {
-  return v === "build" || v === "flash" || v === "serial" || v === "tools";
+  return v === "build" || v === "flash" || v === "serial" || v === "tools" || v === "debug";
 }
 
 export interface LayoutState {

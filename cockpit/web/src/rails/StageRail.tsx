@@ -221,6 +221,7 @@ export function StageRail({
                   s.connector,
                   declared[i - 1].state === "ok" ? s.connOk : "",
                   declared[i - 1].state === "failed" ? s.connFail : "",
+                  declared[i - 1].state === "inconclusive" ? s.connInconcl : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
@@ -236,6 +237,7 @@ export function StageRail({
                     v.state === "running" ? s.bandRunning : "",
                     v.state === "ok" ? s.bandOk : "",
                     v.state === "failed" ? s.bandFail : "",
+                    v.state === "inconclusive" ? s.bandInconcl : "",
                     v.state === "skipped" || v.state === "pending" ? s.bandIdle : "",
                   ].join(" ")}
                 >
@@ -281,13 +283,17 @@ export function StageRail({
                 ? "green"
                 : run.status === "failed"
                   ? "red"
-                  : run.status === "cancelled"
+                  : run.status === "cancelled" || run.status === "inconclusive"
                     ? "amber"
                     : "blue"
             }
-            title={`run 状态：${run.status}`}
+            title={
+              run.status === "inconclusive"
+                ? "run 状态：inconclusive（跑完了，但有步骤没拿到约定证据，例如串口没收到关键字）"
+                : `run 状态：${run.status}`
+            }
           >
-            {run.status}
+            {run.status === "inconclusive" ? "未验证" : run.status}
           </Pill>
         ) : null}
       </div>

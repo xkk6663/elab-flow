@@ -32,3 +32,11 @@ export function kernelPlanSteps(planId) {
     const steps = current?.plans?.find((p) => p.id === planId)?.steps;
     return Array.isArray(steps) ? steps.map(String) : undefined;
 }
+/** 调试面板是否可见：**只有**内核声明 `meta.debug.available=true` 才显示。 */
+export function kernelDebugAvailable() {
+    return current?.debug?.available === true;
+}
+/** 探针清单（缺失 = 内核较旧，调用方隐藏下拉，只显示当前值）。 */
+export function kernelProbes() {
+    return current?.probes ?? null;
+}

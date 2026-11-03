@@ -44,6 +44,33 @@
 
 **常见坑**：探针显示「不可上板」时，先查是否有残留的 `openocd` 进程占着调试口（见第 9 章）。
 
+### 1.1 工具链与探针（默认装什么、怎么换）
+
+WebUI / 插件不绑定任何一家的 IDE。首次打开自动补齐的是四件**通用开源工具**（版本与来源见
+[manifest.json](../../packages/dsh-elab-cockpit/envpacks/manifest.json)）：
+
+| 工具 | 版本 | 用途 |
+|---|---|---|
+| `arm-none-eabi-gcc` | 13.3.1 | 交叉编译（xpack） |
+| CMake | 3.28.1 | 构建 |
+| Ninja | 1.11.1 | 构建 |
+| OpenOCD | 0.12.0-3 | 烧录 / 调试 |
+
+已装好自己版本时会跳过自动安装；也可用 `ELAB_ARM_GCC_ROOT` / `ELAB_CMAKE` / `ELAB_NINJA` /
+`ELAB_OPENOCD` / `ELAB_OPENOCD_SCRIPTS` 覆盖，不改仓库文件。
+
+探针同样是**数据不是代码**：[elab.host.yaml](../../elab.host.yaml) 的 `probes.list` 已内置
+`atlink` / `dap` / `stlink` / `jlink`，工程卡对应的 `projects/<name>.yaml` 只声明用哪个：
+
+```yaml
+debug:
+  probe: stlink     # atlink | dap | stlink | jlink
+```
+
+- **ST-Link**：OpenOCD 原生 `interface/stlink.cfg`，一般免装厂商软件；
+- **J-Link**：走 OpenOCD 的 `interface/jlink.cfg`，需先装 SEGGER J-Link 驱动（不是 SEGGER GDB Server）；
+- **新适配工程**：默认探针取 `probes.default`，不再写死某个品牌。
+
 ---
 
 ## 2. 装一颗芯片
@@ -217,6 +244,31 @@ int __io_putchar(int ch)
 > `HAL_RCC_ClockConfig error: 1` 刷屏。修法是构造完整的 `RCC_ClkInitTypeDef`
 > 并保存/恢复 PLL 配置，或先留空钩子（不切时钟）。
 
+### 3.4 串口闭环的硬前提：工程里 USART1 已经初始化
+
+**关键前提**：串口闭环/监视读的是**固件已经初始化好的 UART**。elab 只负责在主机侧打开 COM 口收发字节，
+不会去配置芯片的时钟、GPIO 或波特率——串口能不能出数据，取决于工程固件自己。
+
+| 项 | 本仓示例口径（STM32F103C8T6 / F411CEU6） |
+|---|---|
+| 外设 | USART1，115200 8N1 |
+| 引脚 | **PA9 = TX，PA10 = RX**（USART1 默认复用脚） |
+| 固件初始化 | 使能 USART1 + GPIOA 时钟 → PA9 复用推挽 / PA10 上拉输入 → `HAL_UART_Init`（或等价的 `usart_init`） |
+| 收命令 | 需要 RX 时再开 `USART1_IRQn` 或 RX DMA；只发心跳可以不配 |
+| 接线 | **交叉**：板子 PA9(TX) → USB-TTL 的 RX；PA10(RX) → USB-TTL 的 TX；两端共地 |
+
+本仓示例工程（F103 / F411）与本次实拍的 `TEST` 工程都已在固件里完成这套初始化；
+接入你自己的工程时，先按上表核对一遍再跑闭环。
+
+对照实现：[usart.c](../../examples/STM32F103C8T6/Core/Src/usart.c)（`MX_USART1_UART_Init` + `HAL_UART_MspInit`，
+注释里明确标了 `PA9 -> USART1_TX` / `PA10 -> USART1_RX`）。初始化成功的固件会在启动日志里自报：
+
+```text
+[log] UART1 : ok (115200 8N1, TX=PA9, RX=PA10, IRQ=on)
+```
+
+先看到这一行，再谈闭环判据。没有这一步，`monitor` 只能判 `inconclusive`（串口 0 字节）；
+编译、烧录、调试校验不受影响。
 
 ---
 
@@ -317,7 +369,7 @@ if (HAL_GetTick() - last_tick >= LED_HALF_PERIOD_MS) {
 
 步骤：
 
-1. 接好板子与 CMSIS-DAP，确认左下角探针「可上板」、串口「就绪」；
+1. 接好板子与 CMSIS-DAP，确认左下角探针「可上板」、串口「就绪」（工程固件已初始化 USART1：PA9=TX / PA10=RX，115200）；
 2. 点「▶ 跑全闭环」；
 3. 观察中列阶段灯逐个点亮：体检 → 编译 → 烧录 → 调试校验 → 串口闭环；
 4. 等右列出现 `ok` 徽标。
@@ -501,6 +553,7 @@ static void wave_emit_sine2(float v1, float v2)
 | 发起闭环返回 409 / 监视开不了 | 串口独占（约束 N5）：有 run 在跑时不能开监视，反之亦然。等 run 完或先「关闭监视」。 |
 | 探针「不可上板」/ openocd 起不来 | 残留 `openocd` 进程占用调试口：任务管理器结束 `openocd.exe`，或 `Get-Process openocd | Stop-Process`。 |
 | monitor「不可用」徽标 | 工程 yaml 没有配置心跳判据（`close_on`），串口闭环步被判不可用——编译/烧录/调试不受影响。 |
+| 串口 0 字节 / monitor 判 `inconclusive` | 固件没有初始化 USART1（或 PA9/PA10 接反、波特率不一致）。先看启动日志有没有 `[log] UART1 : ok (... TX=PA9, RX=PA10 ...)`；接线要 TX/RX **交叉**并共地。 |
 | 「＋ 适配」探测后工程漂移 | 工程目录被外部改动（换了芯片/改了工程文件），重新「探测」让证据链刷新即可。 |
 
 ---

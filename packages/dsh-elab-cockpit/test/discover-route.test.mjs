@@ -42,6 +42,8 @@ before(async () => {
   await mk('repo/fw/beta/CMakeLists.txt', 'set(CMAKE_PROJECT_NAME Beta)\n')
   await mk('repo/fw/comp/CMakeLists.txt', 'set(X 1)\n') // 子目录 CMake，不是根工程
   await mk('repo/fw/build/junk/CMakeLists.txt', 'project(Junk)\n') // 应被排除
+  // 仓外工作区（模拟 DSH 会话开在外部 STM32 工程里）
+  await mk('ext/CMakeLists.txt', 'project(Ext)\n')
 })
 
 after(async () => {
@@ -147,6 +149,20 @@ test('会话 cwd 优先于 elabRoot=auto', async () => {
   assert.equal(res.json.scanRoot.source, 'session')
   assert.equal(norm(res.json.scanRoot.path), norm(join(ROOT, 'repo')))
   assert.equal(norm(res.json.elabRoot), norm(join(ROOT, 'repo')))
+  assert.equal(res.json.adaptedCount, 2)
+})
+
+test('显式 elabRoot 不再劫持扫描根：会话 cwd 优先，已接入表仍读 elabRoot', async () => {
+  // 场景：用户在设置页指定了内核仓（elabRoot 显式），但当前会话开在**仓外的工作区**。
+  // 扫描必须落在工作区（否则永远发现不了它），已接入表仍来自内核仓的 projects/。
+  const ctx = fakeCtx({ cwd: join(ROOT, 'ext') })
+  applyDiscover(ctx, { elabRoot: join(ROOT, 'repo'), cacheTtlMs: 0 })
+  const res = await call(ctx.routes[0], 'GET', '/elab/api/discover?sessionId=abc123')
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json.scanRoot.source, 'session')
+  assert.equal(norm(res.json.scanRoot.path), norm(join(ROOT, 'ext')))
+  assert.equal(norm(res.json.elabRoot), norm(join(ROOT, 'repo')))
+  assert.deepEqual(res.json.candidates.map((c) => c.dirname), ['ext'])
   assert.equal(res.json.adaptedCount, 2)
 })
 

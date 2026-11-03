@@ -1,6 +1,20 @@
 import type {
   AdaptResponse,
   Capabilities,
+  DebugAuditResponse,
+  DebugBreakpointsResponse,
+  DebugControlResponse,
+  DebugDisasmResponse,
+  DebugEvaluateResponse,
+  DebugMemoryResponse,
+  DebugOpenOptions,
+  DebugPeripheralsResponse,
+  DebugRegistersResponse,
+  DebugRtosResponse,
+  DebugSessionResponse,
+  DebugStackResponse,
+  DebugVariablesResponse,
+  DebugWatchResponse,
   ElabEvent,
   PlanPreview,
   ProjectsResponse,
@@ -406,17 +420,19 @@ export const api = {
     }),
 
   /**
-   * POST /api/project：工程接入文件的重命名 / 移除。
+   * POST /api/project：工程接入文件的重命名 / 移除 / 切换探针。
    *
    * 只动 `projects/<name>.yaml`（业务工程零改动）；成功后服务端已重载 Config，
    * 前端只需重新拉 `/api/projects`。移除会先留 `<name>.yaml.bak`。
+   * `set_probe` 只改 `debug.probe`（保留注释）；调试会话打开时内核回 409。
    */
   projectAdmin: (
     opts:
       | { action: "rename"; name: string; new_name: string }
-      | { action: "remove"; name: string },
+      | { action: "remove"; name: string }
+      | { action: "set_probe"; name: string; probe: string },
   ) =>
-    post<{ action: string; status: string; name: string; old?: string; path: string }>(
+    post<{ action: string; status: string; name: string; old?: string; probe?: string; path: string }>(
       "/api/project",
       opts,
     ),
@@ -459,6 +475,165 @@ export const api = {
   /** activate 是同步 200：启用一套已装包 + 重生成平台 skill + 重载 Config。 */
   pkgActivate: (opts: { name: string }) =>
     post<Record<string, unknown>>("/api/pkg/activate", { name: opts.name }),
+
+  // ── 调试会话（GET 只读 / POST 副作用 / DELETE 释放，ICD §6）──────────
+  /** GET /api/debug/session —— 当前会话快照（无会话为 null）。 */
+  debugSession: () => req<DebugSessionResponse>("/api/debug/session"),
+
+  /**
+   * POST /api/debug/session —— 建立会话。
+   * 副作用明确：占用 SWD/串口、复位目标、下载 ELF 并断到 `stop_at`。
+   */
+  debugOpen: (opts: {
+    project: string;
+    options?: DebugOpenOptions;
+    lease_s?: number;
+    allow_write?: boolean;
+    actor?: "human" | "agent";
+  }) =>
+    req<DebugSessionResponse>("/api/debug/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project: opts.project,
+        options: opts.options,
+        lease_s: opts.lease_s,
+        allow_write: opts.allow_write,
+        actor: opts.actor ?? "human",
+      }),
+    }),
+
+  /**
+   * DELETE /api/debug/session —— 关闭会话并（默认）恢复目标运行。
+   * ★ 释放独占资源走 DELETE；`resume=1` 同时写在 query 与 body，兼容两种读法。
+   */
+  debugClose: (resume = true) =>
+    req<{ closed: boolean; resumed?: boolean; session?: string }>(
+      `/api/debug/session?resume=${resume ? 1 : 0}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume, reason: "user-closed", actor: "human" }),
+      },
+    ),
+
+  /** POST /api/debug/control —— 执行/暂停/单步/复位；reset 必须带 confirm。 */
+  debugControl: (opts: { action: string; addr?: string; confirm?: boolean }) =>
+    post<DebugControlResponse>("/api/debug/control", opts),
+
+  /** GET /api/debug/stack —— 调用栈（thread 缺省 = 当前线程）。 */
+  debugStack: (thread?: number) =>
+    req<DebugStackResponse>(
+      `/api/debug/stack${thread === undefined ? "" : `?thread=${encodeURIComponent(thread)}`}`,
+    ),
+
+  /** GET /api/debug/variables —— 局部/参数/子节点。 */
+  debugVariables: (opts: {
+    frame?: number;
+    scope?: "locals" | "args" | "children";
+    var?: string;
+  } = {}) => {
+    const q = new URLSearchParams({
+      frame: String(opts.frame ?? 0),
+      scope: opts.scope ?? "locals",
+    });
+    if (opts.var !== undefined) q.set("var", opts.var);
+    return req<DebugVariablesResponse>(`/api/debug/variables?${q.toString()}`);
+  },
+
+  /** GET /api/debug/registers —— 寄存器分组（core/fpu/all）。 */
+  debugRegisters: (opts: { group?: string; format?: "natural" | "hex" } = {}) => {
+    const q = new URLSearchParams({
+      group: opts.group ?? "core",
+      format: opts.format ?? "natural",
+    });
+    return req<DebugRegistersResponse>(`/api/debug/registers?${q.toString()}`);
+  },
+
+  /**
+   * GET /api/debug/breakpoints 列断点；op != list 时走 POST（添加/切换/删除）。
+   * ★ 读走 GET、写走 POST 的动词纪律与 `/api/plan` → `/api/run` 同源。
+   */
+  debugBreakpoints: (opts: {
+    op?: "list" | "add" | "update" | "toggle" | "remove";
+    id?: string;
+    kind?: "func" | "addr";
+    location?: string;
+    condition?: string;
+    enabled?: boolean;
+    hardware?: boolean;
+    temporary?: boolean;
+    /** 工程配置 rev（乐观锁；GET 返回的值原样带回） */
+    rev?: number;
+  } = {}) => {
+    const op = opts.op ?? "list";
+    if (op === "list") return req<DebugBreakpointsResponse>("/api/debug/breakpoints");
+    return post<DebugBreakpointsResponse>("/api/debug/breakpoints", { ...opts, op });
+  },
+
+  /** GET /api/debug/memory —— 读目标内存（count 上限 4096）。 */
+  debugMemory: (opts: { addr: string; count?: number }) => {
+    const q = new URLSearchParams({ addr: opts.addr });
+    if (opts.count !== undefined) q.set("count", String(opts.count));
+    return req<DebugMemoryResponse>(`/api/debug/memory?${q.toString()}`);
+  },
+
+  /** GET /api/debug/disasm —— 反汇编（addr 空 = 当前 PC，mode=2 为 Thumb）。 */
+  debugDisasm: (opts: { addr?: string; count?: number; mode?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.addr !== undefined && opts.addr !== "") q.set("addr", opts.addr);
+    q.set("count", String(opts.count ?? 32));
+    q.set("mode", String(opts.mode ?? 2));
+    return req<DebugDisasmResponse>(`/api/debug/disasm?${q.toString()}`);
+  },
+
+  /** POST /api/debug/evaluate —— 表达式求值（`&line`、`buf[16]`、`pxCurrentTCB`）。 */
+  debugEvaluate: (opts: { expr: string; frame?: number }) =>
+    post<DebugEvaluateResponse>("/api/debug/evaluate", {
+      expr: opts.expr,
+      ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+    }),
+
+  /**
+   * POST /api/debug/write —— 写目标内存/寄存器。
+   * ★ 默认拒绝（`allow_write=false`）；每次写都进 `.work/debug-audit.jsonl`。
+   */
+  debugWrite: (opts: {
+    target: "memory" | "register";
+    addr?: string;
+    name?: string;
+    value: string;
+  }) => post<{ ok: boolean; written?: number; name?: string; addr?: string }>(
+    "/api/debug/write", opts),
+
+  /** GET/POST /api/debug/watch —— 监视列表（持久化，写操作带 rev 乐观锁）。 */
+  debugWatch: (opts: {
+    op?: "list" | "add" | "update" | "remove";
+    id?: string;
+    expr?: string;
+    format?: string;
+    rev?: number;
+  } = {}) => {
+    const op = opts.op ?? "list";
+    if (op === "list") return req<DebugWatchResponse>("/api/debug/watch");
+    return post<DebugWatchResponse>("/api/debug/watch", { ...opts, op });
+  },
+
+  /** GET /api/debug/audit —— 最近写操作/断点审计。 */
+  debugAudit: (limit = 100) =>
+    req<DebugAuditResponse>(`/api/debug/audit?limit=${limit}`),
+
+  /** GET /api/debug/peripherals —— SVD 三级懒加载（path 空 = 外设清单）。 */
+  debugPeripherals: (opts: { path?: string; read?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.path) q.set("path", opts.path);
+    if (opts.read) q.set("read", "1");
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return req<DebugPeripheralsResponse>(`/api/debug/peripherals${suffix}`);
+  },
+
+  /** GET /api/debug/rtos —— FreeRTOS 任务与栈水位。 */
+  debugRtos: () => req<DebugRtosResponse>("/api/debug/rtos"),
 };
 
 /**

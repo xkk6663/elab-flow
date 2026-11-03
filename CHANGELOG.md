@@ -5,6 +5,59 @@
 
 ---
 
+## [V3.1.0] — 2026-11-03（调试工作区 P0–P3 · 探针切换 · 闭环三态 · README 重写）
+
+内核 `COCKPIT_VERSION` 与 `services.elab.__version__` 升到 `3.1.0`，
+插件默认下载内核版本同步为 `v3.1.0`。
+
+### 调试工作区（P0–P3）
+
+- **会话式调试器**：开始 / 继续 / 暂停 / 单步 / 步入 / 步出 / 复位 / 关闭；
+  调用栈、变量、寄存器、断点、监视、内存、反汇编、外设、RTOS 栈、审计、输出十一个页签；
+  独立 WebUI 与 DSH 面板共用同一份内核会话（`services/elab/debugsession.py` / `gdbmi.py`）。
+- **P1 持久化**：断点与监视落盘 `projects/<name>.debug.json`（`rev` 乐观锁），
+  暂停态求值，写操作进审计；关闭固定 `monitor reset run`，不把板子留在 halt。
+- **P2 外设**：CMSIS-SVD 三级懒加载、寄存器读值与字段枚举解码（`svd.py`）。
+- **P3 RTOS**：ELF 里有 `pxCurrentTCB` 时枚举任务、扫描 FreeRTOS `0xA5` 栈填充，
+  给出栈高水位（`rtos.py`）。
+- **Agent**：新增 `elab_debug_open / control / inspect / breakpoint / wait / close`
+  六个工具，与面板同源；调试 / 烧录 / 闭环 / 串口监视继续双向 409 互斥。
+- **能力自描述**：`capabilities.meta.debug.features`（`watch / svd / rtos`），
+  面板按它显示页签，内核过旧时自动降级。
+
+### 探针切换
+
+- 内核新增 `project_admin.set_probe`：只改 `debug.probe` 行、保留注释与其它字段；
+  探针必须在 `elab.host.yaml` 的 `probes.list` 声明且接口文件存在。
+- `capabilities.meta.probes` 下发可选探针；独立 WebUI 与 DSH 面板工程行增加探针胶囊，
+  可原地切换（`POST /api/project set_probe`）。
+- `atlink` 与 `dap` 同为 CMSIS-DAP，只是接口配置不同；面板「可上板」仅表示
+  interface cfg 存在，不代表探针已插。
+
+### 闭环三态
+
+- `run/end` 新增 `verdict`：`ok / failed / inconclusive`。串口「能开但没收到约定关键字」
+  记 `inconclusive`（琥珀「未验证」）；选不到口 / 打不开 / 后端不可用记 `failed`。
+- CLI 退出码固定为 `0 / 1 / 2`；`elab loop` 无结论时不再打印「闭环完成」。
+- 修复「没接串口却显示闭环通过」：判据缺失与环境缺失不再冒充成功。
+
+### 文档与仓库整理
+
+- README 重写为「定位 → 是什么 → 功能 → 怎么用」，每个功能保留 1–2 张实机截图。
+- 新增教程 04（调试面板）与 05（DSH 插件）；CLI / 波形 / 压测报告重编号为 06 / 07 / 08。
+- 删除未引用截图 `assets/cockpit-main.png`、`assets/cockpit-serial.png`。
+
+## [DSH 插件 0.5.0] — 2026-11-03（调试工作区 · 探针胶囊 · 三态徽标）
+
+`packages/dsh-elab-cockpit` 的次版本（npm 包版本，与内核版本独立）。
+
+- **调试页签**：`▶|` 进入调试工作区，调用栈 / 变量 / 寄存器 / 断点 / 监视 / 内存 /
+  外设 / RTOS 栈 / 审计 / 输出，按 `capabilities.meta.debug.features` 显示。
+- **探针胶囊**：工程行可直接切换 atlink / dap / stlink / jlink，
+  走 `POST /api/project set_probe`。
+- **三态徽标**：「通过 / 失败 / 未验证」与独立 WebUI、CLI 同源。
+- **版本**：默认下载内核 `3.0.0` → `3.1.0`。
+
 ## [V3.0.0] — 2026-11-02（串口自定义发送组件 · 窄栏一致性收尾 · 仓库整理）
 
 主仓大版本：内核 `COCKPIT_VERSION` 与 `services.elab.__version__` 升到 `3.0.0`，

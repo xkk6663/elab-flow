@@ -27,7 +27,7 @@ export interface RunSnapshot {
   /** `run/start.steps` 声明的步骤序列（权威） */
   steps: StepView[];
   actor: Actor | null;
-  status: "idle" | "running" | "ok" | "failed" | "cancelled";
+  status: "idle" | "running" | "ok" | "failed" | "inconclusive" | "cancelled";
   startedAt: number | null;
   endedAt: number | null;
   lastSeq: number;
@@ -155,8 +155,15 @@ export function reduce(s: RunSnapshot, e: ElabEvent): RunSnapshot {
       const id = String(e.step || '');
       const ok = Boolean(e.ok);
       const result = e as unknown as StepResult;
+      // ★ 三态：ok=false 才是 failed；ok=true 但 verdict=inconclusive 是"未验证"。
+      //   把后者画成绿色 ok，正是"没接串口却显示闭环通过"的界面成因。
+      const state: StepState = ok
+        ? (String((e as Record<string, unknown>).verdict || '') === 'inconclusive'
+            ? 'inconclusive'
+            : 'ok')
+        : 'failed';
       const next = setStep(s, id, {
-        state: ok ? 'ok' : 'failed',
+        state,
         detail: String(e.detail || ''),
         duration_s: Number(e.duration_s || 0),
         result,
@@ -169,8 +176,13 @@ export function reduce(s: RunSnapshot, e: ElabEvent): RunSnapshot {
     }
 
     case 'run/end': {
+      // 总账三态（verdict）：failed > inconclusive > ok。旧后端没有 verdict 时
+      // 回退到 ok 布尔，行为不变（前向兼容，ICD §7）。
+      const verdict = String((e as Record<string, unknown>).verdict || '');
       return patch(s, {
-        status: e.ok ? 'ok' : 'failed',
+        status: verdict === 'inconclusive' ? 'inconclusive'
+          : verdict === 'failed' ? 'failed'
+          : e.ok ? 'ok' : 'failed',
         endedAt: Number(e.ts) || null,
         lastSeq: seq,
         currentStep: null,

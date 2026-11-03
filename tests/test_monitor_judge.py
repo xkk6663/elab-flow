@@ -337,9 +337,11 @@ class TestWindowAndExitCode(unittest.TestCase):
 class TestRunCallbackContract(unittest.TestCase):
     """``run()`` 的三个回调是 M3-a "把串口接到事件流上"的唯一接口。
 
-    ★ 这里**不碰硬件**，只验一件最容易搞错的事：**开不了口时不发 on_open /
-      on_close**。否则事件流里会出现一对没有主体的 `serial/open` + `serial/close`
-      ——孤儿事件比缺失事件更坏，因为它看起来"一切正常"。
+    ★ 这里**不碰硬件**，只验两件最容易搞错的事：**开不了口时不发 on_open /
+      on_close**（否则事件流里会出现一对没有主体的 `serial/open` + `serial/close`
+      ——孤儿事件比缺失事件更坏，因为它看起来"一切正常"），以及**选不到口要判
+      failed**（2026-11-03 起：没接串口 / auto 有歧义是用户能修的环境错误，
+      不能记 inconclusive 让闭环总账显示通过）。
     做法：把 port 指到一个必然不存在的口（`SELECT_PORT` 返回空 → 提前 return）。
     """
 
@@ -356,7 +358,7 @@ class TestRunCallbackContract(unittest.TestCase):
                     on_open=lambda *a: calls.append(("open",) + a),
                     on_line=lambda *a: calls.append(("line",) + a),
                     on_close=lambda *a: calls.append(("close",) + a))
-        self.assertIn(v.status, ("inconclusive",))
+        self.assertIn(v.status, ("failed",), "选不到口是环境错误，必须显式失败")
         self.assertEqual(calls, [], "选不到口 → 一个回调都不该发")
 
     def test_callback_exception_does_not_break_the_run(self):

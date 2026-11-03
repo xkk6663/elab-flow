@@ -288,9 +288,15 @@ class EventLog:
                          project=self.project, actor=actor, **extra)
 
     def end(self, ok: bool, steps_ok=(), steps_failed=(), *,
-            actor: str = ACTOR_AGENT) -> dict:
+            actor: str = ACTOR_AGENT, verdict: str = "ok") -> dict:
+        """``verdict`` 是总账的三态（ok / failed / inconclusive）。
+
+        ★ ``ok`` 保持"没有失败步骤"的旧语义（向后兼容：旧前端只读 ok）；
+          要区分"通过"与"未验证"必须读 ``verdict``。
+        """
         return self.emit(RUN_END, ok=bool(ok),
                          steps_ok=list(steps_ok), steps_failed=list(steps_failed),
+                         verdict=verdict or ("ok" if ok else "failed"),
                          project=self.project, actor=actor)
 
     def cancelled(self, *, by: str = "human", reason: str = "",
@@ -543,7 +549,10 @@ def list_runs(runs_dir) -> list[dict]:
         elif end.get("topic") == RUN_CANCEL:
             status = "cancelled"
         else:
-            status = "ok" if end.get("ok") else "failed"
+            # ★ 三态（2026-11-03）：run/end 带 verdict 就要如实回放；
+            #   只看 ok 会把 "inconclusive（没验证）" 记成 ok。
+            status = str(end.get("verdict")
+                         or ("ok" if end.get("ok") else "failed"))
         proc_file = runs_dir / f"{rid}.proc.jsonl"
         out.append({
             "run": rid,

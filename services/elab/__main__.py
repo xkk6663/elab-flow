@@ -609,16 +609,24 @@ def cmd_loop(cfg: Config, args) -> int:
 
     print(f"\n{'=' * 62}")
     failed = False
+    inconcl = False
     for s, ok in steps:
         mark = {True: "✓", False: "✗", None: "—", "inconcl": "?"}.get(ok, "?")
         extra = "  (无结论：未见约定关键字)" if ok == "inconcl" else ""
         print(f"  [{mark}] {s}{extra}")
         if ok is False:
             failed = True
+        if ok == "inconcl":
+            inconcl = True
     print(f"{'=' * 62}")
     if failed:
         print(f"[elab] ✗ 闭环未通过：{name}")
         return 1
+    if inconcl:
+        # ★ 不再打印 "✓✓ 闭环完成"（2026-11-03）：没接串口/没收到关键字时，
+        #   闭环只是"跑完了"，不是"验证通过"。退出码 2 与 `elab monitor` 一致。
+        print(f"[elab] ? 闭环已执行，但串口未验证（inconclusive）：{name}")
+        return 2
     print(f"[elab] ✓✓ 闭环完成：{name}")
     return 0
 
@@ -646,8 +654,9 @@ def cmd_ci(cfg: Config, args) -> int:
 def cmd_run(cfg: Config, args) -> int:
     """跑一串步骤，可选地把每一步写成事件。
 
-    退出码：0 = 全部步骤通过；1 = 有步骤失败。**与 `elab ci` 一致**，
-    方便驾驶舱/脚本直接看码而不必解析输出。
+    退出码：0 = 全部步骤通过；1 = 有步骤失败；2 = 无失败但有步骤未验证
+    （inconclusive，例如串口没收到约定关键字）。三态各有码 —— 脚本不能把
+    "没验证"当成"通过"。
     """
     # ★ `--dry-run` 走**另一条路**：预览是只读的，绝不发射事件、绝不写工作目录。
     #   退出码恒为 0（"能不能预览出来"不是"预览出来的东西能不能跑通"）。
@@ -677,7 +686,8 @@ def cmd_run(cfg: Config, args) -> int:
         if args.emit_events:
             print(f"[elab] 事件 → {res['events']['state']}")
             print(f"       跟读 → {res['events']['proc']}")
-    return 0 if res["ok"] else 1
+    return {"ok": 0, "failed": 1, "inconclusive": 2}.get(
+        res.get("verdict") or ("ok" if res["ok"] else "failed"), 1)
 
 
 # ── pkg：适配包 / 社区市场 ─────────────────────────────────────────

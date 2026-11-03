@@ -277,6 +277,19 @@ class TestWrite(AdaptTestBase):
         self.assertEqual(r3["status"], "identical")
         self.assertFalse(r3["written"])
 
+    def test_default_probe_from_host(self):
+        """新适配工程的默认探针取 elab.host.yaml 的 probes.default，而不是写死 atlink。"""
+        self._write(self.root / "elab.host.yaml", HOST_YAML.replace(
+            "version: 1",
+            "version: 1\nprobes:\n  default: stlink\n  list:\n"
+            "    stlink: { backend: stlink, interface_cfg: interface/stlink.cfg }\n",
+            1))
+        self.cfg = Config(self.root)
+        p = adapt.probe_project(self.cfg, self.make_b_project())
+        adapt.write(self.cfg, p, log=_quiet)
+        text = self.project_yaml("demo_b").read_text(encoding="utf-8")
+        self.assertIn("probe: stlink", text)
+
     def test_check_missing_before_write(self):
         p = adapt.probe_project(self.cfg, self.make_a_project())
         r = adapt.write(self.cfg, p, check=True, log=_quiet)

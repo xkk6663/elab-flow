@@ -88,8 +88,30 @@ const serialWs: WorkspaceDef = {
   },
 };
 
+/**
+ * 调试工作区（P1–P3）：断点/单步/内存/反汇编/监视/外设(SVD)/RTOS 栈水位。
+ * ★ 能力门禁走内核自描述 `capabilities.meta.debug`：缺失 = 内核过旧，置灰并提示同步。
+ */
+const debugWs: WorkspaceDef = {
+  id: "debug",
+  label: "调试",
+  channel: "debug",
+  steps: [],
+  dim: (_card, caps) => !(caps?.meta?.debug?.available ?? false),
+  dimReason: (_card, caps) =>
+    caps?.meta?.debug
+      ? "调试后端不可用"
+      : "内核过旧：缺少 meta.debug（请同步 elab 内核）",
+  emptyText: (_card, caps) => {
+    if (!caps?.meta?.debug) {
+      return "内核未提供调试能力自描述（meta.debug）。请同步内核后重载本页。";
+    }
+    return "调试工作区：点「开始调试」建立会话（会复位目标并停在 main）。";
+  },
+};
+
 /** 静态工作区（顺序即导航顺序） */
-export const STATIC_WORKSPACES: WorkspaceDef[] = [buildWs, flashWs, serialWs];
+export const STATIC_WORKSPACES: WorkspaceDef[] = [buildWs, flashWs, serialWs, debugWs];
 
 /**
  * 工具工作区（单一「工具」页，2026-10-08 二次收敛）：

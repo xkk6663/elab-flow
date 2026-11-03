@@ -19,6 +19,8 @@ interface Window {
 /** React 的最小面（只声明本包用到的 API）。 */
 declare module 'react' {
   export type ReactNode = unknown
+  export type ReactElement = unknown
+  export type CSSProperties = Record<string, string | number | undefined>
   export interface MutableRefObject<T> {
     current: T
   }
@@ -76,6 +78,7 @@ declare module 'react' {
 
 declare namespace React {
   type CSSProperties = Record<string, string | number | undefined>
+  type ReactElement = unknown
   interface KeyboardEvent<T = Element> { currentTarget: T; key: string }
   interface ChangeEvent<T = Element> { currentTarget: T }
   interface FormEvent<T = Element> { preventDefault(): void; currentTarget: T }

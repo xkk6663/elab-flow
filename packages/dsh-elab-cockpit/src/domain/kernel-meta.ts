@@ -20,10 +20,43 @@ export interface KernelPlanMeta {
   requires_hardware?: boolean
 }
 
+export interface KernelDebugMeta {
+  available?: boolean
+  max_sessions?: number
+  features?: string[]
+  actions?: string[]
+  stop_at?: string[]
+  breakpoint_kinds?: string[]
+  registers_group?: string[]
+  formats?: string[]
+  lease?: { default_s?: number; min_s?: number; max_s?: number }
+  limits?: { memory_read_max?: number; disasm_max?: number; audit_records?: number }
+  error_codes?: string[]
+  exclusive_with?: string[]
+  on_close?: { resume?: boolean; method?: string }
+}
+
+export interface KernelProbeMeta {
+  name: string
+  backend?: string
+  interface_cfg?: string
+  speed?: number
+  available?: boolean
+}
+
+export interface KernelProbesMeta {
+  default?: string
+  list?: KernelProbeMeta[]
+}
+
 export interface KernelMeta {
   steps?: Record<string, KernelStepMeta>
   plans?: KernelPlanMeta[]
   channels?: string[]
+  // ★ 调试能力：缺省 = 内核过旧 → 面板隐藏调试入口（AGENTS §4，不在工具层写兼容分支）
+  debug?: KernelDebugMeta
+  // ★ 探针清单：下拉选项与可用性都由内核给（available = interface cfg 是否落地）
+  probes?: KernelProbesMeta
 }
 
 let current: KernelMeta | null = null
@@ -55,4 +88,14 @@ export function kernelPlanTitle(planId: string, fallback: string): string {
 export function kernelPlanSteps(planId: string): string[] | undefined {
   const steps = current?.plans?.find((p) => p.id === planId)?.steps
   return Array.isArray(steps) ? steps.map(String) : undefined
+}
+
+/** 调试面板是否可见：**只有**内核声明 `meta.debug.available=true` 才显示。 */
+export function kernelDebugAvailable(): boolean {
+  return current?.debug?.available === true
+}
+
+/** 探针清单（缺失 = 内核较旧，调用方隐藏下拉，只显示当前值）。 */
+export function kernelProbes(): KernelProbesMeta | null {
+  return current?.probes ?? null
 }

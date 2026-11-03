@@ -7,6 +7,7 @@ import { workspacesFor, type WorkspaceDef, type WorkspaceId } from "../workspace
 import { LogView, ringToText } from "../render/LogView";
 import { useSerialStream } from "../serial/useSerialStream";
 import { SerialWorkspace } from "../serial/SerialWorkspace";
+import { DebugWorkspace } from "../debug/DebugWorkspace";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { SegmentedTabs, type SegTab } from "../primitives/SegmentedTabs";
@@ -447,6 +448,12 @@ export function EvidenceRail({
       {serialWsActive && stream.active ? (
         <SerialWorkspace
           stream={stream}
+          caps={caps}
+          project={serialProject}
+          running={running}
+        />
+      ) : active.id === "debug" ? (
+        <DebugWorkspace
           caps={caps}
           project={serialProject}
           running={running}

@@ -94,17 +94,33 @@ const GET_ALLOW = new Set([
   'serial/widgets',
   // 组件任务快照（run 返回 running 后 300–500ms 轮询；不带 id = 当前任务）
   'serial/widget/job',
+  // 调试会话（§6 ICD）：面板/Agent 同源只读
+  'debug/session', 'debug/stack', 'debug/variables', 'debug/registers',
+  'debug/breakpoints', 'debug/memory', 'debug/disasm',
+  'debug/watch', 'debug/audit', 'debug/peripherals', 'debug/rtos',
 ])
 
 /** 允许转发的 POST 端点。 */
 const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
-  'serial/capture', 'adapt',
+  'serial/capture', 'adapt', 'project',
   // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
   'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate',
   // 工程级发送组件（M1/M2）：保存/删除（rev 乐观锁）+ 执行/取消/暂停
   'serial/widgets', 'serial/widget/run', 'serial/widget/cancel', 'serial/widget/pause',
   // 发送框的定时发送：瞬态任务，不落盘（与组件共用任务引擎）
-  'serial/loop'])
+  'serial/loop',
+  // 调试会话（§6 ICD）：open / control / breakpoints / watch / evaluate / write
+  'debug/session', 'debug/control', 'debug/breakpoints', 'debug/watch',
+  'debug/evaluate', 'debug/write'])
+
+/** 允许转发的 DELETE 端点（调试会话关闭必须恢复运行 —— D8/C36）。 */
+const DELETE_ALLOW = new Set(['debug/session'])
+
+/** 需要按 `x-elab-actor` 注入 actor 的端点（调试租约/写权限依赖它）。 */
+const ACTOR_INJECT = new Set([
+  'debug/session', 'debug/control', 'debug/breakpoints', 'debug/watch',
+  'debug/evaluate', 'debug/write',
+])
 
 /**
  * 代理路由的依赖端口（原 ProxyDeps；批 2 起形状收敛到 app/ports.ts）。
@@ -155,9 +171,16 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
       rel = rel.replace(/\/+$/, '')
       // 只允许单段或已知的两段（serial/console…）
       const method = req.method ?? 'GET'
-      const allowed = method === 'GET' ? GET_ALLOW : method === 'POST' ? POST_ALLOW : undefined
-      if (allowed === undefined) {
+      // DELETE 只有调试会话关闭一个合法端点；其余端点保持"方法不允许"（与历史契约一致）
+      if (method === 'DELETE' && !DELETE_ALLOW.has(rel)) {
         res.setHeader('Allow', 'GET, POST')
+        return err(res, 405, 'method-not-allowed', `不支持的方法：${method}`)
+      }
+      const allowed = method === 'GET' ? GET_ALLOW
+        : method === 'POST' ? POST_ALLOW
+          : method === 'DELETE' ? DELETE_ALLOW : undefined
+      if (allowed === undefined) {
+        res.setHeader('Allow', 'GET, POST, DELETE')
         return err(res, 405, 'method-not-allowed', `不支持的方法：${method}`)
       }
       if (rel === '' || !allowed.has(rel)) {
@@ -177,7 +200,7 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
       const init: RequestInit & { duplex?: 'half' } = { method }
       let runAcquired = false
       const rootKey = url.searchParams.get('sessionId') ?? 'default'
-      if (method === 'POST') {
+      if (method === 'POST' || method === 'DELETE') {
         const raw = await readBody(req)
         let body = raw
         try {
@@ -185,6 +208,10 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
           // ★ actor 注入：AI 通过工具发起时，Host 半会带上 `__actor`
           //   （工具层用内部头传，避免与用户 body 混淆）
           const internal = req.headers['x-elab-actor']
+          // ★ 调试会话：租约只对 agent 生效、写权限只给人 —— 必须带 actor。
+          if (ACTOR_INJECT.has(rel)) {
+            parsed.actor = internal === 'agent' ? 'agent' : 'human'
+          }
           if (rel === 'run' || rel === 'serial/widget/run') {
             // ★ 组件执行也要区分人/agent：人的按钮 = human，工具调用带内部头 = agent
             //   （面板据 actor 决定谁能停：人的停止/暂停永远优先）。
@@ -283,6 +310,71 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
  *   `Last-Event-ID` 做断线续传（`server.py:1046-1200`）。任何中间层的重组
  *   都会破坏这个契约；而 `proc/stdout-batch` 的 100ms 合帧也已在服务端做好。
  */
+/**
+ * `/elab/debug/events`（exact）—— 调试事件 SSE 字节级透传。
+ *
+ * ★ 独立于 `/elab/events`：调试事件的信封没有 `run` 字段（§6.4），
+ *   硬塞进 run 流会让前端把会话状态错挂到某个 run 上。
+ */
+export function registerDebugEventsRoute(ctx: HostRouteContext, deps: ProxyDeps): () => void {
+  return registerOnce(ctx, {
+    kind: 'exact',
+    path: '/elab/debug/events',
+    handler: async (req, res) => {
+      if (ctx.connection?.requestRejection(req) !== undefined) {
+        return err(res, 403, 'forbidden', 'forbidden')
+      }
+      if (req.method !== 'GET') {
+        res.setHeader('Allow', 'GET')
+        return err(res, 405, 'method-not-allowed', 'SSE 只接受 GET')
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.internal')
+      let host
+      try {
+        host = await deps.ensureHost(url.searchParams.get('sessionId') ?? undefined)
+      } catch (error) {
+        return err(res, 503, 'host-unavailable', error instanceof Error ? error.message : String(error))
+      }
+      const target = new URL(`${host.baseUrl}/api/debug/events`)
+      let aborted = false
+      res.on('close', () => {
+        aborted = true
+      })
+      try {
+        const upstream = await fetch(target, {
+          headers: { Accept: 'text/event-stream' },
+          signal: AbortSignal.timeout(30 * 60_000),
+        })
+        if (!upstream.ok || upstream.body === null) {
+          const text = await upstream.text().catch(() => '')
+          return err(res, upstream.status || 502, 'upstream-error', text.slice(0, 300))
+        }
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+        res.setHeader('Cache-Control', 'no-cache, no-transform')
+        res.setHeader('Connection', 'keep-alive')
+        res.setHeader('X-Accel-Buffering', 'no')
+        res.socket?.setTimeout(0)
+        res.flushHeaders?.()
+        const reader = upstream.body.getReader()
+        while (!aborted) {
+          const { done, value } = await reader.read()
+          if (done) break
+          res.write(Buffer.from(value))
+        }
+        try { await reader.cancel() } catch { /* ignore */ }
+        if (!aborted) res.end()
+      } catch (error) {
+        if (!aborted) {
+          try {
+            err(res, 502, 'sse-failed', error instanceof Error ? error.message : String(error))
+          } catch { /* 头已发出 */ }
+        }
+      }
+    },
+  })
+}
+
 export function registerEventsRoute(ctx: HostRouteContext, deps: ProxyDeps): () => void {
   return registerOnce(ctx, {
     kind: 'exact',

@@ -23,8 +23,13 @@ export interface ProjectsRailProps {
   loading: boolean;
   /** 适配写入成功后由 App 收尾：刷新目录 + 选中新工程（M5.6） */
   onAdapted: (name: string) => void;
-  /** 工程改名 / 移除成功后由 App 收尾：刷新目录并重新选中 */
-  onManaged: (res: { action: "rename" | "remove"; name: string; new_name?: string }) => void;
+  /** 工程改名 / 移除 / 切换探针成功后由 App 收尾：刷新目录并重新选中 */
+  onManaged: (res: {
+    action: "rename" | "remove" | "set_probe";
+    name: string;
+    new_name?: string;
+    probe?: string;
+  }) => void;
 }
 
 /**
@@ -55,6 +60,24 @@ export function ProjectsRail({
   const [busyMan, setBusyMan] = useState(false);
   const [manErr, setManErr] = useState("");
   const [manNote, setManNote] = useState("");
+  // 探针胶囊（与 DSH 面板同源）：选项/可用性来自 capabilities.meta.probes
+  const [probeFor, setProbeFor] = useState<string | null>(null);
+  const [busyProbe, setBusyProbe] = useState(false);
+  const probeList = caps?.meta?.probes?.list ?? [];
+
+  async function doSetProbe(name: string, probe: string) {
+    setBusyProbe(true);
+    setManErr("");
+    try {
+      const r = await api.projectAdmin({ action: "set_probe", name, probe });
+      setProbeFor(null);
+      onManaged({ action: "set_probe", name, probe: r.probe ?? probe });
+    } catch (e) {
+      setManErr(errmsg(e));
+    } finally {
+      setBusyProbe(false);
+    }
+  }
 
   async function doRename(name: string) {
     const next = renameValue.trim();
@@ -370,16 +393,109 @@ export function ProjectsRail({
             </dl>
 
             <div className={s.io}>
-              <div className={s.ioRow}>
+              <div className={s.ioRow} style={{ position: "relative" }}>
                 <IconPlug className={s.ioIcon} />
                 <span className={s.ioLabel}>探针</span>
-                <span className={s.ioVal} title={p.probe}>
-                  {p.probe || "未声明"}
-                </span>
-                <Pill tone={p.probe && p.steps.flash.ok ? "green" : "red"}>
-                  {p.probe && p.steps.flash.ok ? "可上板" : "不可用"}
+                <button
+                  type="button"
+                  disabled={locked || busyProbe || probeList.length === 0}
+                  onClick={() => {
+                    setManErr("");
+                    setProbeFor(probeFor === p.name ? null : p.name);
+                  }}
+                  title={
+                    probeList.length === 0
+                      ? "内核未提供探针清单（同步内核后重试）"
+                      : "切换 debug.probe（只改接入文件；调试会话打开时会失败）"
+                  }
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 3,
+                    flex: "1 1 auto",
+                    minWidth: 0,
+                    padding: 0,
+                    border: "none",
+                    background: "transparent",
+                    cursor: locked || busyProbe ? "default" : "pointer",
+                    opacity: locked || busyProbe ? 0.6 : 1,
+                  }}
+                >
+                  <span className={s.ioVal} title={p.probe}>
+                    {p.probe || "未声明"}
+                  </span>
+                  <span style={{ fontSize: 9, color: "var(--elab-fg-faint)" }}>▾</span>
+                </button>
+                <Pill
+                  tone={p.probe && p.steps.flash.ok ? "green" : "red"}
+                  title="配置层面：工程已声明探针且烧录步骤可用；探针是否插好由烧录时 OpenOCD 判定"
+                >
+                  {p.probe && p.steps.flash.ok ? "已配置" : "未配置"}
                 </Pill>
+                {probeFor === p.name ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      // ★ 向上弹（2026-11-03）：芯片卡在左栏最底部，向下弹会被视口下边缘
+                      //   裁掉——用户只看到第一项（"显示不全"）。向上有工程列表的整片空间。
+                      bottom: "calc(100% + 3px)",
+                      left: 64,
+                      zIndex: 50,
+                      minWidth: 156,
+                      maxHeight: "40vh",
+                      overflowY: "auto",
+                      padding: 4,
+                      borderRadius: 6,
+                      border: "1px solid var(--elab-border, #333)",
+                      background: "var(--elab-bg-raised, #1b1b1f)",
+                      boxShadow: "0 6px 18px rgba(0,0,0,.35)",
+                    }}
+                  >
+                    {probeList.map((it) => {
+                      const unavailable = it.available === false;
+                      const active = it.name === p.probe;
+                      return (
+                        <button
+                          key={it.name}
+                          type="button"
+                          disabled={unavailable || active || busyProbe}
+                          onClick={() => void doSetProbe(p.name, it.name)}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            width: "100%",
+                            padding: "3px 6px",
+                            border: "none",
+                            borderRadius: 4,
+                            background: "transparent",
+                            color: unavailable
+                              ? "var(--elab-fg-faint)"
+                              : "var(--elab-fg-primary)",
+                            fontSize: "var(--elab-fs-xs)",
+                            textAlign: "left",
+                            cursor: unavailable || active ? "default" : "pointer",
+                          }}
+                        >
+                          <span>{it.name}</span>
+                          <span
+                            style={{
+                              marginLeft: "auto",
+                              fontSize: 9,
+                              color: "var(--elab-fg-faint)",
+                            }}
+                          >
+                            {unavailable ? "接口缺失" : active ? "当前" : "接口就绪"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
+              {probeFor === p.name && manErr ? (
+                <div className={s.adaptErr}>{manErr}</div>
+              ) : null}
               <div className={s.ioRow}>
                 <span className={s.ioIcon} aria-hidden="true">
                   ⌁

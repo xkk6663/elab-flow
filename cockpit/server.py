@@ -39,6 +39,8 @@ if str(_ROOT / "services") not in sys.path:
 from elab import adapt as adapt_mod                      # noqa: E402
 from elab import project_admin as project_admin_mod      # noqa: E402
 from elab import flash as flash_mod                      # noqa: E402
+from elab import debugsession as dbgsess_mod           # noqa: E402
+from elab.plan import plan_for                          # noqa: E402
 from elab import run as run_mod                      # noqa: E402
 from elab import serialcodec as serialcodec_mod      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
@@ -46,7 +48,7 @@ from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab import serialwidgets as serialwidgets_mod  # noqa: E402
-from elab.config import Config, ElabError, to_fwd     # noqa: E402
+from elab.config import Config, ElabError, Host, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 from elab import pkg as pkg_mod                       # noqa: E402
 from elab import _yaml as yaml_mod                    # noqa: E402
@@ -116,7 +118,44 @@ SERIAL_META = {
     },
 }
 
-COCKPIT_VERSION = "3.0.0"
+COCKPIT_VERSION = "3.1.0"
+
+DEBUG_LEASE_DEFAULT_S = 600
+DEBUG_LEASE_MIN_S = 60
+DEBUG_LEASE_MAX_S = 1800
+DEBUG_AUDIT_MAX = 500
+
+#: 调试能力自描述（§16 内核自描述）：工具层按此渲染，不写死业务名词。
+#: ★ 内核过旧（缺 ``meta.debug``）时插件隐藏调试入口 —— 不在工具层写兼容分支。
+DEBUG_META = {
+    "available": True,
+    "max_sessions": 1,
+    "features": ["session", "control", "stack", "variables", "registers",
+                 "breakpoints", "memory", "disasm", "watch", "svd", "rtos"],
+    "actions": ["continue", "pause", "step_over", "step_in", "step_out",
+                "stepi", "reset", "restart", "run_to"],
+    "stop_at": ["main", "reset", "none"],
+    "breakpoint_kinds": ["func", "addr"],
+    "registers_group": ["core", "fpu", "all"],
+    "formats": ["natural", "hex"],
+    "watch_formats": ["natural", "hex", "binary"],
+    "svd": {"tree_path": "PERIPH 或 PERIPH.REG", "read": True},
+    "rtos": {"available_via": "elf symbols (FreeRTOS pxCurrentTCB)", "granularity": "task"},
+    "lease": {"default_s": DEBUG_LEASE_DEFAULT_S, "min_s": DEBUG_LEASE_MIN_S,
+              "max_s": DEBUG_LEASE_MAX_S},
+    "limits": {"memory_read_max": 4096, "disasm_max": 128,
+               "variables_depth": 8, "audit_records": DEBUG_AUDIT_MAX,
+               "watch_max": 32},
+    "error_codes": ["debug-unavailable", "debug-busy", "debug-no-session",
+                    "debug-elf-missing", "debug-gdb-missing", "debug-openocd-dead",
+                    "debug-port-hijacked", "debug-timeout", "debug-target-running",
+                    "debug-bad-request", "debug-write-denied", "debug-limit",
+                    "debug-rev-conflict", "debug-svd-missing",
+                    "debug-rtos-unavailable", "debug-error"],
+    # 互斥语义（面板据此显示人话）
+    "exclusive_with": ["run(flash/debug_verify/monitor)", "serial-monitor"],
+    "on_close": {"resume": True, "method": "monitor reset run"},
+}
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
@@ -138,6 +177,9 @@ SSE_TOPICS = frozenset({
     "proc/stdout", "proc/stderr", "proc/stdout-batch", "proc/exit",
     "serial/open", "serial/line", "serial/close", "serial/error",
     "serial/closed-loop",
+    # 调试会话（独立信封，不复用 run 信封）
+    "debug/opened", "debug/state", "debug/stop", "debug/breakpoint",
+    "debug/output", "debug/error", "debug/closed",
     "stream/overrun", "stream/closed",
 })
 
@@ -752,9 +794,35 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "meta": {"steps": STEP_META, "plans": KERNEL_PLANS,
                  "channels": ["build", "flash", "debug", "serial"],
                  "serial": SERIAL_META,
+                 "debug": DEBUG_META,
+                 # 探针清单：面板据此渲染下拉（available = interface cfg 是否落地）
+                 "probes": _probes_summary(cfg),
                  # R7 / P1-4：profile 决定右列工作区与启用工具（缺省 = 内置集合）
                  "profile": _profile_summary(cfg)},
     }
+
+
+def _probes_summary(cfg: Config) -> dict:
+    """``capabilities.meta.probes`` —— 本机可用探针的唯一事实源。
+
+    ★ 只读 L0（`elab.host.yaml: probes.list`）；interface cfg 是否存在决定 available。
+      面板不该自己猜「某个探针能不能上板」。
+    """
+    host = Host(cfg)
+    scripts = host.openocd_scripts
+    items = []
+    for name, raw in (host.probes or {}).items():
+        info = raw or {}
+        icfg = str(info.get("interface_cfg") or "")
+        available = True
+        if icfg and scripts:
+            available = (Path(scripts) / icfg).is_file()
+        items.append({"name": name,
+                      "backend": str(info.get("backend") or ""),
+                      "interface_cfg": icfg,
+                      "speed": info.get("speed"),
+                      "available": available})
+    return {"default": host.default_probe, "list": items}
 
 
 def _console_info(cfg: Config) -> dict:
@@ -811,6 +879,247 @@ def _serial_blocker(mgr: "RunManager") -> dict | None:
         if set(a.get("steps") or []) & _SERIAL_STEPS:
             return a
     return None
+
+
+def _qs_int(qs: dict, key: str, default: int | None = 0) -> int | None:
+    raw = (qs.get(key) or [""])[0]
+    if raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ElabError(f"{key} 必须是整数：{raw!r}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  调试会话管理（单会话 + 租约 + 互斥 + 审计）§7.7
+# ══════════════════════════════════════════════════════════════════
+def _debug_audit_path(cfg: Config) -> Path:
+    return Path(cfg.root) / ".work" / "debug-audit.jsonl"
+
+
+def _debug_audit_tail(cfg: Config, limit: int = 100) -> dict:
+    """审计尾读（``?limit=``）；坏行跳过，只回最近 N 条。"""
+    path = _debug_audit_path(cfg)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    out = []
+    for line in lines[-limit:]:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return {"records": out, "count": len(out), "requested": limit,
+            "path": to_fwd(path)}
+
+
+def _debug_audit(cfg: Config, rec: dict) -> None:
+    """审计留档（独立文件；**绝不**写进 state.json —— C14/C15/C28）。"""
+    try:
+        path = _debug_audit_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": time.time(), **rec}, ensure_ascii=False) + "\n")
+        # 只保留最近 DEBUG_AUDIT_MAX 行（调试会话不是 run 归档，不无界增长）
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > DEBUG_AUDIT_MAX:
+            path.write_text("\n".join(lines[-DEBUG_AUDIT_MAX:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+class DebugManager:
+    """调试会话登记簿 + 事件扇出（``max_sessions=1``）。
+
+    与 :class:`RunManager` 同构的有界队列/单飞语义；差异：
+      - 只有**一个**会话；
+      - 租约只对 ``owner=agent`` 生效（到期自动关闭并**恢复运行**）；
+      - 关闭必须恢复目标运行（C36 延伸）；
+      - 与「会用到串口的闭环」「串口监视」互斥（N5）。
+    """
+
+    def __init__(self, cfg: Config, runs: RunManager, *, log=print):
+        self.cfg = cfg
+        self.runs = runs
+        self.log = log
+        self._lock = threading.Lock()
+        self._sess: dbgsess_mod.DebugSession | None = None
+        self._open_seq = 0
+        self._seq = 0
+        self._allow_write = False
+        self._subs: set[queue.Queue] = set()
+        self._lease_thread = threading.Thread(target=self._lease_loop, daemon=True,
+                                              name="elab-debug-lease")
+        self._lease_thread.start()
+
+    # ── 查询 ────────────────────────────────────────────────────
+    def get(self) -> dbgsess_mod.DebugSession | None:
+        with self._lock:
+            return self._sess
+
+    def snapshot(self) -> dict:
+        sess = self.get()
+        if sess is None:
+            return {"session": None}
+        return {"session": sess.snapshot()}
+
+    def require(self) -> dbgsess_mod.DebugSession:
+        sess = self.get()
+        if sess is None:
+            raise dbgsess_mod.DebugError("debug-no-session", "当前没有调试会话",
+                                         "先 elab_debug_open / 面板点「开始调试」")
+        return sess
+
+    # ── 事件 ────────────────────────────────────────────────────
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=500)
+        with self._lock:
+            self._subs.add(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            self._subs.discard(q)
+
+    def _emit(self, topic: str, data: dict) -> None:
+        sess = self.get()
+        with self._lock:
+            self._seq += 1
+            seq = self._seq
+            envelope = {
+                "topic": topic,
+                "seq": seq,
+                "ts": time.time(),
+                "session": sess.session_id if sess else "",
+                "data": data,
+            }
+            subs = list(self._subs)
+        for q in subs:
+            try:
+                if q.full():
+                    q.get_nowait()                 # 丢最旧（与 RunManager 同款有界背压）
+                q.put_nowait(envelope)
+            except (queue.Empty, queue.Full):
+                pass
+
+    # ── 互斥 ────────────────────────────────────────────────────
+    def _blocker(self) -> dict | None:
+        for a in self.runs.list_active():
+            if not a.get("alive"):
+                continue
+            if set(a.get("steps") or []) & _SERIAL_STEPS:
+                return {"code": "debug-busy",
+                        "message": (f"闭环 {a.get('project')} 正在占用 SWD/串口"
+                                    f"（steps={'/'.join(a.get('steps') or [])}）"),
+                        "hint": "等闭环结束或先取消"}
+        mon = serialmon_mod.status()
+        if mon.get("active"):
+            return {"code": "serial-monitor-active",
+                    "message": f"串口监视正在占用 {mon.get('port')}",
+                    "hint": "先在串口页签关闭监视"}
+        return None
+
+    # ── 打开 / 关闭 ──────────────────────────────────────────────
+    def open(self, *, project: str, actor: str = "human", options: dict | None = None,
+             lease_s: int = 0, allow_write: bool = False) -> dict:
+        blocker = self._blocker()
+        if blocker:
+            raise dbgsess_mod.DebugError(blocker["code"], blocker["message"], blocker["hint"])
+        with self._lock:
+            cur = self._sess
+            if cur is not None and cur.state not in ("closed", "error"):
+                raise dbgsess_mod.DebugError(
+                    "debug-busy", f"已有调试会话（项目 {cur.plan.name}，owner={cur.owner}）",
+                    "先关闭现有会话（DELETE /api/debug/session）")
+            self._open_seq += 1
+            open_seq = self._open_seq
+            lease = (0 if actor != "agent" else
+                     max(DEBUG_LEASE_MIN_S, min(int(lease_s or DEBUG_LEASE_DEFAULT_S),
+                                                DEBUG_LEASE_MAX_S)))
+            try:
+                plan = plan_for(self.cfg, project)
+            except Exception as exc:                   # noqa: BLE001
+                raise dbgsess_mod.DebugError("debug-bad-request",
+                                             f"工程不可用：{project!r}（{exc}）")
+            sess = dbgsess_mod.DebugSession(
+                plan, actor=actor, lease_s=lease, options=options or {},
+                open_seq=open_seq, emit=self._emit, log=self.log)
+            self._sess = sess
+            self._allow_write = bool(allow_write) and actor == "human"
+        _debug_audit(self.cfg, {"action": "open", "session": sess.session_id,
+                                "project": project, "actor": actor,
+                                "options": options or {}, "lease_s": lease})
+        try:
+            snap = sess.open()
+        except dbgsess_mod.DebugError as exc:
+            with self._lock:
+                if self._sess is sess:
+                    self._sess = None
+            sess.error = exc.as_dict()
+            _debug_audit(self.cfg, {"action": "open-failed", "session": sess.session_id,
+                                    "project": project, "code": exc.code,
+                                    "message": exc.message})
+            raise
+        self.log(f"[debug] 会话 {sess.session_id} 打开：{project} ({actor})")
+        return {"session": snap}
+
+    def close(self, *, reason: str = "user-closed", resume: bool = True,
+              actor: str = "human", force: bool = False) -> dict:
+        sess = self.get()
+        if sess is None:
+            return {"closed": False, "reason": "no-session"}
+        with self._lock:
+            owner = sess.owner
+            self._sess = None
+        res = sess.close(resume=resume, reason=reason)
+        self.log(f"[debug] 会话 {sess.session_id} 关闭：{reason}（resumed={res['resumed']}）")
+        _debug_audit(self.cfg, {"action": "close", "session": sess.session_id,
+                                "reason": reason, "actor": actor, "resumed": res["resumed"]})
+        return {**res, "session": sess.session_id}
+
+    def drop(self, sess: dbgsess_mod.DebugSession) -> None:
+        with self._lock:
+            if self._sess is sess:
+                self._sess = None
+
+    # ── 写权限 ──────────────────────────────────────────────────
+    def require_write(self, *, confirm: bool) -> None:
+        if not self._allow_write:
+            raise dbgsess_mod.DebugError(
+                "debug-write-denied", "会话未开启写权限",
+                "以人类身份重开会话并传 allow_write=true")
+        if not confirm:
+            raise dbgsess_mod.DebugError("debug-bad-request", "写操作需要 confirm=true")
+
+    def allow_write(self) -> bool:
+        return self._allow_write
+
+    # ── 租约回收 ────────────────────────────────────────────────
+    def _lease_loop(self) -> None:
+        while True:
+            time.sleep(2.0)
+            sess = self.get()
+            if sess is None or sess.owner != "agent" or sess.lease_s <= 0:
+                continue
+            if sess.state in ("closed", "error"):
+                continue
+            idle = time.time() - sess.last_active
+            if idle < sess.lease_s:
+                continue
+            # 最后 30s 先发一条告警（面板显示"租约即将到期"）
+            if idle >= sess.lease_s - 30 and not getattr(sess, "_lease_warned", False):
+                sess._lease_warned = True
+                self._emit("debug/output", {"stream": "log",
+                                            "text": "租约将在 30s 后到期（agent 无活动）"})
+            if idle >= sess.lease_s:
+                try:
+                    self.close(reason="lease-expired", resume=True, actor="system")
+                except Exception as exc:             # noqa: BLE001
+                    self.log(f"[debug] 租约回收失败：{exc!r}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -917,6 +1226,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
     # 由 make_server 注入
     cfg: Config
     mgr: RunManager
+    dbg: DebugManager
     pkg_jobs: PkgJobManager
     dist: Path
     sse_sem: threading.Semaphore
@@ -975,6 +1285,20 @@ class CockpitHandler(BaseHTTPRequestHandler):
     def _err(self, code: int, msg: str):
         self._json({"error": msg}, code)
 
+    _DEBUG_STATUS = {
+        "debug-busy": 409, "debug-no-session": 409, "debug-target-running": 409,
+        "debug-write-denied": 403, "debug-limit": 400, "debug-bad-request": 400,
+        "debug-unavailable": 503, "debug-timeout": 504,
+        "debug-rev-conflict": 409, "debug-svd-missing": 404,
+        "debug-rtos-unavailable": 503, "debug-elf-missing": 409,
+        "debug-gdb-missing": 503, "debug-openocd-dead": 500,
+        "debug-port-hijacked": 409,
+    }
+
+    def _debug_err(self, exc: dbgsess_mod.DebugError):
+        self._json({"error": exc.message, **exc.as_dict()},
+                   self._DEBUG_STATUS.get(exc.code, 500))
+
     def _fail(self, exc: Exception):
         """统一的失败出口。
 
@@ -1028,6 +1352,49 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                    "active": self.mgr.list_active()})
             if path == "/api/plan":
                 return self._json(_plan_preview(self.cfg, qs))
+            if path == "/api/debug/session":
+                return self._json(self.dbg.snapshot())
+            if path == "/api/debug/events":
+                return self._sse_debug()
+            if path == "/api/debug/stack":
+                thread = _qs_int(qs, "thread", None)
+                return self._json(self.dbg.require().stack(thread=thread))
+            if path == "/api/debug/variables":
+                frame = _qs_int(qs, "frame", 0) or 0
+                scope = (qs.get("scope") or ["locals"])[0]
+                var = (qs.get("var") or [""])[0]
+                return self._json(self.dbg.require().variables(frame=frame, scope=scope,
+                                                               var=var))
+            if path == "/api/debug/registers":
+                group = (qs.get("group") or ["core"])[0]
+                fmt = (qs.get("format") or ["natural"])[0]
+                return self._json(self.dbg.require().registers(group=group, fmt=fmt))
+            if path == "/api/debug/breakpoints":
+                sess = self.dbg.require()
+                return self._json({"breakpoints": sess.breakpoints(),
+                                   "rev": sess.store_rev(),
+                                   "allow_write": self.dbg.allow_write()})
+            if path == "/api/debug/watch":
+                return self._json(self.dbg.require().watch())
+            if path == "/api/debug/audit":
+                limit = _qs_int(qs, "limit", 100) or 100
+                limit = max(1, min(limit, DEBUG_AUDIT_MAX))
+                return self._json(_debug_audit_tail(self.cfg, limit))
+            if path == "/api/debug/peripherals":
+                p = (qs.get("path") or [""])[0]
+                read = (qs.get("read") or ["0"])[0] in ("1", "true", "yes")
+                return self._json(self.dbg.require().peripherals(path=p, read=read))
+            if path == "/api/debug/rtos":
+                return self._json(self.dbg.require().rtos())
+            if path == "/api/debug/memory":
+                addr = (qs.get("addr") or [""])[0]
+                count = _qs_int(qs, "count", 256) or 256
+                return self._json(self.dbg.require().memory(addr=addr, count=count))
+            if path == "/api/debug/disasm":
+                addr = (qs.get("addr") or [""])[0]
+                count = _qs_int(qs, "count", 32) or 32
+                mode = _qs_int(qs, "mode", 2) or 2
+                return self._json(self.dbg.require().disasm(addr=addr, count=count, mode=mode))
             if path == "/api/events":
                 return self._sse(qs)
             if path == "/api/run-events":
@@ -1100,6 +1467,8 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/"):
                 return self._err(404, f"未知 API：{path}")
             return self._static(path)
+        except dbgsess_mod.DebugError as exc:
+            return self._debug_err(exc)
         except ElabError as exc:
             return self._err(400, str(exc))
         except Exception as exc:                       # noqa: BLE001
@@ -1111,6 +1480,122 @@ class CockpitHandler(BaseHTTPRequestHandler):
     def do_POST(self):                                 # noqa: N802
         u = urlparse(self.path)
         try:
+            if u.path == "/api/debug/session":
+                body = self._body()
+                return self._json(self.dbg.open(
+                    project=str(body.get("project") or ""),
+                    actor=str(body.get("actor") or "human"),
+                    options=body.get("options") or {},
+                    lease_s=int(body.get("lease_s") or 0),
+                    allow_write=bool(body.get("allow_write")),
+                ))
+            if u.path == "/api/debug/control":
+                body = self._body()
+                return self._json(self.dbg.require().control(
+                    str(body.get("action") or ""),
+                    addr=str(body.get("addr") or ""),
+                    confirm=bool(body.get("confirm")),
+                ))
+            if u.path == "/api/debug/breakpoints":
+                body = self._body()
+                op = str(body.get("op") or "list")
+                sess = self.dbg.require()
+                rev = (None if body.get("rev") is None else int(body.get("rev")))
+                if op == "add":
+                    out = sess.breakpoint_add(
+                        kind=str(body.get("kind") or "func"),
+                        location=str(body.get("location") or ""),
+                        condition=str(body.get("condition") or ""),
+                        hardware=bool(body.get("hardware")),
+                        temporary=bool(body.get("temporary")),
+                        rev=rev,
+                    )
+                    _debug_audit(self.cfg, {"action": "breakpoint-add",
+                                            "session": sess.session_id,
+                                            "project": sess.plan.name,
+                                            "actor": sess.owner,
+                                            "location": body.get("location") or ""})
+                    return self._json(out)
+                if op == "update":
+                    out = sess.breakpoint_update(
+                        bp_id=str(body.get("id") or ""),
+                        condition=(None if "condition" not in body
+                                   else str(body.get("condition") or "")),
+                        enabled=(None if "enabled" not in body else bool(body.get("enabled"))),
+                        rev=rev,
+                    )
+                    return self._json(out)
+                if op == "toggle":
+                    return self._json(sess.breakpoint_toggle(
+                        bp_id=str(body.get("id") or ""), rev=rev))
+                if op == "remove":
+                    out = sess.breakpoint_remove(bp_id=str(body.get("id") or ""), rev=rev)
+                    _debug_audit(self.cfg, {"action": "breakpoint-remove",
+                                            "session": sess.session_id,
+                                            "project": sess.plan.name,
+                                            "actor": sess.owner,
+                                            "id": body.get("id") or ""})
+                    return self._json(out)
+                if op == "list":
+                    return self._json({"breakpoints": sess.breakpoints(),
+                                       "rev": sess.store_rev(),
+                                       "allow_write": self.dbg.allow_write()})
+                raise ElabError(f"未知断点操作：{op!r}")
+            if u.path == "/api/debug/watch":
+                body = self._body()
+                op = str(body.get("op") or "list")
+                sess = self.dbg.require()
+                rev = (None if body.get("rev") is None else int(body.get("rev")))
+                if op == "add":
+                    return self._json(sess.watch_add(
+                        expr=str(body.get("expr") or ""),
+                        fmt=str(body.get("format") or "natural"), rev=rev))
+                if op == "update":
+                    return self._json(sess.watch_update(
+                        wid=str(body.get("id") or ""),
+                        expr=(None if "expr" not in body else str(body.get("expr") or "")),
+                        fmt=(None if "format" not in body else str(body.get("format") or "")),
+                        rev=rev))
+                if op == "remove":
+                    return self._json(sess.watch_remove(
+                        wid=str(body.get("id") or ""), rev=rev))
+                if op == "list":
+                    return self._json(sess.watch())
+                raise ElabError(f"未知监视操作：{op!r}")
+            if u.path == "/api/debug/evaluate":
+                body = self._body()
+                return self._json(self.dbg.require().evaluate(
+                    expr=str(body.get("expr") or ""),
+                    frame=(None if body.get("frame") is None else int(body.get("frame"))),
+                ))
+            if u.path == "/api/debug/write":
+                body = self._body()
+                target = str(body.get("target") or "")
+                self.dbg.require_write(confirm=bool(body.get("confirm")))
+                sess = self.dbg.require()
+                if target == "memory":
+                    out = sess.write_memory(
+                        addr=str(body.get("addr") or ""),
+                        value=str(body.get("value") or ""))
+                    _debug_audit(self.cfg, {"action": "write", "target": "memory",
+                                            "session": sess.session_id,
+                                            "project": sess.plan.name,
+                                            "actor": sess.owner,
+                                            "addr": body.get("addr") or "",
+                                            "value": body.get("value") or ""})
+                    return self._json(out)
+                if target == "register":
+                    out = sess.write_register(
+                        name=str(body.get("name") or ""),
+                        value=str(body.get("value") or ""))
+                    _debug_audit(self.cfg, {"action": "write", "target": "register",
+                                            "session": sess.session_id,
+                                            "project": sess.plan.name,
+                                            "actor": sess.owner,
+                                            "name": body.get("name") or "",
+                                            "value": body.get("value") or ""})
+                    return self._json(out)
+                raise ElabError(f"未知写目标：{target!r}")
             if u.path == "/api/run":
                 body = self._body()
                 project = body.get("project") or ""
@@ -1439,6 +1924,27 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 # 工程接入文件的命名与移除（左侧工程轨的「⋯」菜单）。
                 return self._project_admin(self._body())
             return self._err(404, f"未知 API：{u.path}")
+        except dbgsess_mod.DebugError as exc:
+            return self._debug_err(exc)
+        except ElabError as exc:
+            return self._err(400, str(exc))
+        except Exception as exc:                       # noqa: BLE001
+            return self._fail(exc)
+
+    def do_DELETE(self):                               # noqa: N802
+        """``DELETE /api/debug/session`` —— 关闭会话并恢复运行（D8/C36）。"""
+        u = urlparse(self.path)
+        try:
+            if u.path != "/api/debug/session":
+                return self._err(404, f"未知 API：{u.path}")
+            body = self._body()
+            resume = bool(body.get("resume", True))
+            return self._json(self.dbg.close(
+                reason=str(body.get("reason") or "user-closed"),
+                resume=resume, actor=str(body.get("actor") or "human"),
+            ))
+        except dbgsess_mod.DebugError as exc:
+            return self._debug_err(exc)
         except ElabError as exc:
             return self._err(400, str(exc))
         except Exception as exc:                       # noqa: BLE001
@@ -1641,32 +2147,42 @@ class CockpitHandler(BaseHTTPRequestHandler):
             return self._json({"cancelled": True}, 200)
         return self._json({"path": Path(picked).as_posix()}, 200)
 
-    # ── 工程管理（重命名 / 移除）──────────────────────────────────
+    # ── 工程管理（重命名 / 移除 / 切换探针）──────────────────────────
     def _project_admin(self, body: dict):
         """``POST /api/project`` —— 左侧工程轨的「⋯」菜单。
 
-            action=rename  {name, new_name}  改 projects/<name>.yaml 的基名与 name 行
-            action=remove  {name}            先留 .bak 再删接入文件
+            action=rename     {name, new_name}  改 projects/<name>.yaml 的基名与 name 行
+            action=remove     {name}            先留 .bak 再删接入文件
+            action=set_probe  {name, probe}      只改 debug.probe（保留注释）
 
         ★ 只动接入层（`projects/*.yaml`），业务工程零改动（guard 快照不受影响）。
         ★ 成功后**必须**重载 Config —— 否则工程轨仍显示旧卡片（C29 同一教训）。
         ★ 有闭环在跑 → 409：改名/删除会让在途 run 的 project 键失效。
+        ★ 调试会话打开 → 409：避免面板显示新探针、当前会话仍用旧探针。
         """
         action = str(body.get("action") or "").strip()
         name = str(body.get("name") or "").strip()
-        if action not in ("rename", "remove"):
-            raise ElabError(f"action 必须是 rename / remove：{action!r}")
+        if action not in ("rename", "remove", "set_probe"):
+            raise ElabError(f"action 必须是 rename / remove / set_probe：{action!r}")
         if not name:
             raise ElabError("缺少 name")
         active = self.mgr.list_active()
         if active:
             raise ElabError(
-                f"有闭环正在跑（run={active[0].get('run')}）—— 等它结束再改名/移除")
+                f"有闭环正在跑（run={active[0].get('run')}）—— 等它结束再改名/移除/切换探针")
 
         if action == "rename":
             res = project_admin_mod.rename(self.cfg, name, str(body.get("new_name") or ""))
-        else:
+        elif action == "remove":
             res = project_admin_mod.remove(self.cfg, name)
+        else:
+            sess = self.dbg.get()
+            if sess is not None and sess.state not in ("closed", "error"):
+                raise dbgsess_mod.DebugError(
+                    "debug-busy", f"调试会话打开中（项目 {sess.plan.name}）—— 先关闭会话再切换探针",
+                    "点调试工作区「关闭」，或 DELETE /api/debug/session")
+            res = project_admin_mod.set_probe(
+                self.cfg, name, str(body.get("probe") or ""))
 
         cfg2 = Config(self.cfg.root)
         type(self).cfg = cfg2
@@ -1698,6 +2214,43 @@ class CockpitHandler(BaseHTTPRequestHandler):
         self._send(200, target.read_bytes(), ctype)
 
     # ── SSE ─────────────────────────────────────────────────────
+    def _sse_debug(self):
+        """调试事件流（独立信封 §6.4）。
+
+        ★ 与 run SSE 分开：``ElabEvent`` 的 ``run`` 字段是必填的，硬塞会把
+          "调试会话"伪装成"某个 run"，工具层与前端都得靠猜。
+        """
+        if not self.sse_sem.acquire(blocking=False):
+            return self._err(503, f"SSE 连接数已达上限（{MAX_SSE_CONNS}）")
+        q = self.dbg.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._sent_headers = True
+            last_beat = time.time()
+            while True:
+                try:
+                    e = q.get(timeout=PROC_BATCH_S)
+                except queue.Empty:
+                    if (time.time() - last_beat) >= SSE_HEARTBEAT_S:
+                        self._chunk(": ping\n\n")
+                        last_beat = time.time()
+                    continue
+                self._sse_write(e)
+                last_beat = time.time()
+        except ConnectionError:
+            return
+        except Exception as exc:                       # noqa: BLE001
+            sys.stderr.write(f"[cockpit] 调试 SSE 异常：{exc!r}\n")
+        finally:
+            self.dbg.unsubscribe(q)
+            self.sse_sem.release()
+
     def _sse(self, qs: dict):
         run_id = (qs.get("run") or [""])[0]
         after = int((qs.get("from") or ["0"])[0])
@@ -1948,10 +2501,12 @@ def make_server(cfg: Config, *, host: str = HOST, port: int = DEFAULT_PORT,
                 dist: Path | None = None, verbose: bool = False,
                 log=print) -> CockpitServer:
     mgr = RunManager(cfg, log=log)
+    dbg = DebugManager(cfg, mgr, log=log)
     pkg_jobs = PkgJobManager()
     handler = type("BoundCockpitHandler", (CockpitHandler,), {})
     handler.cfg = cfg
     handler.mgr = mgr
+    handler.dbg = dbg
     handler.pkg_jobs = pkg_jobs
     handler.dist = Path(dist) if dist else DIST_DIR
     handler.sse_sem = threading.Semaphore(MAX_SSE_CONNS)

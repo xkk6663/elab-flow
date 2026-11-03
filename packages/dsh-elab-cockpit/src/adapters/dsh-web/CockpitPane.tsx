@@ -21,15 +21,17 @@
 
 import React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 
 import { createCockpitService } from '../../app/cockpit-service.ts'
 import type { PlanPreview } from '../../domain/icd.ts'
+import { DebugView } from './debug/DebugView.tsx'
+import { kernelDebugAvailable, kernelProbes } from '../../domain/kernel-meta.ts'
 import { channelOfEvent, channelOfStep } from '../../domain/channels.ts'
 import type { LogChannelId } from '../../domain/channels.ts'
 import { LOG_CHANNELS } from '../../domain/channels.ts'
 import type { PlanView } from '../../domain/pipeline.ts'
-import type { AdaptCheck } from '../../domain/adapt.ts'
+import type { AdaptCheck, AdaptProbeInfo } from '../../domain/adapt.ts'
 import type { SerialMonitorSnapshot } from '../../domain/icd.ts'
 import { elabApi } from '../kernel-http/icd-client.ts'
 import { createRunEventsPort } from './events/run-events.ts'
@@ -135,9 +137,14 @@ function AdaptBanner(props: {
   checking: boolean
   /** 已接入工程的磁盘根（null = 工程列表还没给出 root，无法复探测）。 */
   checkRoot: string | null
+  /** 最近一次只读探测（discovered 相位用来呈现"接进来会是什么样"）。 */
+  probe: AdaptProbeInfo | null
+  /** 只读探测在途的目标目录（null = 空闲）。 */
+  probing: string | null
   error: string | null
   disabled: boolean
   onAdapt(path: string): void
+  onProbe(path: string): void
   onCheck(name: string): void
 }): ReactNode {
   const {
@@ -148,8 +155,12 @@ function AdaptBanner(props: {
     check,
     checking,
     checkRoot,
+    probe,
+    probing,
     error,
     disabled,
+    onAdapt,
+    onProbe,
     onCheck,
   } = props
 
@@ -255,10 +266,98 @@ function AdaptBanner(props: {
     }
     return null
   }
-  // discovered（扫到未接入工程）：窄栏里**不再常驻**一张候选列表 —— 它会长期占掉
-  // 两行并挤走真正的操作区（实测窄栏只剩 ~520px）。适配入口保留在「⚙ 设置 → 工程」
-  // 与首次引导里，面板本身只为「适配中 / 适配失败 / 已接入」三种瞬时状态让位。
-  return null
+  // discovered（扫到未接入工程）：**会话工作区里的工程**就是用户此刻在写的那个，
+  // 所以这里必须露出它 —— 自动只读探测已由 service.init 发起，banner 只呈现结论，
+  // 写入仍需人点一下（probe 不写盘，write 才落 projects/*.yaml）。
+  const dirOf = (p: string): string => p.slice(p.lastIndexOf('/') + 1) || p
+  const line: CSSProperties = {
+    flex: '0 0 auto',
+    padding: '3px 8px',
+    fontSize: '11px',
+    borderBottom: '1px solid var(--elab-border)',
+  }
+  if (probing !== null) {
+    return (
+      <div style={{ ...line, color: 'var(--elab-status-run)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {`只读探测中：工作区工程「${dirOf(probing)}」…`}
+      </div>
+    )
+  }
+  if (probe !== null) {
+    const blocked = probe.ambiguities.length > 0
+    const facts: string[] = [
+      probe.projectName,
+      probe.generator,
+      probe.chip,
+      probe.canPrint ? '串口可输出' : '无串口输出',
+    ].filter((x) => x !== '')
+    return (
+      <div style={{ ...line, display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+          <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {`发现工作区工程「${probe.name}」 · ${probe.tier} · 置信度 ${probe.confidence}`}
+          </span>
+          <button
+            type="button"
+            disabled={disabled || blocked}
+            onClick={() => onAdapt(probe.path)}
+            title={blocked ? `阻断：${probe.ambiguities[0]}` : '写入 projects/<name>.yaml（之后跑「体检+编译」自证）'}
+            style={{
+              flex: '0 0 auto',
+              padding: '0 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: blocked ? 'var(--elab-fg-muted)' : 'var(--elab-accent)',
+              cursor: disabled || blocked ? 'default' : 'pointer',
+            }}
+          >
+            写入接入
+          </button>
+        </div>
+        <div style={{ color: 'var(--elab-fg-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {blocked ? `阻断：${probe.ambiguities[0]}` : facts.join(' · ')}
+        </div>
+      </div>
+    )
+  }
+  // 多候选 / 探测失败：窄列表，点一条才探（不替用户猜）
+  const rest = pending.length - 3
+  return (
+    <div style={{ ...line, display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+      {pending.slice(0, 3).map((c) => (
+        <div key={c.path} style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+          <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {`工作区候选：${c.dirname}`}
+          </span>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onProbe(c.path)}
+            style={{
+              flex: '0 0 auto',
+              padding: '0 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: 'var(--elab-accent)',
+              cursor: disabled ? 'default' : 'pointer',
+            }}
+          >
+            探测
+          </button>
+        </div>
+      ))}
+      {rest > 0 ? (
+        <div style={{ color: 'var(--elab-fg-muted)' }}>{`还有 ${rest} 个候选…`}</div>
+      ) : null}
+      {error !== null ? (
+        <div style={{ color: 'var(--elab-status-fail)' }}>{`探测失败：${error}`}</div>
+      ) : null}
+    </div>
+  )
 }
 
 export function CockpitPane(props: CockpitPaneProps): ReactNode {
@@ -283,7 +382,31 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
    *   见 docs/技术分析_侧边栏设置页与芯片插件市场.md）——槽位契约不变，
    *   `verify-client-contract.mjs` 的 3 槽位断言无需改动。
    */
-  const [view, setView] = useState<'work' | 'settings'>('work')
+  const [view, setView] = useState<'work' | 'settings' | 'debug'>('work')
+
+  // ── 调试自动聚焦（§4.2）：**只**在新 `open_seq` 时切到调试视图 ──
+  //   Agent 执行 elab_debug_open → SSE `debug/opened{open_seq, focus:true}`。
+  //   记住最大 open_seq：用户手动切走后不会因轮询/重连被反复抢焦点。
+  const lastDebugOpenSeq = useRef(-1)
+  useEffect(() => {
+    if (!visible || !kernelDebugAvailable() || typeof EventSource === 'undefined') return
+    const q = sessionId !== undefined && sessionId !== '' ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+    const es = new EventSource(`/elab/debug/events${q}`)
+    const onOpened = (ev: MessageEvent<string>): void => {
+      try {
+        const env = JSON.parse(ev.data) as { data?: { open_seq?: number } }
+        const seq = Number(env.data?.open_seq ?? -1)
+        if (seq > lastDebugOpenSeq.current) {
+          lastDebugOpenSeq.current = seq
+          setView('debug')
+        }
+      } catch {
+        /* 坏包忽略 */
+      }
+    }
+    es.addEventListener('debug/opened', onOpened as EventListener)
+    return () => es.close()
+  }, [visible, sessionId])
 
   // ── 串口：端口/波特率来自 capabilities；数据面统一在 useSerialStream ──
   const [serialMeta, setSerialMeta] = useState<{
@@ -508,15 +631,36 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     sessionId,
   })
 
-  /** 串口通道的「启动」：切到串口页 + 打开常驻监视（已在跑则只切页）。 */
+  /**
+   * 串口通道的启停**开关**：切到串口页；未开则打开常驻监视，已在跑则关闭并释放串口。
+   *
+   * ★ 必须可关闭：监视占用串口时，含烧录/调试的闭环会被内核 409 拒绝（约束 N5），
+   *   而窄栏里没有别处能关（实测 2026-11-03：再次点击无反应 = 串口被永久占住）。
+   */
   const onSerialStart = useCallback(() => {
     setChannel('serial')
-    if (!serialStream.active) void serialStream.open(serialPref.decoder)
+    if (serialStream.active) void serialStream.close()
+    else void serialStream.open(serialPref.decoder)
   }, [serialStream, serialPref.decoder])
 
   // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
   const steps: LadderStep[] = snap.run.steps
   const running = snap.run.status === 'running'
+  // 探针胶囊：当前值来自工程卡（debug.probe），选项/可用性来自内核 meta.probes
+  const probeList = kernelProbes()?.list ?? []
+  const currentProbe = snap.projects.find((p) => p.name === snap.project)?.probe ?? ''
+  const [probeOpen, setProbeOpen] = useState(false)
+  const probeRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!probeOpen) return
+    const onDown = (e: PointerEvent) => {
+      if (probeRef.current !== null && !probeRef.current.contains(e.target as Node)) {
+        setProbeOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [probeOpen])
   /** 适配复探测在途（P1-5）：只读，不写盘。 */
   const [checkingAdapt, setCheckingAdapt] = useState(false)
   /** 已接入工程的磁盘根（复探测要 POST 给内核）；缺 root 时按钮禁用。 */
@@ -580,6 +724,28 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
 
   const plans: PlanView[] = snap.plans
 
+  // ── 调试视图：整幅覆盖（与设置页同一"内部视图"策略，不新增 DSH 槽位）──
+  if (view === 'debug' && kernelDebugAvailable()) {
+    return (
+      <div
+        className="elab-root"
+        style={{
+          display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+          background: 'var(--elab-bg-canvas)', color: 'var(--elab-fg-primary)',
+        }}
+      >
+        <DebugView
+          sessionId={sessionId}
+          visible={visible}
+          project={snap.project}
+          available={kernelDebugAvailable()}
+          onBack={() => setView('work')}
+          api={elabApi}
+        />
+      </div>
+    )
+  }
+
   // ── 设置视图：覆盖整个侧边栏（芯片插件市场 / 包管理 / 内核设置）──
   //   ★ 放在所有 hook 之后（hook 调用顺序必须稳定），且在 work 视图的 return 之前。
   if (view === 'settings') {
@@ -642,6 +808,95 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           ))}
         </select>
 
+        {/* 探针胶囊：点开切换 debug.probe（只改工程接入文件；调试会话打开时内核回 409） */}
+        <div ref={probeRef} style={{ position: 'relative', flex: '0 0 auto' }}>
+          <button
+            type="button"
+            disabled={running || snap.busy || probeList.length === 0}
+            onClick={() => setProbeOpen((v) => !v)}
+            title={
+              probeList.length === 0
+                ? '内核未提供探针清单（同步内核后重试）'
+                : '切换烧录/调试探针（只改 projects/*.yaml 的 debug.probe）'
+            }
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '3px',
+              padding: '2px 5px',
+              fontSize: '10px',
+              lineHeight: 1.5,
+              whiteSpace: 'nowrap',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'var(--elab-bg-raised)',
+              color: 'var(--elab-fg-primary)',
+              cursor: running || snap.busy ? 'not-allowed' : 'pointer',
+              opacity: running || snap.busy ? 0.6 : 1,
+            }}
+          >
+            <span style={{ color: 'var(--elab-fg-muted)' }}>探针</span>
+            <span>{currentProbe !== '' ? currentProbe : '未声明'}</span>
+            <span style={{ fontSize: '8px', color: 'var(--elab-fg-muted)' }}>{'\u25BE'}</span>
+          </button>
+          {probeOpen ? (
+            <div
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 4px)',
+                left: 0,
+                zIndex: 30,
+                minWidth: '168px',
+                padding: '4px',
+                borderRadius: '6px',
+                border: '1px solid var(--elab-border)',
+                background: 'var(--elab-bg-surface)',
+              }}
+            >
+              {probeList.map((p) => {
+                const unavailable = p.available === false
+                const active = p.name === currentProbe
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    disabled={unavailable || active}
+                    onClick={() => {
+                      setProbeOpen(false)
+                      void service.setProjectProbe(p.name)
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      width: '100%',
+                      padding: '3px 6px',
+                      border: 'none',
+                      borderRadius: '4px',
+                      background: 'transparent',
+                      color: unavailable ? 'var(--elab-fg-muted)' : 'var(--elab-fg-primary)',
+                      fontSize: '10.5px',
+                      textAlign: 'left',
+                      cursor: unavailable || active ? 'default' : 'pointer',
+                    }}
+                  >
+                    <span>{p.name}</span>
+                    <span
+                      style={{
+                        marginLeft: 'auto',
+                        fontSize: '9px',
+                        color: 'var(--elab-fg-muted)',
+                      }}
+                    >
+                      {unavailable ? '接口缺失' : active ? '当前' : '接口就绪'}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
+
         {snap.run.actor !== null ? (
           <span
             style={{
@@ -667,12 +922,13 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                   ? 'var(--elab-status-ok)'
                   : snap.run.status === 'failed'
                     ? 'var(--elab-status-fail)'
-                    : snap.run.status === 'cancelled'
+                    : snap.run.status === 'cancelled' ||
+                        snap.run.status === 'inconclusive'
                       ? 'var(--elab-status-run)'
                       : 'var(--elab-accent)',
             }}
           >
-            {snap.run.status}
+            {snap.run.status === 'inconclusive' ? '未验证' : snap.run.status}
           </span>
         ) : null}
 
@@ -693,6 +949,27 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         >
           {'\u21bb'}
         </button>
+
+        {kernelDebugAvailable() && (
+          <button
+            type="button"
+            onClick={() => setView('debug')}
+            title="调试面板：调用栈 / 变量 / 寄存器 / 断点（与 Agent 同一会话）"
+            aria-label="打开调试面板"
+            style={{
+              flex: '0 0 auto',
+              padding: '0 5px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: '1px solid var(--elab-border)',
+              background: 'transparent',
+              color: 'var(--elab-fg-secondary)',
+              cursor: 'pointer',
+            }}
+          >
+            {'\u25b6|'}
+          </button>
+        )}
 
         <button
           type="button"
@@ -726,9 +1003,12 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           check={snap.adapt.check}
           checking={checkingAdapt}
           checkRoot={adaptCheckRoot}
+          probe={snap.adapt.probe}
+          probing={snap.adapt.probing}
           error={snap.adapt.error}
           disabled={running || snap.busy}
           onAdapt={(path) => void service.adaptProject(path)}
+          onProbe={(path) => void service.probeAdapt(path)}
           onCheck={(name) => {
             if (adaptCheckRoot === null) return
             setCheckingAdapt(true)

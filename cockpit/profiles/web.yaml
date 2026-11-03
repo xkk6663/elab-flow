@@ -10,6 +10,7 @@
 # 换一套装配 = 复制本文件改名并改上面两节；业务代码零改动。
 profile: web
 workspaces:
+  - debug
   - build
   - flash
   - serial

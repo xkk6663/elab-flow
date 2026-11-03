@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import Config, ElabError, to_fwd
+from .config import Config, ElabError, Host, to_fwd
 from .doctor import parse_ld_memory
 
 # ── 证据级别（rank 越小越权威）────────────────────────────────────
@@ -705,8 +705,10 @@ def render(cfg: Config, p: Probe, name: str) -> str:
     A(f"  bin: ${{work_dir}}/{pn}.bin")
     A(f"  map: ${{work_dir}}/{pn}.map")
     A("")
+    # 默认探针来自 L0 的 probes.default（ST-Link / J-Link 用户只改 host 或工程 yaml，不碰代码）
+    default_probe = Host(cfg).default_probe
     A("debug:")
-    A("  probe: atlink")
+    A(f"  probe: {default_probe or 'atlink'}")
     A("  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb")
     A("")
     A("guard:")

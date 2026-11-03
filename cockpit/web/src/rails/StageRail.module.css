@@ -119,6 +119,11 @@
   color: var(--elab-status-fail);
   font-weight: 700;
 }
+/* 未验证（inconclusive）：琥珀——与绿色通过、红色失败都区分开 */
+.bandInconcl {
+  color: var(--elab-status-run);
+  font-weight: 600;
+}
 .bandIdle {
   color: var(--elab-fg-faint);
 }
@@ -145,6 +150,9 @@
 }
 .connFail {
   background: var(--elab-status-fail);
+}
+.connInconcl {
+  background: var(--elab-status-run);
 }
 
 /* ── 控制条 ── */

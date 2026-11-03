@@ -57,6 +57,14 @@ export const KNOWN_TOPICS = [
     "serial/close",
     "serial/error",
     "serial/closed-loop",
+    // 调试会话（独立信封 §6.4：没有 run 字段）
+    "debug/opened",
+    "debug/state",
+    "debug/stop",
+    "debug/breakpoint",
+    "debug/output",
+    "debug/error",
+    "debug/closed",
     // 流控制
     "stream/overrun",
     "stream/closed",

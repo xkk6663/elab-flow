@@ -18,7 +18,7 @@ import { downloadKernelTag, ELAB_REPO } from "../adapters/env/kernel-download.js
 import { registerOnce } from "../adapters/kernel-http/route-guard.js";
 import { DEFAULT_KERNEL_VERSION } from "../domain/envpack.js";
 import { createAutoProvisioner } from "./auto-provision.js";
-import { DEFAULT_HOST_ROUTE_CONFIG, registerApiRoute, registerEventsRoute, } from "../adapters/kernel-http/routes.js";
+import { DEFAULT_HOST_ROUTE_CONFIG, registerApiRoute, registerEventsRoute, registerDebugEventsRoute, } from "../adapters/kernel-http/routes.js";
 import { runRetention } from "../adapters/fs-store/run-retention.js";
 /** 从起点向上找 elab 仓库根（`cockpit/server.py` + `services/elab`）。 */
 function findElabRootUpward(from, maxUp = 6) {
@@ -138,6 +138,7 @@ export function apply(ctx, options = {}) {
     const disposers = [];
     disposers.push(registerApiRoute(ctx, deps));
     disposers.push(registerEventsRoute(ctx, deps));
+    disposers.push(registerDebugEventsRoute(ctx, deps));
     // 健康 / 清理 / 诊断（GET /elab/host）
     disposers.push(registerOnce(ctx, {
         kind: 'exact',

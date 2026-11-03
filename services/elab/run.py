@@ -123,9 +123,10 @@ class _IO:
         if self.elog:
             self.elog.step_exit(step, ok, detail, dt, actor=self.actor, **extra)
 
-    def end(self, ok, steps_ok, steps_failed):
+    def end(self, ok, steps_ok, steps_failed, verdict="ok"):
         if self.elog:
-            self.elog.end(ok, steps_ok, steps_failed, actor=self.actor)
+            self.elog.end(ok, steps_ok, steps_failed, actor=self.actor,
+                          verdict=verdict)
 
 
 # ── 单步执行 ─────────────────────────────────────────────────────
@@ -527,7 +528,16 @@ def run(cfg: Config, project: str, *, steps=None, clean: bool = False,
                 all_ok = False
                 if not keep_going:
                     break
-        io.end(all_ok, steps_ok, steps_failed)
+        # ★ 三态必须一路传到总账（2026-11-03）：monitor 的 "inconclusive" 早先只写在
+        #   单步 detail 里，`ok` 仍为真 → 界面顶栏/CLI 都显示"全部通过"，
+        #   用户没接串口却看到闭环 ok（实为"没验证"）。总账因此独立于 ok 再给一个
+        #   verdict：failed > inconclusive > ok。ok 保持"没有失败步骤"的原语义，
+        #   下游要区分"通过"与"未验证"必须读 verdict。
+        inconclusive = [r["step"] for r in results
+                        if r.get("verdict") == "inconclusive"]
+        verdict = ("failed" if steps_failed
+                   else "inconclusive" if inconclusive else "ok")
+        io.end(all_ok, steps_ok, steps_failed, verdict=verdict)
     finally:
         if elog:
             elog.close()
@@ -537,6 +547,8 @@ def run(cfg: Config, project: str, *, steps=None, clean: bool = False,
         "project": project,
         "steps": results,
         "ok": all_ok,
+        "verdict": verdict,
+        "inconclusive": inconclusive,
         "runs_dir": to_fwd(rd) if elog else "",
         "events": {
             "enabled": bool(elog),
@@ -551,9 +563,12 @@ def render(res: dict) -> str:
     """人读摘要。步骤细节已实时打过了，这里只补一句总账。"""
     lines = []
     for r in res.get("steps", []):
-        mark = "✓" if r["ok"] else "✗"
+        mark = "?" if (r["ok"] and r.get("verdict") == "inconclusive") \
+               else ("✓" if r["ok"] else "✗")
         lines.append(f"  [{mark}] {r['step']:<13} {r['duration_s']:6.2f}s  {r['detail']}")
     head = f"run={res['run']}  project={res['project']}" if res.get("run") else \
            f"project={res['project']}  (未发射事件)"
-    tail = "✓ 全部通过" if res["ok"] else "✗ 有步骤失败"
+    verdict = res.get("verdict") or ("ok" if res["ok"] else "failed")
+    tail = {"inconclusive": "? 已完成，但有步骤未验证（inconclusive）"}.get(
+        verdict, "✓ 全部通过" if res["ok"] else "✗ 有步骤失败")
     return "\n".join([head, *lines, tail])

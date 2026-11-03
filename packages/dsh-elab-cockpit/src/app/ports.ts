@@ -106,6 +106,12 @@ export interface IcdPort {
   /** 插件配置（autoProvision 开关在这里读；旧宿主缺省按 true）。 */
   getConfig?(): Promise<{ ok: boolean; config: ElabConfig }>
   projects(sessionId?: string): Promise<{ projects?: unknown[]; cards?: unknown[] }>
+  /** 工程级探针切换（只改 `debug.probe`；内核在调试会话打开时回 409）。 */
+  setProjectProbe(name: string, probe: string, sessionId?: string): Promise<{
+    action: string
+    name: string
+    probe: string
+  }>
   /** run 列表 + 活动 run（agent 在别处起跑时，面板靠它自动跟随工程）。 */
   runs(sessionId?: string): Promise<{ runs: unknown[]; active: unknown[] }>
   discover(sessionId?: string, refresh?: boolean): Promise<DiscoverResponse>

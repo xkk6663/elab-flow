@@ -180,9 +180,11 @@ test('一键适配：write → 重载工程 → 自动绑定新工程 → bound'
   assert.equal(svc.getSnapshot().project, 'led')
 
   await svc.adaptProject('C:/proj/sensor')
-  assert.equal(calls.adapt.length, 1)
-  assert.equal(calls.adapt[0].action, 'write')
-  assert.equal(calls.adapt[0].path, 'C:/proj/sensor')
+  // init 的自动只读探测（单候选）1 次 + 本次写入 1 次
+  assert.equal(calls.adapt.length, 2)
+  assert.equal(calls.adapt[0].action, 'probe')
+  assert.equal(calls.adapt[1].action, 'write')
+  assert.equal(calls.adapt[1].path, 'C:/proj/sensor')
 
   const s = svc.getSnapshot()
   assert.equal(s.adapt.phase, 'bound')

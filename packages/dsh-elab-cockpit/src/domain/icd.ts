@@ -62,6 +62,14 @@ export const KNOWN_TOPICS = [
   "serial/close",
   "serial/error",
   "serial/closed-loop",
+  // 调试会话（独立信封 §6.4：没有 run 字段）
+  "debug/opened",
+  "debug/state",
+  "debug/stop",
+  "debug/breakpoint",
+  "debug/output",
+  "debug/error",
+  "debug/closed",
   // 流控制
   "stream/overrun",
   "stream/closed",
@@ -94,6 +102,7 @@ export type StepState =
   | "running"
   | "ok"
   | "failed"
+  | "inconclusive"
   | "skipped"
   | "cancelled";
 
@@ -257,7 +266,7 @@ export interface RunMeta {
   project: string;
   steps: string[];
   started_at: number;
-  status: "running" | "ok" | "failed" | "cancelled";
+  status: "running" | "ok" | "failed" | "inconclusive" | "cancelled";
   last_seq: number;
   proc_bytes: number;
   state_bytes: number;

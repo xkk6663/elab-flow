@@ -2,525 +2,268 @@
 
 # ELAB-Flow
 
-**一套工具链 + 一套流程，驱动不同芯片的 编译 / 烧录 / 调试 / 串口闭环。**
+**一套工具链 + 一条流程：不同芯片的工程，跑同一句 `elab build / flash / debug / monitor`。**
 
-业务工程源码**零改动** · Python **仅标准库** · 驾驶舱前端产物已入仓（运行时不需要 Node）
-
-**本期新增**：**CLI 终端闭环实机教程**（一条命令跑完 5 阶段，终端按输出类型分色，编译/烧录/监视/日志一眼分清）· **真机波形面板教程**（多面板 / 通道绑定 / 跟随暂停）· 串口工作区四视图 · 共享解码 · DSH 插件面板 · 适配包 / 零服务器市场 —— 详见 [CHANGELOG](CHANGELOG.md) 与两篇实机教程（[终端闭环](docs/tutorials/cli-terminal-usage.md) / [波形面板](docs/tutorials/wave-panel-usage.md)）
+业务工程源码零改动 · 内核仅 Python 标准库 · 前端产物已入仓（运行时不需要 Node）
 
 [![release](https://img.shields.io/github/v/release/xkk6663/elab-flow?style=flat&label=release&color=4D6BFE)](https://github.com/xkk6663/elab-flow/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
-[![tests](https://img.shields.io/badge/tests-kernel%20%2B%20plugin-2EA44F?style=flat)](tests/)
-[![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#这是什么)
-[![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#三十秒上手)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#快速开始)
+[![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#快速开始)
 
-[项目定位](#position) · [架构与仓库依赖](#arch) · [快速上手](#quickstart) · [终端闭环](#cli) · [使用流程](#flow) · [驾驶舱](#cockpit) · [Agent 工具](#agent-tools) · [串口工作区](#serial) · [适配包](#packs) · [OTA](#ota) · [实测证据](#evidence) · [文档索引](#docs)
+[项目定位](#position) · [是什么](#what) · [功能](#features) · [怎么用](#quickstart) · [仓库结构](#repo) · [文档](#docs)
 
-<img src="assets/cockpit-main.png" alt="elab cockpit 闭环驾驶舱（真机）" width="100%">
+<img src="docs/tutorials/assets/debug-panel/02-overview.png" width="100%" alt="elab cockpit 闭环驾驶舱实机">
 
-*闭环驾驶舱实机（STM32F411CEU6 + CMSIS-DAP）：左工程轨（boot 子工程嵌套）→ 中阶段轨 / 证据轨 → 右串口工作区（波形页 · FireWater 双通道 · COM10 实时）*
+*实机（STM32F103C8T6 + AT-Link）：左工程轨 · 中阶段轨与证据轨 · 右调试工作区（HardFault 调用栈）*
 
 </div>
 
 ---
 
-<a id="这是什么"></a>
+<a id="position"></a>
 
-## 这是什么
+## 项目定位
 
-嵌入式项目的常见困境：**每换一颗芯片，就要重搭一遍工程、重配一遍工具链、重写一遍构建脚本**。
-CubeMX 一套、WorkBench 一套、Keil/IAR 又各一套 —— 工具链版本靠 PATH 运气，烧录参数散落在 IDE 里，
-真机验证全靠手工。
+嵌入式项目里最重复的一段劳动：**每换一颗芯片，工程、工具链、烧录参数、验证脚本都要重搭一遍**。
+CubeMX 一套、WorkBench 一套、Keil/IAR 又各一套，工具版本靠 PATH 运气，真机验证全靠手工。
 
 ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一套代码跑不同平台"。
+业务代码是器官，elab 是外骨骼：**外骨骼不改器官，只负责把器官接上流水线**。
 
 | ELAB-Flow 做 | ELAB-Flow **不**做 |
 |---|---|
-| ✅ 同一句 `elab build -p X` 编译不同厂商、不同内核的芯片 | ❌ 代码级可移植层 / 运行时平台抽象 |
-| ✅ 业务代码原地不动（构建前后文件树快照可断言 `untouched`） | ❌ 搬代码、重组目录、建 `apps/` `framework/` |
-| ✅ 一份通用 `gcc.cmake`，差异只由芯片 YAML 驱动 | ❌ 每颗芯片各写一份工具链文件 |
+| 同一句 `elab build -p X` 编译不同厂商、不同内核的芯片 | 代码级可移植层 / 运行时平台抽象 |
+| 业务代码原地不动（构建前后文件树快照可断言 `untouched`） | 搬代码、重组目录、建 `apps/` `framework/` |
+| 一份通用 `gcc.cmake`，差异只由芯片 YAML 驱动 | 每颗芯片各写一份工具链文件 |
 
-> **外骨骼原则**：业务代码是器官，elab 是外骨骼。外骨骼不改器官，只负责把器官接上流水线。
+**一个内核，三种入口** —— 同一份事件流、同一个串口会话、同一套步骤定义，区别只在"谁在看、屏幕多大"：
 
-<a id="position"></a>
-
-### 项目定位：一个内核，三种入口
-
-内核只有一套（`services/elab/**` + `cockpit/server.py`），对外提供三种**同源**入口 ——
-同一份事件流、同一个串口会话、同一套步骤与档位定义。区别只在"谁在看、屏幕多大"。
-
-| 入口 | 怎么启动 | 适合谁 | 形态 |
-|---|---|---|---|
-| **CLI `elab`** | `./elab loop -p <name>`（Windows 用 `elab.cmd`） | 脚本 / CI / 无人值守 / agent 直接调用 | 一行命令 + 可 grep 的证据行 |
-| **独立驾驶舱** | 双击 `cockpit.cmd`，或 `python -m cockpit.server` → `http://127.0.0.1:8333/` | 人坐在桌面前盯全程：工程轨 / 阶段轨 / 证据轨三列全屏 | Edge `--app` 独立窗口；已在跑则只开 UI |
-| **DSH 右栏面板** | 安装插件 [`dsh-elab-cockpit`](https://github.com/xkk6663/elab-flow/tree/main/packages/dsh-elab-cockpit)（`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`），右栏开 elab tab | agent 在跑、你顺手看：窄栏阶梯 + 日志尾 + 串口页 + 设置页 | 工具层插件：托管内核子进程，只走 loopback HTTP ICD |
-
-- 三者**不各有一套实现**：DSH 面板不 import 内核源码、不复制业务逻辑；它 `spawn` 同一个
-  `python -m cockpit.server`，把 `/elab/api/*` 与 `/elab/events` 反代过来
-  （分层门禁 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 会拦违规）。
-- **步骤 / 档位 / 串口词汇的唯一事实源在内核**（`cockpit/server.py` 的
-  `STEP_META` / `KERNEL_PLANS` / `SERIAL_META`）。工具层只渲染；内核加一步，面板与 agent 工具自动跟上。
-
-<a id="arch"></a>
-
-### 架构与仓库依赖
-
-四层依赖严格单向（反向依赖被 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 拦截）：
-
-| 层 | 路径 | 职责 |
+| 入口 | 启动方式 | 适合 |
 |---|---|---|
-| **业务层（内核）** | `services/elab/**`、`cockpit/server.py` | 闭环编排、编译/烧录/调试、串口字节面、OTA、适配包协议；`STEP_META` / `KERNEL_PLANS` 是步骤与档位的唯一事实源 |
-| **业务层（前端）** | `cockpit/web/**` | 零依赖驾驶舱 UI（React 产物已入仓，运行时只有 Python） |
-| **数据层** | `packs/official/**`、`packs/installed/**`、`market/index.json` | 芯片参数 / 厂商指纹 / 平台坑位（芯片知识的唯一宿主）；零服务器社区市场索引 |
-| **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件：右栏面板可视化、进程托管、`elab_*` agent 工具。与内核**只通过 loopback HTTP ICD 通信**，不 import 源码。市场与 npm 都直接取自本仓子目录，没有额外分发仓 |
-| 工程 | `projects/**`、`examples/**` | 工程接入 YAML 与实弹样例 |
+| **CLI `elab`** | `./elab loop -p <name>`（Windows 用 `elab.cmd`） | 脚本 / CI / 无人值守 / agent 直接调用 |
+| **独立驾驶舱** | 双击 `cockpit.cmd` 或 `python -m cockpit.server` → `http://127.0.0.1:8333/` | 桌面前盯全程：工程轨 / 阶段轨 / 证据轨三列全屏 |
+| **DSH 右栏面板** | 安装插件 `dsh-elab-cockpit`，右栏开 elab tab | agent 在跑、你顺手看：窄栏阶梯 + 日志尾 + 串口页 |
+
+<a id="what"></a>
+
+## 这是什么
 
 ```text
-工具层  packages/dsh-elab-cockpit      面板 / elab_* 工具 / 进程托管（可卸载）
-   │  唯一缝隙：loopback HTTP ICD（/api/* 命令 + /api/events SSE）
+工具层  packages/dsh-elab-cockpit      面板 / elab_* agent 工具 / 进程托管（可卸载）
+   │  唯一缝隙：loopback HTTP ICD（/api/* 命令 + /events SSE）
 业务层  services/elab/** + cockpit/server.py
    │  编排 / 编译 / 烧录 / 调试 / 串口；STEP_META、KERNEL_PLANS、SERIAL_META 是词汇唯一事实源
    │  只读协议：pack.yaml（elab.pkg），不 import 包内文件
-数据层  packs/official|installed/** + market/index.json   芯片参数 / 厂商指纹 / 市场索引
+业务层  cockpit/web/**                 零依赖驾驶舱 UI（React 产物已入仓）
+数据层  packs/** + market/index.json   芯片参数 / 厂商指纹 / 平台坑位 / 社区市场索引
+工程    projects/**、examples/**       工程接入 YAML 与实弹样例
 ```
 
-```text
-主仓 xkk6663/elab-flow ── 唯一事实源（可写）
- ├─ npm publish（cwd = packages/dsh-elab-cockpit，手动）→ npm dsh-elab-cockpit@latest
- └─ PR → awesome-dsh-plugin 目录仓 → 每日构建 → 市场网页
-                                                （条目指向主仓子目录，安装走 #path:/packages/dsh-elab-cockpit）
-芯片包：本仓 market/index.json + 外置包仓（如 elab-pack-artery-at32，按 commit + sha256 固定）
-```
+- 四层依赖**严格单向**，反向依赖被 `packages/dsh-elab-cockpit/test/boundary.test.mjs` 拦截。
+- 三个收敛点：主机路径 → [`elab.host.yaml`](elab.host.yaml)；芯片差异 → `packs/**/chips/*.yaml`；工程接入 → `projects/*.yaml`。
+- 工具层不 import 内核源码、不复制业务逻辑：它 `spawn` 同一个 `python -m cockpit.server`，把 API 与 SSE 反代过来。内核加一步，面板与 agent 工具自动跟上。
 
-完整分析（源码锚点、发布 Playbook、门禁清单、事实核对）见
-[docs/architecture/架构分析和项目仓库的依赖关系.md](docs/architecture/架构分析和项目仓库的依赖关系.md)。
+<a id="features"></a>
+
+## 有什么功能
+
+### ① 自动接入工程：不重搭，只探测
+
+给一个工程目录，驾驶舱「＋ 适配」或 `elab adapt <path>` 自动探测芯片、框架类型、构建入口与置信度；写入后生成 `projects/<name>.yaml`，**人工接管的文件绝不覆盖**。
+
+<img src="docs/tutorials/assets/webui/B-02-adapt-written.png" width="100%" alt="自动适配写入报告">
+
+*`T1 可写 / 置信度 high`，写入后工程卡片自动出现并选中；只读探测在前，落盘在后*
+
+### ② 一键闭环：编译 → 烧录 → 调试校验 → 串口判据
+
+`elab loop -p <name>` 依次跑五个阶段，每步都留下可 grep 的证据行；也可只跑一步（`elab run --steps build`）。串口判据给出三态结论：`ok` / `failed` / `inconclusive`（能开但没收到约定关键字 = 未验证，不冒充成功）。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/webui/A-07-build-evidence.png" width="440" alt="五阶段全绿与内存占位"><br><sub>五阶段全绿：RAM 16.29% · FLASH 9.39%，产物 / 零改动守卫同屏</sub></td>
+<td><img src="docs/tutorials/assets/webui/A-08-flash-ok.png" width="440" alt="烧录与校验证据"><br><sub>烧录 + 校验：双镜像 <code>Verified OK</code>，断到 <code>main.c:84</code></sub></td>
+</tr>
+</table>
+</div>
+
+### ③ 调试工作区：从一次真实 HardFault 收网
+
+会话式调试器：开始 / 继续 / 暂停 / 单步 / 步入 / 步出 / 复位 / 关闭，十一个页签（调用栈、变量、寄存器、断点、监视、内存、反汇编、外设、RTOS 栈、审计、输出）。断点与监视持久化到 `projects/<name>.debug.json`（`rev` 乐观锁），关闭会话固定 `monitor reset run`，不会把板子留在 halt。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/debug-panel/03-callstack.png" width="420" alt="HardFault 调用栈"><br><sub>调用栈直接指出 <code>#2 0x54535250</code> 非法地址 → <code>#3 heartbeat_pack_buggy</code></sub></td>
+<td><img src="docs/tutorials/assets/debug-panel/08-rtos.png" width="420" alt="FreeRTOS 栈水位"><br><sub>RTOS 栈水位：<code>heartbeat</code> 任务剩 0 字（红色 critical）</sub></td>
+</tr>
+</table>
+</div>
+
+`P1` 监视求值 · `P2` CMSIS-SVD 外设字段解码 · `P3` FreeRTOS 任务枚举与栈高水位；能力自描述在 `capabilities.meta.debug.features`，面板按它显示页签。
+
+### ④ 串口工作区：字节为真值，文本只是投影
+
+每个字节批次都带 `seq / dir / t / len / gap`，方向过滤、搜索、换表示全在客户端做，切视图不丢游标。四个视图：**行 / 字节 / 终端 / 波形**；发送面板支持文本 / ASCII / GBK / HEX + 行尾，TX 与 RX 同构入面。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/wave-panel/06-all-panel.png" width="340" alt="波形页与发送组件"><br><sub>波形页：FireWater 双通道正弦 · 多面板独立缩放 · 发送组件（PING 周期）</sub></td>
+<td><img src="docs/tutorials/assets/wave-panel/07-full.png" width="580" alt="串口行视图"><br><sub>行视图：<code>[alive] tick=…</code> 心跳与固件启动日志同屏</sub></td>
+</tr>
+</table>
+</div>
+
+- 解码器是**会话属性**：agent 用 `elab_serial_monitor` / `elab_serial_decode` 选定后，面板波形页标「agent 选定」，读的是内核帧环的同一份帧。
+- 监视是"看"不是证据：实时流只活环形缓冲；可复核判定走闭环 `monitor`。串口监视与闭环 run **双向 409 互斥**，agent 会话带租约到期自动释放端口。
+
+### ⑤ 适配包与社区市场：芯片知识只住在数据层
+
+骨架仓本身零芯片。芯片参数、厂商指纹、平台坑位全部来自适配包；包之间互不依赖，改包后 `elab pkg index` 重生成索引，CI 用 `--check` 拦漂移。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/webui/C-02-market-search.png" width="440" alt="市场搜索安装"><br><sub>市场搜索：<code>at32</code> 一键安装（来源 / 版本 / 芯片列表）</sub></td>
+<td><img src="docs/tutorials/assets/webui/C-04-installed.png" width="440" alt="已安装包管理"><br><sub>已安装管理：启用 / 校验 / 更新 / 卸载，一次只启用一套</sub></td>
+</tr>
+</table>
+</div>
+
+内置 `st/stm32` 用 `elab pkg bootstrap`；其它厂商（如 `artery/at32`）走外置 GitHub 包仓 + 市场索引。贡献新芯片见 [market/CONTRIBUTING.md](market/CONTRIBUTING.md)。
+
+### ⑥ DSH 面板：agent 在跑，你在旁边看
+
+窄栏里是同一个闭环：阶梯进度、日志尾、FLASH/RAM 占位、构建/烧录/调试/串口四通道、串口四视图、调试工作区。插件首次打开自动下载内核归档并补齐工具链，宿主只需 Python ≥ 3.10。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/dsh/01-auto-probe-full.png" width="520" alt="DSH 右栏面板"><br><sub>DSH 右栏：对话与 ELAB 面板同屏；agent 发起 run 自动切到对应工程</sub></td>
+<td><img src="docs/tutorials/assets/dsh/10-triple-ok.png" width="340" alt="DSH 三连全绿"><br><sub>三连全绿：编译（RAM/FLASH）→ 烧录 → 调试校验逐行落账</sub></td>
+</tr>
+</table>
+</div>
+
+安装：`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`（或 `npm install dsh-elab-cockpit`），重载窗口后右栏出现 elab tab。
+
+### ⑦ CLI：一条命令跑完，也能被 CI 直接调用
+
+终端每行按类型着色：编译进度、warning、烧录 `Verified OK`、串口心跳不会混成一片灰字。退出码即结论：`0` ok / `1` failed / `2` inconclusive。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/cli-terminal/06-full-loop.png" width="520" alt="elab loop 终端输出"><br><sub><code>elab loop -p f411 -v</code>：五阶段分色，doctor 全绿 + build 进度</sub></td>
+<td><img src="docs/tutorials/assets/cli-terminal/05-monitor.png" width="440" alt="monitor 阶段"><br><sub>monitor：波形行与心跳同屏，命中判据即退出</sub></td>
+</tr>
+</table>
+</div>
+
+### ⑧ OTA 双槽升级（F411CEU6 实弹样例）
+
+`examples/STM32F411CEU6` + `examples/F411CEU6_BOOT` 是完整参考实现：boot / APP / 上位机 / 异常注入 / 双槽回滚全链路验证。
+
+- **分区表唯一事实源**：适配包 `chips/*.yaml` 的 `ota_layout:`，构建期注入 `ota_layout_gen.h`，`doctor --deep` 三方对账。
+- **坏固件自动回滚**：新固件写 INACTIVE 槽 → 试运行（trial 先记后跳）→ 耗尽打印 `=== ROLLBACK ===`；心跳正常则 `OTA_Confirm()` 晋级。
+- **停等协议**：`AA [01|02] SEQ LEN DATA CRC32 EOF 55`，CRC 错 NAK 重传；每 1KB 记页，支持断点续传。
+- **组合工程**：`ota_layout.boot_project: f411_boot` 让 `elab build -p f411` 级联构建；`elab flash` 按 boot bin 的 md5 指纹冻结台账。
+
+### ⑨ Agent 工具：24 个 `elab_*`，与面板同源
+
+写硬件 / 写盘的工具统一受 `allowAgentWrite`（默认关）；参数里的枚举来自内核自描述，面板不写死业务字段。
+
+| 组 | 工具 |
+|---|---|
+| 看 | `elab_status` · `elab_preview`（只读 argv）· `elab_log` |
+| 闭环 | `elab_build` · `elab_triple` · `elab_loop` · `elab_step` · `elab_cancel` |
+| 工程与包 | `elab_adapt`（`write=false` 先看只读报告）· `elab_pkg` |
+| 调试 | `elab_debug_open / control / inspect / breakpoint / wait / close` |
+| 串口 | `elab_serial` · `_monitor` · `_read` · `_wait` · `_decode` · `_decoded` · `_capture` · `_widget` |
 
 <a id="quickstart"></a>
 
-## 三十秒上手
+## 怎么用
 
 ```bash
 git clone git@github.com:xkk6663/elab-flow.git
 cd elab-flow
 
-./elab pkg bootstrap      # ① 安装内置包 st/stm32（生成平台 skill）
+./elab pkg bootstrap      # ① 安装内置包 st/stm32
 ./elab doctor             # ② 环境体检，先全绿再往下
-./elab loop -p f411 -v    # ③ 一键闭环：体检→编译→烧录→断到 main→串口判据
-python -m cockpit.server  # ④ 驾驶舱 → http://127.0.0.1:8333/
+./elab adapt ./my-project --write   # ③ 接入自己的工程（可先不加 --write 看只读报告）
+./elab loop -p my-project -v        # ④ 一键闭环：体检→编译→烧录→调试校验→串口
+python -m cockpit.server            # ⑤ 驾驶舱 → http://127.0.0.1:8333/
 ```
 
-- 要求：**Python ≥ 3.10（无第三方依赖）**；上板另需 CMake + Ninja + ARM GCC + OpenOCD
-- Windows：`elab.cmd`；桌面场景直接双击 `cockpit.cmd`（幂等，已在跑只开 UI）
-- 没有探针时 `doctor` / `build` / `ci` 照样可跑（`loop` 会在 flash 步失败）
-- **DSH 插件**：安装 [`dsh-elab-cockpit`](https://github.com/xkk6663/elab-flow/tree/main/packages/dsh-elab-cockpit)
-  （源码在本仓 `packages/dsh-elab-cockpit`；开发期用 Junction 把该目录链接进 DSH profile 的
-  `node_modules`），重载窗口后右栏出现 elab 面板
+- 要求：**Python ≥ 3.10（无第三方依赖）**；上板另需 CMake + Ninja + ARM GCC + OpenOCD。Windows 用 `elab.cmd`，桌面场景直接双击 `cockpit.cmd`（幂等，已在跑只开 UI）。
+- 没有探针时 `doctor` / `build` / `ci` 照样可跑，`loop` 会在 flash 步失败。
+- 门禁：`elab ci` 与 GitHub Actions 共用 `ci/matrix.yaml`；门禁绿却零产物 → 红。
 
-<a id="cli"></a>
+> 已实测：AT32F421G8U7（WorkBench 工程，自动接入）、STM32F103C8T6、STM32F411CEU6（CubeMX + boot 组合工程 / OTA 双槽），业务工程文件树均为 `untouched`。
 
-## 终端闭环：一条命令，5 个阶段
+**工具链**（DSH 插件首次打开会按官方上游直链自动安装，仅 Windows x64；其它平台先探测本机 PATH）：
 
-CLI 是最轻的入口 —— **开一个终端，敲一条命令，从体检到串口判据全跑完**。
-每行输出都按类型着色，编译 / 烧录 / 监视 / 日志不会混成一片灰字。
-
-```powershell
-# PowerShell 前置（elab.cmd 在仓库根可直接跑）
-$env:PYTHONPATH = "services"
-$env:ELAB_ROOT  = "."
-
-.\elab.cmd loop -p f411 -v
-```
-
-<img src="docs/tutorials/assets/cli-terminal/06-full-loop.png" alt="elab loop 完整闭环终端输出" width="100%">
-
-*一次运行的全部输出：5 个阶段头分色，阶段内部按输出类型再分色（真机 STM32F411CEU6）*
-
-| 阶段 | 终端里的样子 |
-|---|---|
-| `[1/5] doctor` | `[OK  ]` 绿 / `[info]` 蓝；`drift.*`、`convention.*` 三方对账 |
-| `[2/5] build` | Ninja 进度 `[n/53]` 亮蓝 · gcc `warning:` 黄 · RAM/FLASH 百分比 + 条形图 |
-| `[3/5] flash` | OpenOCD 探测橙色 · `** Programming Started **` / `** Verified OK **` 高亮 |
-| `[4/5] debug` | 断到 `main` 的行号、`pc` / 寄存器 |
-| `[5/5] monitor` | `[serial] +` 蓝前缀 · `[alive] tick=N` 心跳紫色加粗 |
-
-五个阶段的实机终端画面（同一台 F411，同一次烧录）：
-
-| 体检（工具链 / 芯片 / 漂移） | 构建（ninja + 内存报告） |
-|---|---|
-| <img src="docs/tutorials/assets/cli-terminal/01-doctor.png" width="440"> | <img src="docs/tutorials/assets/cli-terminal/02-build.png" width="440"> |
-| **烧录（CMSIS-DAP + 双镜像 verify）** | **调试（断到 main.c:84）** |
-| <img src="docs/tutorials/assets/cli-terminal/03-flash.png" width="440"> | <img src="docs/tutorials/assets/cli-terminal/04-debug.png" width="440"> |
-
-串口阶段把固件真实输出直接打回终端 —— 波形行（`0.661,-0.661`）和心跳行（`[alive] tick=N`）
-在同一屏里，判据命中即退出：
-
-<img src="docs/tutorials/assets/cli-terminal/05-monitor.png" alt="串口闭环判据" width="100%">
-
-收尾汇总就是五个绿勾：
-
-<img src="docs/tutorials/assets/cli-terminal/07-summary.png" alt="闭环汇总" width="100%">
-
-> 完整逐条讲解（每个标签的含义、颜色规则、子命令独立跑法）见
-> **[elab CLI 终端闭环上手教程](docs/tutorials/cli-terminal-usage.md)**。
-
-<a id="flow"></a>
-
-## 使用流程
-
-| 你在哪 | 走哪条路 | 入口 |
+| 工具 | 版本 | 覆盖环境变量 |
 |---|---|---|
-| 终端 / CI / 让 agent 自己跑 | **CLI**：命令即流程，失败即非零退出 | `elab <cmd>` |
-| 桌面前要盯全程、切工程、看 OTA | **独立驾驶舱**：三列全屏 | `cockpit.cmd` |
-| 在 DSH 里和 agent 一起干活 | **DSH 面板**：窄栏阶梯 + 日志尾 | 右栏 elab tab |
+| `arm-none-eabi-gcc` | 13.3.1 | `ELAB_ARM_GCC_ROOT` |
+| CMake | 3.28.1 | `ELAB_CMAKE` |
+| Ninja | 1.11.1 | `ELAB_NINJA` |
+| OpenOCD | 0.12.0-3 | `ELAB_OPENOCD` / `ELAB_OPENOCD_SCRIPTS` |
 
-三条路跑的是同一份内核、同一份事件流，所以下面按**能做什么**串流程，而不是按入口重复三遍。
+**探针是数据不是代码**：`elab.host.yaml` 的 `probes.list` 内置 `atlink` / `dap` / `stlink` / `jlink`，工程接入文件只声明用哪个（默认取 `probes.default`）：
+
+```yaml
+# projects/<name>.yaml
+debug:
+  probe: stlink     # atlink | dap | stlink | jlink
+```
+
+`interface cfg` 属于探针、`target cfg` 属于芯片，两者正交 —— 同一个 CMSIS-DAP 换 target cfg 就能连不同厂商的芯片。新探针在 `probes.list` 加一条 `{backend, interface_cfg, transport, speed}` 即可。
+
+<a id="repo"></a>
+
+## 仓库结构
 
 ```text
-安装适配包  →  接入工程  →  跑闭环 / 单步  →  看证据  →  串口调试  →  CI
-   pkg            adapt          loop/run        Cockpit     serial      ci
+services/elab/**          内核：闭环编排、编译/烧录/调试、串口字节面、OTA、适配包协议
+cockpit/server.py         内核 HTTP 面 + 自描述（STEP_META / KERNEL_PLANS）
+cockpit/web/**            独立驾驶舱 UI（产物已入仓）
+packs/official|installed  芯片适配包（骨架仓不含芯片；installed/ 不入库）
+market/index.json         零服务器社区市场索引
+packages/dsh-elab-cockpit DSH 插件（面板 / 进程托管 / elab_* 工具）
+projects/**               工程接入 YAML
+examples/**               实弹样例（F411 OTA、STM32/AT32 工程）
+tests/ · ci/              内核测试与本地/云端门禁
+docs/**                   教程、设计约束、架构分析
 ```
 
-1. **装芯片**：`elab pkg search <vendor/platform>` → `elab pkg install <vendor/platform>`
-   （内置 `st/stm32` 用 `bootstrap`；不装包也能体检主机）。面板里对应工程条 ⚙ → 市场。
-2. **接工程**：驾驶舱「＋ 适配」一键探测→写入；或
-   `elab adapt <path> --write && elab adapt <path> --verify`；或手写 `projects/<name>.yaml`。
-   人工接管的文件绝不覆盖。agent 走 `elab_adapt`（`write=false` 先看只读报告）。
-3. **跑闭环**：`elab loop -p <name>`（doctor → build → flash → debug --verify → monitor），
-   每步都留可 grep 的证据行；也可 `elab run -p <name> --steps build` 只跑一步。
-   - **CLI**：上面两条命令，见[终端闭环](#cli)。
-   - **独立驾驶舱**：「▶ 跑全闭环」/ 阶段轨「单步执行」，见[下节 6 步表](#cockpit)。
-   - **DSH 面板**：顶部三档 **编译 / 三连 / 闭环**；每个通道另有 **▶构建 / ▶烧录 / ▶调试 / ▶串口**。
-   - **agent**：`elab_build` / `elab_triple` / `elab_loop` / `elab_step`（返回 run id，进度面板实时可见）。
-4. **看证据**：驾驶舱阶段轨逐步点亮；内存占位取自 `.map`；产物 elf/hex/bin/map 可点开；
-   「零改动守卫」显示未触碰文件数。agent 用 `elab_status`（现状）+ `elab_log`（日志尾）+
-   `elab_preview`（只读 argv）。
-5. **调串口**：见 [串口工作区](#serial)；agent 用 `elab_serial*` 一组（读 / 写 / 等 / 解码 / 录制）。
-6. **进门禁**：`elab ci`（本地）与 GitHub Actions 共用同一份 `ci/matrix.yaml`；
-   门禁绿却零产物 → 红。
-
-<a id="cockpit"></a>
-
-## 闭环驾驶舱
-
-<img src="assets/cockpit-main.png" alt="驾驶舱三列布局（真机）" width="100%">
-
-*左：工程轨（`f411` 下嵌套 `f411_boot` 子工程，OTA 双槽标记）；中：阶段轨 + 证据轨；右：串口工作区*
-
-| 步骤 | 操作 | 你会看到 |
-|---|---|---|
-| ① 启动 | 双击 `cockpit.cmd` 或 `python -m cockpit.server` | Edge `--app` 独立窗口；已在跑则只开 UI（幂等） |
-| ② 接入工程 | 工程轨「＋ 适配」→ 粘贴工程绝对路径 →「探测」→「写入」 | 只读探测报告（T1/T3、置信度、芯片、证据链）；新卡片自动出现并选中 |
-| ③ 跑闭环 | 选中卡片 →「▶ 跑全闭环」 | 阶段带逐步点亮；不可用步骤自动排除（tooltip 说明原因） |
-| ④ 只跑一步 | 阶段轨「单步执行」折叠条；各工作区顶栏有对应按钮 | 置灰按钮的 tooltip 直接给理由（如"monitor 不可用：固件无心跳判据"） |
-| ⑤ 导航 | 右列恒为 **构建 \| 烧录 \| 串口 \| 工具**（工具页随 `tools:` 声明出现） | 每个工作区有自己的启动按钮与日志通道，日志互不串台 |
-| ⑥ 预览 | 阶段轨「运行选项」→「预览」 | 只读打印将执行的每条命令（`--clean` 副作用显式标红），不 spawn、不写盘 |
-
-### DSH 面板（窄栏版，agent 在跑时你在旁边看）
-
-**安装（一次）**：市场条目直接指向本仓子目录
-`github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`，用 `dsh plugin --profile web add`
-安装（或 `npm install dsh-elab-cockpit`）；开发期可用 Junction 把本仓该目录链接进
-DSH profile 的 `node_modules`。装完重载窗口。
-
-**面板里有什么**：阶梯进度 / 日志尾 / FLASH·RAM 占位 / 构建·烧录·调试·串口四通道 /
-串口行·字节·终端·波形四视图 / 通用发送面板（自动格式 / 历史 / 定时） / 市场与内核设置。
-下面是真实 DSH Desktop 右栏（440 px，STM32F411CEU6 + CMSIS-DAP + COM10，同一次运行）的截图：
-
-<div align="center">
-<table>
-<tr>
-<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-lines.png" width="240" alt="DSH 窄栏·串口行视图"><br><sub>行视图 · 心跳与正弦逐行滚动</sub></td>
-<td><img src="packages/dsh-elab-cockpit/assets/dsh-serial-wave.png" width="240" alt="DSH 窄栏·波形视图"><br><sub>波形视图 · 双通道 / 通道绑定 / 缩放</sub></td>
-</tr>
-</table>
-</div>
-
-**用起来 5 步**：
-
-1. **开面板**：右栏 elab tab（左栏 panellist 也有入口）。首次打开会自动托管内核子进程
-   （`python -m cockpit.server`，随机端口，只绑 `127.0.0.1`）；内核过旧时面板会提示同步。
-2. **看 agent 跑到哪**：阶梯逐行点亮（步骤 / 状态 / 耗时 / 单行 detail），日志尾跟着聚焦步骤滚动；
-   agent 发起的 run 会**自动切到对应工程**，但只跟新 run —— 不会把你手动切换的视图反复拽回。
-3. **自己动手**：顶部一行三档 **编译 / 三连 / 闭环** + 取消 / 预览 / ⚙；每个通道各有独立启动按钮
-   **▶构建 / ▶烧录 / ▶调试 / ▶串口**，不必先跑全闭环才能单独用某一页。
-4. **串口页**：行 / 字节 / 终端 / 波形四视图 + 发送面板，与独立驾驶舱**同一套工作区**；
-   agent 选定 decoder 后波形页会标 **「agent 选定」**并展示同一份帧，见[共享解码](#serial-shared)。
-5. **设置页**：工程条右上角 **⚙** 打开整幅设置视图（市场搜索安装 / 已装包启用管理 / 内核设置），
-   不挤占主视图。
-
-<a id="agent-tools"></a>
-
-## Agent 工具（`elab_*`，共 17 个）
-
-工具层向 agent 暴露的全部能力。**写硬件 / 写盘的都要 `allowAgentWrite`**（默认关）；
-安装适配包时内核会冻结闭环（有 run 在跑则返回 409）。
-
-| 组 | 工具 | 作用 |
-|---|---|---|
-| **看** | `elab_status` | 工程与步骤可用性（含不可用原因）+ 串口端口候选 / 当前会话 / 租约剩余 |
-| | `elab_preview` | 只读命令预览（每步 argv 与 `--clean` 删除目标；不 spawn、不写盘） |
-| | `elab_log` | 某个 run 的日志尾（默认 200 行，可按步骤过滤） |
-| **闭环** | `elab_build` | `plan=basic`：只编译 |
-| | `elab_triple` | `plan=triple`：编译 + 烧录 + 调试校验（需硬件） |
-| | `elab_loop` | `plan=loop`：体检 → 编译 → 烧录 → 调试校验 → 串口闭环 |
-| | `elab_step` | 按显式步骤执行（含 `tool:<name>`）；不可用**直接报错**，不静默剔除 |
-| | `elab_cancel` | 取消当前 run（人 / agent 发起都可） |
-| **工程与包** | `elab_adapt` | 探测（`write=false`）或写入接入 YAML（`write=true`） |
-| | `elab_pkg` | `status / search / install / activate / remove / update / verify` |
-| **串口** | `elab_serial` | 写串口（`utf8/ascii/gbk/hex` + 行尾） |
-| | `elab_serial_monitor` | 会话 `open / close / decoder / clear / pause / resume`（带租约） |
-| | `elab_serial_read` | 增量读原始字节批次（`seq / dir / t / len / gap`） |
-| | `elab_serial_wait` | 等匹配内容出现 / 超时（"发命令后等 OK"这类时序断言） |
-| | `elab_serial_decode` | 无状态解码（JustFloat / FireWater）；`apply=true` 同时落到会话 |
-| | `elab_serial_decoded` | 增量读**会话共享解码帧**（与面板波形页同一份数据） |
-| | `elab_serial_capture` | 开始 / 停止字节录制，返回证据文件路径与统计 |
-
-内核自描述 `capabilities.meta` 会把步骤、档位与解码器清单带给面板和 agent ——
-**工具层不写死业务枚举**，内核演进时自动跟随。
-
-<a id="serial"></a>
-
-## 串口工作区（本期核心）
-
-### 数据面：字节为真值，文本只是投影
-
-串口输出不再只是"按行文本"，而是 **带方向、带时间、可寻址的字节批次**：
-
-| 字段 | 含义 |
-|---|---|
-| `seq` | 批次序号（清空后仍单调递增） |
-| `dir` | `rx` / `tx` —— 你发送的内容也进入同一份数据面 |
-| `t` / `t_us` | 墙钟时间 / 微秒时间戳 |
-| `len` / `data_b64` | 原始字节（base64），**永远是字节** |
-| `epoch` | 连接纪元：每次重开监视自增，旧游标不会静默看不到新数据 |
-| `gap` | 环形缓冲挤出量（只报告、不抹平） |
-
-四个视图都从同一份原始字节投影出来；方向过滤、搜索、换表示**全在客户端**做，
-切视图不丢游标。
-
-### 四个视图
-
-| 视图 | 内容 | 适用 |
-|---|---|---|
-| **行** | 服务端切好的 RX 行 + 闭环 `serial` 通道事件（保持证据可见） | 快速扫日志 |
-| **字节** | 逐批显示 `#seq TX/RX 时间 · N B`，可切 **HEX / ASCII / UTF-8 / GBK** | 抓帧、核对原始字节 |
-| **终端** | 流式 ANSI：SGR 颜色、`\r` 覆写、`\b`、UTF-8/GBK 增量解码（跨批保持状态） | 彩色固件日志 |
-| **波形** | **JustFloat / FireWater** 协议解码 → Canvas 多通道折线（半帧留待下一批续解） | 看传感器数值曲线 |
-
-### 真机波形（STM32F411CEU6 · COM10 @ 115200 · FireWater 双通道）
-
-> 固件每 10ms 输出一行 `a,b\r\n`（100 Hz 采样、0.5 Hz 正弦），另插 `[alive] tick=N` 心跳。
-> 下图全部是同一次真机运行的界面原始截图。
-
-| 默认「全部」面板（CH0 / CH1 同时绑定） | 多面板（「全部」+「面板 2」独立视图） |
-|---|---|
-| <img src="assets/cockpit-serial.png" width="440"> | <img src="docs/tutorials/assets/wave-panel/06-all-panel.png" width="440"> |
-| **放大（×2.5，只看 CH0）** | **暂停跟随（视口停在第 0 帧，可回头查）** |
-| <img src="docs/tutorials/assets/wave-panel/04-zoom.png" width="440"> | <img src="docs/tutorials/assets/wave-panel/05-pause-v3.png" width="440"> |
-
-界面上能直接读到的信息：
-
-| 位置 | 含义 |
-|---|---|
-| `通道绑定：CH0 CH1` | 蓝色高亮 = 该面板正在画这个通道；灰框 = 已关闭 |
-| `帧 3860 → 4576` | 当前视口左右边界对应的帧号 |
-| `共 4593 帧 · 窗口 717 · ×1.0` | 缓冲区总帧数 / 视口帧数 / 缩放倍数 |
-| `4593 帧 · 2 通道 · 跳过 57` | 解码统计；`跳过` 是协议外字节数 |
-| 红色条 `环形缓冲已挤出` | 缓冲挤出只报告、不抹平；完整留档用「导出」或闭环 monitor 事件 |
-
-> 手把手操作（选解码器 → 新建面板 → 绑定通道 → 缩放 → 暂停）见
-> **[波形面板使用教程](docs/tutorials/wave-panel-usage.md)**。
-
-### 会话与发送
-
-| 操作 | 行为 |
-|---|---|
-| **暂停 / 继续** | 只停"入环"，服务端仍在读口（不撑爆设备缓冲） |
-| **录制** | 服务端把**原始字节**写成有界 JSONL（5 MiB 上限，到限即截断并报告），可回放 |
-| **清空** | 清服务端与本地缓冲，序号保持单调 |
-| **导出** | 导出当前过滤结果为 HEX + 元数据（浏览器下载） |
-| **搜索 / 跟随** | 大小写不敏感（不做正则），行/字节/终端可用；跟随可暂停 |
-| **端口 / 波特率** | 工具栏下拉手动选口（`auto` = USB 优先、排蓝牙、有歧义就报错）；选择跨刷新保留；监视运行中锁死（换口需先关监视） |
-| **发送面板** | 文本 / ASCII / GBK / HEX + 行尾 无 / LF / CR / CRLF；HEX 严格校验；与监视同口写穿（TX 与 RX 同构入面） |
-
-> 驾驶舱「串口」页与 DSH 面板「串口」页是**同一套工作区**（窄栏版布局对齐，
-> 单条工具栏 + 搜索 subbar + 发送面板）。
-
-<a id="serial-shared"></a>
-
-### 共享解码：agent 与人的波形同源
-
-decoder 不是客户端设置，而是**会话属性**：谁把它落到会话，谁的画面就同图。
-
-| 谁 | 怎么做 | 结果 |
-|---|---|---|
-| agent 选解码 | `elab_serial_monitor`（`action=decoder`）或 `elab_serial_decode`（`apply=true`） | 面板波形页出现 **「共享解码 · agent 选定」** 徽标，画的是内核帧环里的那份帧 |
-| agent 拿数据 | `elab_serial_decoded`（`after` 游标） | 结构化 `values` 数组 + `gap`（帧环挤出只报告、不抹平）——与面板读**同一个帧环** |
-| 人切解码 | 波形页 decoder 下拉 | 徽标变 **「人选定」**，agent 下次读到的就是新解码 |
-
-- 内核只解 **RX**（设备输出）；TX 是"我们写出去的"，不解码。
-- 帧环 1024 帧；半帧跨批续解（半帧超过 64 KiB 丢弃并计入 `skipped`）；
-  换 decoder / 清空时帧序号保持单调，旧游标不会静默失效。
-- 没人落 decoder（`decode.decoder == ''`）时，面板回退到原本地解码路径，行为与之前一致。
-
-### 纪律与互斥
-
-- **监视是"看"，不是证据**：实时流只活环形缓冲；可复核的判定走闭环 `monitor` 步骤
-  （close_on / fail_on / 静默超时 → `ok / failed / inconclusive`）。
-- 串口监视（常驻）与闭环 run **双向 409 互斥**，端口不会被两个进程同时抢。
-- agent 打开监视默认带 **`lease_s` 租约**，到期自动释放端口，避免把串口一直占死。
-
-### 串口类 Agent 工具
-
-全部 17 个工具见 [Agent 工具总表](#agent-tools)。串口这组：
-
-| 工具 | 作用 |
-|---|---|
-| `elab_serial` | 写串口（`utf8/ascii/gbk/hex` + 行尾）；**写硬件**，需开启 `allowAgentWrite` |
-| `elab_serial_monitor` | 常驻会话 `open / close / decoder / clear / pause / resume`（带租约） |
-| `elab_serial_read` | 结构化读出批次（`seq / dir / t / len / gap`，只读） |
-| `elab_serial_wait` | 等匹配内容出现 / 超时，返回命中批次（只读） |
-| `elab_serial_decode` | 对指定字节跑 JustFloat / FireWater 解码，返回帧与通道数 |
-| `elab_serial_decoded` | 增量读会话共享解码帧（与面板波形同源，见[共享解码](#serial-shared)） |
-| `elab_serial_capture` | 开始 / 停止字节录制，返回证据文件路径与统计 |
-
-串口端口候选、当前会话与租约剩余看 `elab_status`；内核自描述
-`capabilities.meta.serial.decoders` 会把解码器清单带给面板与 agent，工具层不写死枚举。
-
-**画面同步**：agent 发起的 run 会自动切到对应工程并实时接管事件流（SSE 从 seq 0 重放，
-中途开始也不缺前序步骤）；只跟**新出现**的 run，不会把人手动切换的视图持续拽回。
-串口工作区同时显示**会话归属**（我 / agent）与 **agent 租约倒计时**（每 500ms 随快照刷新）。
-
-<a id="packs"></a>
-
-## 适配包与社区市场
-
-芯片参数、厂商指纹、平台坑位**全部来自适配包**（骨架仓本身零芯片）。
-
-| 包 | 类型 | 来源 | 安装 |
-|---|---|---|---|
-| `st/stm32` | **内置** | 本仓 `packs/official/st/stm32` | `elab pkg bootstrap` |
-| `artery/at32` | **外置（GitHub）** | [elab-pack-artery-at32](https://github.com/xkk6663/elab-pack-artery-at32) | `elab pkg search at32` → `elab pkg install artery/at32` |
-
-市场索引在 [elab-pack-market](https://github.com/xkk6663/elab-pack-market)（零服务器：
-一份 `index.json` + 作者仓库里的包本体），索引不可达时自动回退本仓 `market/index.json`。
-包之间互不依赖；改包后必须 `elab pkg index` 重生成索引，CI 用 `--check` 拦漂移。
-
-- 市场与安装语义：[market/README.md](market/README.md)（零服务器、一次只启用一套、本地可存多套）
-- 贡献一颗新芯片：见 [market/CONTRIBUTING.md](market/CONTRIBUTING.md)（包结构、sha256、上架 PR、评审清单）
-- 驾驶舱面板：工程条右上角 **⚙** → 整幅设置视图（市场搜索安装 / 已安装包启用管理 / 内核设置）；
-  agent 用 `elab_pkg` 工具（可自行安装，安装期间闭环冻结）。
-
-### 接入一颗新芯片 = 4 步
-
-```bash
-./elab pkg search <vendor/platform> && ./elab pkg install <vendor/platform>
-./elab pkg install ./my-pack --from ./my-pack   # 或本地自测自己的包
-$EDITOR projects/<name>.yaml                     # root / chip / archetype / toolchain_file / linker_script
-./elab doctor -p <name> --deep && ./elab loop -p <name> && ./elab skill -p <name>
-```
-
-包内容 = `pack.yaml`（name/vendor/platform/version/license/requires + vendor_fingerprints）
-+ `chips/<id>.yaml`（cpu/fpu/memory/openocd_target/verify/pitfalls）。不需要改 `services/` 任何代码。
-
-<a id="ota"></a>
-
-## OTA 双槽升级（F411CEU6 实弹样例）
-
-`examples/STM32F411CEU6` + `examples/F411CEU6_BOOT` 是完整参考实现：
-boot / APP / 上位机 / 驾驶舱可视化 / 异常注入 / 双槽回滚全链路实弹验证。
-
-- **Flash 分布**：Bootloader 32KB @`0x08000000` · 状态页/偏移页各占独立扇区 · 槽 A 出厂 @`0x08010000` · 槽 B @`0x08040000`。
-  分区表唯一事实源是适配包 `chips/*.yaml` 的 `ota_layout:`，构建期注入 `ota_layout_gen.h`，`doctor --deep` 三方对账。
-- **坏固件自动回滚**：新固件写 INACTIVE 槽 → 试运行（每次上电先减 trial 并落盘，先记后跳）→
-  trial 耗尽打印 `=== ROLLBACK ===` 回老槽；心跳正常则 `OTA_Confirm()` 晋级（幂等）。
-- **停等协议**：帧 `AA [01|02] SEQ LEN DATA CRC32 EOF 55`，CRC 错 NAK 重传（MAX_RETRY=3）；
-  元数据帧 `seq=0xFF` 下发预期 CRC；`0x15` 组件发现；每 1KB 记页支持断点续传。
-- **组合工程**：chips yaml 一字段 `ota_layout.boot_project: f411_boot` → `elab build -p f411` 级联构建；
-  `elab flash` 按 boot bin 的 **md5 指纹**冻结台账（字节级零触碰，`--reflash-boot` 强刷）。
-- **入舱**：升级命令是项目 yaml 的 `tools:` 节，经 `tool:<name>` 派发并写事件流；
-  工具页一键 `probe → trigger → transfer → verify → reset → listen`。
-
-异常注入三件套（坏帧重传 / 传输中拔电续传 / CRC_FAIL 恢复）均实弹 PASS，
-详见 [OTA 双槽回滚技术方案](examples/STM32F411CEU6/doc/OTA_双槽回滚技术方案.md)。
-
-<a id="evidence"></a>
-
-## 实测证据
-
-| | AT32_TEST | STM32_TEST | at32f421g8u7 ★ | F411 + F411_BOOT ★ |
-|---|---|---|---|---|
-| 工程形态 | B 类（WorkBench） | A 类（CubeMX） | B 类（`elab adapt` 自动接入） | A 类 + 组合工程（boot 子工程） |
-| 编译 | ✅ FLASH 7.39% | ✅ FLASH 57.65% | ✅ FLASH 17.99% | ✅ app 53 目标 + boot 32 目标级联 |
-| 零改动守卫 | ✅ 153 文件 | ✅ 1145 文件 | ✅ 99 文件 | ✅ 643 文件 |
-| 烧录 / 调试 | ✅ `Verified OK` · 断到 `main.c:78` | ⚠️ 未上板（无板） | ✅ `Verified OK` · 断到 `main.c:103` | ✅ 双镜像 + boot 冻结台账 · 断到 `main.c:84` |
-| 串口 | — | — | ✅ `[alive]` 命中 | ✅ `[alive] tick=0` 命中 · 心跳 + OTA 四工具全 PASS |
-
-- **质量门**：内核单测 + 集成（真起服务、真编译）全绿；插件 94 项测试（含分层边界与样式门禁）全绿
-- **云端**：GitHub Actions `ubuntu-latest` 三工程 `doctor --deep` + `build` 全绿；前端产物可复现零差异
-
-```text
-$ ./elab loop -p f411 -v
-[1/5] doctor   ✓ 工具链 / 芯片 / 漂移 / 工程约定 全绿（drift.* 三方对账）
-[2/5] build    ✓ app 53 目标 + boot 32 目标
-               RAM 21864/131072 B (16.68%)  FLASH 44320/458752 B (9.66%)  guard ✓ untouched=True
-[3/5] flash    ✓ boot + app 双镜像 → ** Programming Finished ** → ** Verified OK ** ×2
-[4/5] debug    ✓ Breakpoint 1, main () at .../main.c:84 · pc=0x8017214
-[5/5] monitor  ✓ [alive] tick=0（close_on 命中 · 3.5s / 2201 B / 155 行）
-[elab] ✓✓ 闭环完成：f411
-```
-
-<a id="constraints"></a>
-
-## 设计约束（精选）
-
-完整 **C1–C35** 见 [docs/design/设计约束.md](docs/design/设计约束.md)。
-
-| # | 一句话 |
-|---|---|
-| C17 | 事件流**单写者**：只有 `elab run --emit-events` 写 |
-| C24–C26 | SSE 合并只认进程输出；背压丢弃留痕；控制帧绝不丢 |
-| C28/C31 | 手写留档、常驻监视输出都不进事件流（两条道互不污染） |
-| C32/C34 | stdout 重定向 + GBK 会崩服务；驾驶舱端口 8333 避开 openocd 3333 |
-| C33 | OTA 双镜像烧录：bin 项强制显式地址 |
-| C35 | 组合工程：boot 自引用；冻结判据是 md5 指纹而非版本号 |
-| N5 | 串口监视与闭环 run 双向 409 互斥，同一端口不能被两方同时占用 |
+- 市场与 npm 都直接取自本仓 `packages/dsh-elab-cockpit` 子目录，没有镜像/分发仓。
+- 分层规则见 [AGENTS.md](AGENTS.md)；`packs/installed/` 是用户按需安装的落点，随仓只提交 `packs/official/**` 与 `market/index.json`。
 
 <a id="docs"></a>
 
-## 文档索引
+## 文档
 
-| 目标 | 入口 |
-|---|---|
-| **终端闭环上手教程**（真机 5 阶段、终端分色规则、子命令独立跑） | [docs/tutorials/cli-terminal-usage.md](docs/tutorials/cli-terminal-usage.md) |
-| **波形面板使用教程**（选解码器、多面板、通道绑定、缩放暂停） | [docs/tutorials/wave-panel-usage.md](docs/tutorials/wave-panel-usage.md) |
-| **分类索引**（architecture / design / reports / requirements） | [docs/README.md](docs/README.md) |
-| 版本发布说明 | [CHANGELOG.md](CHANGELOG.md) |
-| **需求逐项对照与后续改进**（驾驶舱 R1–R10 / 插件目标 / 串口 P1–P3.5 / 市场 R1–R4 + backlog） | [docs/requirements/需求对照与改进.md](docs/requirements/需求对照与改进.md) |
-| 设计约束 C1–C35 | [docs/design/设计约束.md](docs/design/设计约束.md) |
-| **串口监视与调试可视化迁移方案**（P1/P2/P3、数据面契约、Agent 工具） | [docs/design/技术迁移方案_串口监视与调试可视化.md](docs/design/技术迁移方案_串口监视与调试可视化.md) |
-| **DSH 插件移植技术方案**（分层边界 / 面板 / ICD） | [docs/design/技术方案_dsh-elab-flow插件移植.md](docs/design/技术方案_dsh-elab-flow插件移植.md) |
-| **架构分析与仓库依赖关系**（分层总览 / 仓库拓扑 / 发版 Playbook / 门禁） | [docs/architecture/架构分析和项目仓库的依赖关系.md](docs/architecture/架构分析和项目仓库的依赖关系.md) |
-| 事件契约 ICD（topic 全集 / SSE 帧格式 / 兼容承诺） | [docs/design/ICD_cockpit_events.md](docs/design/ICD_cockpit_events.md) |
-| 驾驶舱方案与实现记录（决策 D / 约束 N / 串口判据） | [docs/design/技术方案_闭环驾驶舱.md](docs/design/技术方案_闭环驾驶舱.md) |
-| OTA 双槽回滚技术方案 | [examples/STM32F411CEU6/doc/OTA_双槽回滚技术方案.md](examples/STM32F411CEU6/doc/OTA_双槽回滚技术方案.md) |
-| 社区适配包市场与芯片适配包 | [docs/reports/可行性研究_社区插件市场与芯片适配包.md](docs/reports/可行性研究_社区插件市场与芯片适配包.md) |
+| # | 教程 | 适合 |
+|---|---|---|
+| 01 | [芯片开发上手 · 独立 WebUI 全流程](docs/tutorials/01-芯片开发上手_独立WebUI.md) | 换新芯片 / 新板，先过心跳第一关 |
+| 02 | [市场适配包贡献](docs/tutorials/02-市场适配包贡献.md) | 给新厂商做适配包并上市场 |
+| 03 | [插件市场使用 · 独立 WebUI](docs/tutorials/03-插件市场使用_独立WebUI.md) | 零环境装插件 + 首启向导 |
+| 04 | [调试工作区上手 · 真实 HardFault 排错](docs/tutorials/04-调试面板上手_STM32F103C8T6.md) | 断点 / 监视 / 外设 / RTOS 栈 |
+| 05 | [DSH 插件上手 · 右栏闭环 + 调试页签](docs/tutorials/05-DSH插件上手_STM32F103C8T6.md) | DSH 主线 |
+| 06 | [CLI 终端闭环 · 真机 5 阶段](docs/tutorials/06-CLI终端闭环上手.md) | 只想用命令行 |
+| 07 | [波形面板使用](docs/tutorials/07-波形面板使用.md) | 解码器 / 多面板 / 缩放暂停 |
+| 08 | [串口压力测试报告 · STM32F411CEU6](docs/tutorials/08-串口压力测试报告_STM32F411CEU6.md) | 高吞吐与丢数判定 |
+
+深度文档（架构 / 设计约束 C1–C36 / ICD / OTA）见 [docs/README.md](docs/README.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 已知限制
 
-- 双槽路径的 `--throttle` 传输中拔电续传（单槽已实测 `offset=14336` 续传）待复验
-- `onhw-gate` 需 self-hosted 探针（云端编译门禁不受影响）
-- 驾驶舱 `profiles/*.yaml` 插件化装配、`elab skill --adapt` 未实现
-- 常驻监视的实时流只活环形缓冲（重启即失）—— 它是"看"，要证据走闭环 `monitor` 或「录制」
-- 字节视图只渲染最近若干批（驾驶舱 300 / DSH 面板 200）；波形页在**共享解码**模式下看内核
-  帧环最近 1024 帧（未启用的本地兜底解码仍是 64 KiB 窗口）——更早的可用「导出」/「录制」留档
-- 共享解码的"关闭"入口只在 agent 侧（`decoder` 传空串）；面板下拉只有具体的 decoder
-- 录制产物是有界 JSONL（可回放），但界面尚无回放器
-
-## 设计边界
-
-- **对象是"工作链"，不是"代码"**：configure / build / flash / debug / monitor / CI / AI / 事件流
-- **三个收敛点**：主机路径 → `elab.host.yaml`；芯片差异 → `packs/**/chips/*.yaml`；工程接入 → `projects/*.yaml`
-- **两个技术支点**：`-DCMAKE_TOOLCHAIN_FILE` + `-DCMAKE_PROJECT_INCLUDE`；`openocd + gdb` CLI
-- **验收标准**：同一句 `elab build/flash -p X` 对不同厂商、不同内核的工程同样成立，
-  且业务工程文件树恒为 `untouched`
+- `onhw-gate` 需 self-hosted 探针（云端编译门禁不受影响）；`profiles/*.yaml` 插件化装配与 `elab skill --adapt` 未实现。
+- 常驻监视的实时流只活环形缓冲（重启即失）；要证据走闭环 `monitor` 或「录制」。
+- 字节视图只渲染最近若干批（驾驶舱 300 / DSH 200）；波形共享解码最多看帧环 1024 帧，更早的用「导出 / 录制」留档。
+- 录制产物是有界 JSONL（可回放），界面暂无回放器；双槽传输中拔电续传待复验。

@@ -34,6 +34,27 @@ export interface AdaptCheck {
   at: number
 }
 
+/**
+ * 候选工程的**只读探测**结果（`action=probe`，不写盘）。
+ *
+ * 只保留面板要呈现的那几样；语义与内核 `adapt.probe_project()` 同源。
+ * `ambiguities` 非空 = 写入会被拒（阻断项，需人工裁决）。
+ */
+export interface AdaptProbeInfo {
+  path: string
+  /** 内核推导出的建议工程名（写入时落成 projects/<name>.yaml）。 */
+  name: string
+  /** T1 = 可直接适配；T3 = 需先在配置器里切 CMake 后重导出。 */
+  tier: string
+  confidence: string
+  chip: string
+  generator: string
+  projectName: string
+  /** 固件是否有串口输出能力（__io_putchar + printf）。 */
+  canPrint: boolean
+  ambiguities: string[]
+}
+
 export interface AdaptState {
   phase: AdaptPhase
   /** 会话解析出的 elab 仓库根（null = unbound）。 */
@@ -50,11 +71,18 @@ export interface AdaptState {
   lastAdapted: string | null
   /** 最近一次复探测结果（null = 还没探测过）。 */
   check: AdaptCheck | null
+  /** 最近一次只读探测的结果（null = 还没探测过，或候选已变化）。 */
+  probe: AdaptProbeInfo | null
+  /** 只读探测在途的目标工程目录（null = 空闲）。 */
+  probing: string | null
 }
 
 export type AdaptEvent =
   | { type: 'host/resolved'; elabRoot: string | null }
   | { type: 'discover/result'; candidates: AdaptCandidate[] }
+  | { type: 'adapt/probe-start'; path: string }
+  | { type: 'adapt/probe-result'; probe: AdaptProbeInfo }
+  | { type: 'adapt/probe-failed'; error: string }
   | { type: 'adapt/start'; path: string }
   | { type: 'adapt/done'; ok: boolean; name?: string; error?: string }
   | { type: 'adapt/checked'; name: string; status: AdaptCheck['status']; at: number }
@@ -70,6 +98,8 @@ export function initialAdaptState(): AdaptState {
     error: null,
     lastAdapted: null,
     check: null,
+    probe: null,
+    probing: null,
   }
 }
 
@@ -104,10 +134,29 @@ export function reduceAdapt(s: AdaptState, e: AdaptEvent): AdaptState {
       const hasUnadapted = e.candidates.some((c) => c.adaptedAs === undefined)
       const phase: AdaptPhase =
         s.phase === 'adapting' ? 'adapting' : hasUnadapted ? 'discovered' : 'bound'
-      return { ...s, candidates: e.candidates, scanned: true, phase }
+      // 候选变了 → 旧探测结果作废（它描述的是上一次扫描里的那个目录）
+      const keepProbe =
+        s.probe !== null &&
+        e.candidates.some((c) => c.adaptedAs === undefined && c.path === s.probe!.path)
+      return {
+        ...s,
+        candidates: e.candidates,
+        scanned: true,
+        phase,
+        probe: keepProbe ? s.probe : null,
+      }
+    }
+    case 'adapt/probe-start': {
+      return { ...s, probing: e.path, probe: null, error: null }
+    }
+    case 'adapt/probe-result': {
+      return { ...s, probing: null, probe: e.probe, error: null }
+    }
+    case 'adapt/probe-failed': {
+      return { ...s, probing: null, probe: null, error: e.error }
     }
     case 'adapt/start': {
-      return { ...s, phase: 'adapting', target: e.path, error: null, check: null }
+      return { ...s, phase: 'adapting', target: e.path, error: null, check: null, probing: null }
     }
     case 'adapt/checked': {
       return { ...s, check: { name: e.name, status: e.status, at: e.at } }
@@ -123,10 +172,18 @@ export function reduceAdapt(s: AdaptState, e: AdaptEvent): AdaptState {
           lastAdapted: e.name ?? s.lastAdapted,
           error: null,
           check: null,
+          probe: null,
+          probing: null,
         }
       }
       // 失败 → 回到 discovered（banner 继续可点），原因显式呈现。
-      return { ...s, phase: s.elabRoot === null ? 'unbound' : 'discovered', target: null, error: e.error ?? '适配失败' }
+      return {
+        ...s,
+        phase: s.elabRoot === null ? 'unbound' : 'discovered',
+        target: null,
+        error: e.error ?? '适配失败',
+        probing: null,
+      }
     }
     case 'reset':
       return initialAdaptState()

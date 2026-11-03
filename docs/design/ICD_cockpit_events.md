@@ -73,13 +73,19 @@
 |---|---|---|
 | `run/start` | run 开始 | `project`, `steps: string[]`（本次要跑的步骤序列） |
 | `run/step-enter` | 进入某步（**R1 的权威来源**） | `step`, `index: int`, `total: int` |
-| `run/step-exit` | 退出某步 | `step`, `ok: bool`, `detail: string`, `duration_s: number`, `<产物域>?` |
-| `run/end` | run 结束 | `ok: bool`, `steps_ok: list`, `steps_failed: list` |
+| `run/step-exit` | 退出某步 | `step`, `ok: bool`, `detail: string`, `duration_s: number`, `<产物域>?`, `verdict?: "ok"\|"failed"\|"inconclusive"` |
+| `run/end` | run 结束 | `ok: bool`, `steps_ok: list`, `steps_failed: list`, `verdict: "ok"\|"failed"\|"inconclusive"` |
 | `run/cancel` | 被人工/超时取消 | `by: "human"\|"watchdog"`, `reason: string` |
 
 `run/step-exit` 的 `detail` 是**单行摘要**（供时间线与阶段账本显示），
 例：`"FLASH 7.39% RAM 9.62%"`、`"configure-failed: <尾 25 行>"`。
 步骤的完整输出**不在**这里（在 §3.2）。
+
+**`verdict` 是三态，`ok` 是两态**（2026-11-03）：`ok` 仍表示"没有失败步骤"；
+要区分"通过"与"没验证"必须读 `verdict`。`monitor` 的 `run/step-exit` 会把
+`serial/closed-loop` 的判定抬到顶层（`ok=true` + `verdict=inconclusive` = 跑完了
+但没拿到约定证据，例如没接串口/没收到关键字）。消费方**不得**把
+`ok=true` 直接当成"闭环通过"。
 
 **`run/step-exit` 允许携带产物域**（M1 起可选实现）：
 

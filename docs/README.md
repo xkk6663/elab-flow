@@ -40,12 +40,14 @@
 
 | 文档 | 内容 |
 |---|---|
-| [可行性调研与教程大纲_独立WebUI芯片上手与市场包贡献](tutorials/可行性调研与教程大纲_独立WebUI芯片上手与市场包贡献.md) | 三篇教程（芯片上手 / 市场包贡献 / 插件市场使用）的可行性结论、章节大纲、截图清单与拍摄协议 |
 | [01-芯片开发上手_独立WebUI](tutorials/01-芯片开发上手_独立WebUI.md) | A 篇（已实拍）：启动 → 装包 → 适配 → 全闭环 → 证据 → 串口工作台 → 双通道波形上手任务；STM32F411CEU6 实机截图 |
 | [02-市场适配包贡献](tutorials/02-市场适配包贡献.md) | B 篇（命令均本机实跑）：包结构 → 市场链路 → 探测填事实 → 本地跑通 → 上架 → 准入 7 条 → 自查清单；无需硬件 |
 | [03-插件市场使用_独立WebUI](tutorials/03-插件市场使用_独立WebUI.md) | C 篇（已实拍）：市场浏览/搜索 → 安装 → 已安装管理 → 启用切换 → 回闭环；含限流兜底实拍 |
-| [cli-terminal-usage](tutorials/cli-terminal-usage.md) | **终端闭环上手**（实机 F411）：一条 `elab loop` 跑完 5 阶段，终端按输出类型分色，含 doctor/build/flash/debug/monitor 逐步截图 |
-| [wave-panel-usage](tutorials/wave-panel-usage.md) | **波形面板上手**（实机 F411）：选解码器 → 新建面板 → 通道绑定 → 缩放 → 暂停 |
+| [04-调试面板上手_STM32F103C8T6](tutorials/04-调试面板上手_STM32F103C8T6.md) | **调试工作区**（已实拍）：真实 HardFault 排错主线 —— 断点 → 调用栈 → 寄存器 → 监视 → 内存 → 外设（P2）→ RTOS 栈水位（P3）→ 审计 → 修复重烧 → 串口恢复 |
+| [05-DSH插件上手_STM32F103C8T6](tutorials/05-DSH插件上手_STM32F103C8T6.md) | D 篇（已实拍）：DSH 右侧栏四块 → 自动只读探测接入 → 三连 → 串口心跳判活/关闭监视 → 调试工作区（单步/断点/变量/寄存器/关闭恢复）；STM32F103C8T6 实机截图 |
+| [06-CLI终端闭环上手](tutorials/06-CLI终端闭环上手.md) | **终端闭环上手**（实机 F411）：一条 `elab loop` 跑完 5 阶段，终端按输出类型分色，含 doctor/build/flash/debug/monitor 逐步截图 |
+| [07-波形面板使用](tutorials/07-波形面板使用.md) | **波形面板上手**（实机 F411）：选解码器 → 新建面板 → 通道绑定 → 缩放 → 暂停 |
+| [08-串口压力测试报告_STM32F411CEU6](tutorials/08-串口压力测试报告_STM32F411CEU6.md) | **串口压力测试报告**（实机 F411）：高压收发下的丢包/挤出/时序统计与结论 |
 
 ## requirements/ —— 需求对照
 
@@ -55,7 +57,7 @@
 
 ## 其他
 
-- `tutorials/assets/`：两篇实机教程的截图（`cli-terminal/` 终端闭环、`wave-panel/` 波形面板）；
-  README 首屏与串口章节也直接引用其真机截图。
+- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 波形面板、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
+  README 首屏与调试/串口章节也直接引用其真机截图。
 - 实机验证截图在 `packages/dsh-elab-cockpit/docs/screenshots/`（插件 README 使用）。
 - 版本变更记录在仓库根 [CHANGELOG.md](../CHANGELOG.md)；工作规则见 [AGENTS.md](../AGENTS.md)。

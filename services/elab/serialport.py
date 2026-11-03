@@ -203,7 +203,7 @@ def capabilities() -> dict:
         "layer": layer,
         "available": layer != "L2",
         "hint": (None if layer != "L2" else
-                 "未安装 pyserial 且非 Windows：串口闭环不可用（monitor 会判 inconclusive）。"
+                 "未安装 pyserial 且非 Windows：串口闭环不可用（monitor 会判 failed）。"
                  "安装：pip install pyserial"),
     }
 

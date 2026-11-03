@@ -26,6 +26,7 @@ import {
   DEFAULT_HOST_ROUTE_CONFIG,
   registerApiRoute,
   registerEventsRoute,
+  registerDebugEventsRoute,
   type HostRouteConfig,
   type HostRouteContext,
   type ProxyDeps,
@@ -177,6 +178,7 @@ export function apply(ctx: HostRouteContext, options: ApplyOptions = {}): HostCo
   const disposers: Array<() => void> = []
   disposers.push(registerApiRoute(ctx, deps))
   disposers.push(registerEventsRoute(ctx, deps))
+  disposers.push(registerDebugEventsRoute(ctx, deps))
 
   // 健康 / 清理 / 诊断（GET /elab/host）
   disposers.push(

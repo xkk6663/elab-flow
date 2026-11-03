@@ -19,7 +19,15 @@ from .config import ElabError, to_fwd
 from .plan import Plan, plan_for
 
 
-def _openocd_argv(plan: Plan, commands: str) -> list[str]:
+def _openocd_argv(plan: Plan, commands, *,
+                  pre_commands: list[str] | None = None) -> list[str]:
+    """拼 openocd argv。
+
+    ★ ``pre_commands`` 必须插在 ``-f`` **之前** —— ``gdb_port`` / ``telnet_port``
+      这类"服务器端口"命令只有在 target cfg 的 ``init`` 之前下发才生效。
+      实测事故（C34 延伸）：追加到末尾时 target cfg 已按默认 3333 监听，
+      端口命令静默无效。
+    """
     chip = plan.chip
     dbg = chip.get("debug") or {}
     host = plan.host
@@ -45,8 +53,11 @@ def _openocd_argv(plan: Plan, commands: str) -> list[str]:
     if not target or not Path(host.openocd_scripts, target).exists():
         raise ElabError(f"openocd target cfg 不可用：{target!r}")
 
-    argv = [to_fwd(host.openocd), "-s", to_fwd(host.openocd_scripts),
-            "-f", interface, "-f", target]
+    argv = [to_fwd(host.openocd), "-s", to_fwd(host.openocd_scripts)]
+    # ★ 端口等"服务器级"命令必须前置（见 docstring）
+    for c in (pre_commands or []):
+        argv += ["-c", c]
+    argv += ["-f", interface, "-f", target]
     # 探针声明的速率（若有）以命令形式追加，不覆盖 cfg 内的其它设置
     if probe.get("speed"):
         argv += ["-c", f"adapter speed {probe.get('speed')}"]

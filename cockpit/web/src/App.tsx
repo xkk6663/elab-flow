@@ -329,12 +329,21 @@ export default function App() {
    *   否则阶段轨会继续引用一个已不存在的工程（下次 run 直接 400）。
    */
   const onManaged = useCallback(
-    (res: { action: "rename" | "remove"; name: string; new_name?: string }) => {
+    (res: {
+      action: "rename" | "remove" | "set_probe";
+      name: string;
+      new_name?: string;
+      probe?: string;
+    }) => {
       void (async () => {
         const p = await loadAll(false);
         if (res.action === "rename" && res.new_name) {
           await selectProject(res.new_name);
           setNotice(`工程已重命名为 ${res.new_name}`);
+          return;
+        }
+        if (res.action === "set_probe") {
+          setNotice(`工程 ${res.name} 的探针已切换为 ${res.probe ?? ""}`);
           return;
         }
         setNotice(`已移除工程 ${res.name}（projects/${res.name}.yaml.bak 可恢复）`);

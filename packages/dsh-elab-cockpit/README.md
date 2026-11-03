@@ -7,7 +7,8 @@
 elab-Flow 闭环驾驶舱的 DSH 插件 —— 一块**嵌入式闭环开发**面板，也是一个**给用户看的驾驶舱**。
 
 > agent 在面板里发起「发现 → 适配 → 编译 → 烧录 → 调试校验 → 串口闭环」，用户在同一块窄栏里实时看到
-> 阶梯进度、日志尾、RAM/FLASH 占用、串口四视图与波形 —— 不是“agent 闷头跑完再报一句结果”。
+> 阶梯进度、日志尾、RAM/FLASH 占用、串口四视图、波形与**调试工作区**（单步 / 断点 / 变量 / 寄存器）——
+> 不是“agent 闷头跑完再报一句结果”。
 > 串口发送面板（**自动格式识别 / 发送历史 / 定时发送**）在 DSH 窄栏与独立 WebUI 右侧栏是同一套：
 > 同一条 loopback ICD、同一份内核编码入口（`serialterm.resolve_payload`）、同一个预览口径。
 > 参数化发送组件仍保留给 **agent**（`elab_serial_widget`，按固定格式发送），面板不再展示组件 UI。
@@ -17,37 +18,59 @@ elab-Flow 闭环驾驶舱的 DSH 插件 —— 一块**嵌入式闭环开发**�
 
 ## 面板长什么样（真实 DSH 宿主截图）
 
-截图全部取自真实的 DSH Desktop 右侧栏（`sidebar.right` 槽位，宽 440 px），硬件是
-STM32F411CEU6 + CMSIS-DAP + COM10，工程 `f411`；同一次运行里串口正在输出 FireWater 两通道正弦。
+闭环 / 串口 / 调试截图取自同一台实机、同一次 DSH 会话：STM32F103C8T6 + CMSIS-DAP + COM10@115200，
+DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页可直接渲染。
 
-### 行视图：设备原始数据 + 真流量统计
+### 认清面板：一个右侧栏，三块信息
 
-`[alive] tick=…` 心跳与 `-0.486,0.486` 正弦逐行滚动；右上角 `72 044 B · 275 批` 是真实 RX 流量；
-底部是通用发送栏（自动格式 / 发送历史 / 定时）。**跟随**只由「▾ 跟随 / ↺ 恢复」按钮控制，始终贴最新一行。
+页签行（`ELAB` + 刷新/设置 + **`▶|` 调试工作区入口**）→ 工程行（下拉 / 归属 / 内核状态 / ↻）→
+适配横幅（自动探测结论，只读不落盘）→ 阶段梯（`编译 烧录 调试校验`：状态点 · 用时 · 证据）→
+手动条（`三连` `闭环` `取消` `预览` + 单步 `▶ 构建 / 烧录 / 调试 / 串口`）→
+通道日志（`构建|烧录|调试|串口` 页签 + 过滤/搜索/导出）→ 底部串口工作区（行/字节/终端/波形 + 通用发送框）。
 
-<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/dsh-serial-lines.png" width="330" alt="DSH 窄栏·串口行视图：正弦数值与心跳">
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/01-auto-probe-full.png" width="330" alt="DSH 全窗口：右侧栏 ELAB 面板">
 
-### 波形视图：数字变曲线，通道可绑定
+### 闭环三连：每一步落账用时与证据
 
-FireWater 解码器把 ASCII 行解成 2 通道；「通道绑定」CH0 / CH1 决定当前面板画哪几条，
-面板级「❚❚ 暂停跟随」冻结时间窗，「− / ＋ / ⤾」控制缩放与平移。总帧数、通道数与
-「帧环挤出」（内核帧环为高流量兜底的滑动窗口）都如实标注。
+编译 `RAM 57.58% · FLASH 58.66%`（取自 `.map`）→ 烧录 `Verified OK`（探针回读）→
+调试校验停在 `main.c:79`。零改动时显示 `ninja: no work to do.`（构建系统确认无变更，阶段照常继续）；
+任何一步失败即中断，失败行以红色语气落在对应通道。
 
-<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/dsh-serial-wave.png" width="330" alt="DSH 窄栏·串口波形视图：双通道正弦、通道绑定与缩放">
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/10-triple-ok.png" width="330" alt="三连全绿：用时与证据逐行落账">
 
-### 通用发送：自动识别 → 服务端预览 → 历史 → 定时
+### 串口心跳：判活两条硬指标
 
-输入框默认 `自动` 格式：`0x0A 0xFF`、`0A,FF` 这类明确 HEX 写法按字节发；裸 `1234` 按文本发
-（避免误判）。预览字节由**服务端**渲染，与真正发送共用 `resolve_payload`，所以“看到的就是发出去的”。
-发送过的内容按 `{文本, 格式, 行尾}` 记入历史（最多 50 条），点历史即可重发。
+`▶ 串口` 自动选口 @115200：相邻 `[alive]` 间隔 ≈ 1.000 s、每次 `toggles` 严格 +2（与板载 LED 同一时基）。
+运行中按钮变 **`■ 关闭监视`**，再点即关闭并释放串口。判定纪律（C36）：agent 只凭串口计数判活，
+「LED 均匀闪烁」必须由人肉眼确认。
 
-`⏵ 定时` 按固定间隔重复发送输入框内容（内核瞬态任务，不落盘、不写工程文件）；
-`■ 停止定时` 立即 `cancelled`，1 s 内退出、不再发后续轮次。
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/11-serial-alive.png" width="330" alt="串口 1 Hz 心跳：tick 递增、toggles 每次 +2">
+
+### 调试工作区（`▶|` 入口）
+
+面板右上角 `▶|` → 「开始调试」：内核起 `openocd` + `arm-none-eabi-gdb` → `monitor reset halt` →
+下载 ELF → 停在 `main`。工具栏（继续 / 暂停 / 单步 / 步入 / 步出 / 指令 / 复位 / 关闭）+ 位置条（函数 @ 文件：行 · PC）+
+子页签（调用栈 / 变量 / 寄存器 / 断点 / 监视 / 内存 / 反汇编 / 外设 / RTOS 栈 / 审计 / 输出，按内核 `meta.debug.features` 出现）。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/04-debug-stopped.png" width="330" alt="停在 main：工具栏 + 位置条 + 调用栈">
+
+函数断点：窄栏没有源码 gutter，用**函数 / 地址断点**（可加条件）。复位 → 继续 → 命中计数 `×1`，
+调用栈同时给出 `#0 HAL_UART_Receive_IT` 与 `#1 main` 两级帧。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/12-debug-hit-bp.png" width="330" alt="断点命中：两级栈帧 + 各自文件/行/地址">
+
+寄存器按内核分组，十六进制 + 自然值，`xPSR` 带标志位；与 Agent 读到的是同一份会话数据（人机同源）。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/06-debug-regs.png" width="330" alt="内核寄存器：pc 与位置条一致">
+
+「关闭」= `monitor reset run`：目标复位并恢复运行，openocd/gdb 退出，面板回到「开始调试」、输出保留。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/09-debug-closed.png" width="330" alt="关闭会话：自动恢复运行">
 
 ### 波形面板功能（独立 WebUI 实机）
 
 下面三张来自独立 WebUI 的串口波形页，与 DSH 窄栏共用同一套 `WaveChart` 与 ICD
-（只是宽度与主题令牌不同）。**使用绝对地址**，市场页才能把 README 里的图片渲染出来。
+（只是宽度与主题令牌不同）。
 
 默认视图：FireWater 双通道正弦，帧环、窗口与挤出计数如实标注。
 
@@ -81,7 +104,8 @@ FireWater 解码器把 ASCII 行解成 2 通道；「通道绑定」CH0 / CH1 �
 | **elab 内核** | 首次打开自动下载（固定版本 `v<ver>` → `~/.dsh/elab/kernels/v<ver>/`）；下载失败自动回落浅克隆；也可在设置页指定已有检出 |
 | **Python 3.10+** | **唯一不能自动安装**的依赖：需在 PATH 里，或在设置页把「python 路径」填成绝对路径（缺失时自动准备暂停并给出指引） |
 | 可选 `pyserial` | 串口读写；缺失时其它功能不受影响 |
-| 工具链 | `arm-none-eabi-gcc` / `cmake` / `ninja` / `openocd`：缺件时**自动安装**到 `~/.dsh/elab/env`（官方上游直链 + sha256，约 400 MB，仅 Windows x64）；已装过自己的则跳过 |
+| 工具链 | `arm-none-eabi-gcc 13.3.1` / `CMake 3.28.1` / `Ninja 1.11.1` / `OpenOCD 0.12.0-3`：缺件时**自动安装**到 `~/.dsh/elab/env`（xpack / Kitware / ninja-build 官方上游直链 + sha256，约 400 MB，仅 Windows x64）；已装过自己的则跳过。版本清单见 [`envpacks/manifest.json`](envpacks/manifest.json) |
+| 探针 | 不绑定品牌：`elab.host.yaml: probes.list` 内置 `atlink` / `dap` / `stlink` / `jlink`，工程接入文件用 `debug.probe` 选择。ST-Link 免装厂商软件；J-Link 需先装 SEGGER 驱动（仍由 OpenOCD 驱动） |
 | DSH | `>= 0.2.0-rc.1` |
 
 也可以手动准备内核（三种入口共用同一内核事件流）：
@@ -120,7 +144,7 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 ```
 ┌ 工程选择（会话 cwd 自动发现；↻ 重载 / ⚙ 设置）
 ├ 档位：三连（编译+烧录+调试） / 闭环（体检→编译→烧录→调试→串口闭环） / 取消 / 预览
-├ 单步：▶ 构建 / ▶ 烧录 / ▶ 调试 / ▶ 串口
+├ 单步：▶ 构建 / ▶ 烧录 / ▶ 调试 / ▶ 串口（监视运行时变 ■ 关闭监视，再点即关闭并释放串口）
 ├ 通道页签：构建 | 烧录 | 调试 | 串口   （每通道独立日志 / 进度 / 占用）
 └ 串口工作区：行 | 字节 | 终端 | 波形     （＋ 组件行 ＋ 发送栏）
 ```
@@ -178,7 +202,9 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 - 自动格式：`0x0A 0xFF` 预览 `2 B · 0A FF · 识别为 HEX`，与真发字节一致
 - 定时发送：`STAT` / 200ms 实测运行态连续回显，`■ 停止定时` 后 1s 内退出
 - 历史：`↑` 恢复上一条 `STAT`（含格式与行尾）
-- 截图：见 [串口面板使用教程](../../docs/tutorials/wave-panel-usage.md)
+- 截图：见 [波形面板使用教程](../../docs/tutorials/07-波形面板使用.md)
+- DSH 右侧栏全流程（含**调试工作区**：单步 / 断点 / 变量 / 寄存器 / 关闭恢复）：
+  见 [DSH 插件实机上手](../../docs/tutorials/05-DSH插件上手_STM32F103C8T6.md)
 
 ### 既有验证（2026-11-02，STM32F411CEU6 波形）
 

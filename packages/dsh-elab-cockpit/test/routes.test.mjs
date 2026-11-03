@@ -83,12 +83,18 @@ test('方法：DELETE → 405 + Allow 头', async () => {
   assert.equal(r.headers.allow, 'GET, POST')
 })
 
-test('POST 白名单只放行 run/cancel/serial/adapt', async () => {
+test('POST 白名单只放行 run/cancel/serial/adapt/project', async () => {
   const ctx = makeCtx()
   registerApiRoute(ctx, deps())
   assert.equal((await call(ctx.routes[0], 'POST', '/elab/api/projects', '{}')).statusCode, 404)
   // cancel 合法（上游不可达 → 502，说明进了转发逻辑）
   assert.equal((await call(ctx.routes[0], 'POST', '/elab/api/cancel', '{"run":"r-1"}')).statusCode, 502)
+  // set_probe 也走同一转发（上游不可达 → 502）
+  assert.equal(
+    (await call(ctx.routes[0], 'POST', '/elab/api/project',
+      '{"action":"set_probe","name":"demo","probe":"stlink"}')).statusCode,
+    502,
+  )
 })
 
 test('SSE 缺 run → 400；非 GET → 405', async () => {

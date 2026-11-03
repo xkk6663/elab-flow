@@ -210,6 +210,190 @@ function chunkText(dataB64: string): { text: string; hex: string } {
   }
 }
 
+const AGENT_JSON = {
+  'Content-Type': 'application/json',
+  'x-elab-actor': 'agent',
+}
+
+/** 调试会话快照（agent 与面板同一份；不含 MI 原始噪声）。 */
+async function debugSession(deps: ToolsDeps): Promise<Record<string, unknown>> {
+  return cockpit<Record<string, unknown>>(deps, '/api/debug/session')
+}
+
+/** 打开调试会话（actor=agent → 租约到点自动关闭并恢复运行）。 */
+async function debugOpen(
+  deps: ToolsDeps,
+  args: { project: string; stop_at?: 'main' | 'reset' | 'none'; load?: boolean; lease_s?: number },
+): Promise<unknown> {
+  if (args.project === '') throw new Error('需要 project（用 elab_status 查看工程名）')
+  const r = await cockpit<{ session?: Record<string, unknown> }>(deps, '/api/debug/session', {
+    method: 'POST',
+    headers: AGENT_JSON,
+    body: JSON.stringify({
+      project: args.project,
+      options: {
+        ...(args.stop_at !== undefined ? { stop_at: args.stop_at } : {}),
+        ...(args.load !== undefined ? { load: args.load } : {}),
+      },
+      ...(args.lease_s !== undefined ? { lease_s: args.lease_s } : {}),
+    }),
+  })
+  return {
+    ok: true,
+    session: r.session ?? null,
+    note: '面板会在新会话时自动切到调试视图；用户与你看到同一份调用栈/寄存器（人机同源）',
+  }
+}
+
+/** 控制：continue/pause/step_over/step_in/step_out/stepi/reset/restart/run_to。 */
+async function debugControl(
+  deps: ToolsDeps,
+  args: { action: string; addr?: string; confirm?: boolean; wait_s?: number },
+): Promise<unknown> {
+  const before = await debugSession(deps)
+  const seq = Number(((before.session as Record<string, unknown> | null)?.stop as Record<string, unknown> | null)?.seq ?? 0)
+  const r = await cockpit<Record<string, unknown>>(deps, '/api/debug/control', {
+    method: 'POST',
+    headers: AGENT_JSON,
+    body: JSON.stringify({
+      action: args.action,
+      ...(args.addr !== undefined ? { addr: args.addr } : {}),
+      ...(args.confirm === true ? { confirm: true } : {}),
+    }),
+  })
+  // 单步/运行到地址是"命令返回后还要等 *stopped"：内核已等了 15s，这里再兜一层
+  if (['step_over', 'step_in', 'step_out', 'stepi', 'run_to'].includes(args.action)) {
+    const waited = await waitForStop(deps, seq, Math.min(20_000, Math.max(1_000, (args.wait_s ?? 8) * 1000)))
+    return { ok: true, ...r, ...waited }
+  }
+  return { ok: true, ...r }
+}
+
+/** 等下一个 stop（stop_seq 严格递增；避免与旧事件混淆）。 */
+async function waitForStop(
+  deps: ToolsDeps,
+  afterSeq: number,
+  timeoutMs: number,
+): Promise<{ stop?: Record<string, unknown> | null; stop_seq?: number; timedOut?: boolean; note?: string }> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const snap = await debugSession(deps)
+    const s = snap.session as Record<string, unknown> | null
+    if (s === null) return { stop: null, note: '会话已关闭' }
+    const state = String(s.state ?? '')
+    const stop = s.stop as Record<string, unknown> | null
+    const stopSeq = Number(stop?.seq ?? 0)
+    if (state === 'error') return { stop, stop_seq: stopSeq, note: '调试会话进入 error' }
+    if (state === 'stopped' && stopSeq > afterSeq) return { stop, stop_seq: stopSeq }
+    await sleep(400)
+  }
+  return { timedOut: true, note: `等待 stop 超时（${timeoutMs}ms）；用 elab_debug_inspect 看当前状态` }
+}
+
+/** 只读 inspect：session/stack/variables/registers/breakpoints/memory/disasm/evaluate。 */
+async function debugInspect(
+  deps: ToolsDeps,
+  args: {
+    what: string
+    frame?: number
+    scope?: 'locals' | 'args' | 'children'
+    var?: string
+    thread?: number
+    group?: string
+    format?: 'natural' | 'hex'
+    addr?: string
+    count?: number
+    expr?: string
+  },
+): Promise<unknown> {
+  const q = (kv: Record<string, string | number | undefined>): string => {
+    const p = new URLSearchParams()
+    for (const [k, v] of Object.entries(kv)) if (v !== undefined) p.set(k, String(v))
+    const s = p.toString()
+    return s === '' ? '' : `?${s}`
+  }
+  switch (args.what) {
+    case 'session':
+      return debugSession(deps)
+    case 'stack':
+      return cockpit(deps, `/api/debug/stack${q({ thread: args.thread })}`)
+    case 'variables':
+      return cockpit(deps, `/api/debug/variables${q({ frame: args.frame ?? 0, scope: args.scope ?? 'locals', var: args.var })}`)
+    case 'registers':
+      return cockpit(deps, `/api/debug/registers${q({ group: args.group ?? 'core', format: args.format ?? 'natural' })}`)
+    case 'breakpoints':
+      return cockpit(deps, '/api/debug/breakpoints')
+    case 'memory': {
+      if (args.addr === undefined || args.addr === '') throw new Error('memory 需要 addr')
+      return cockpit(deps, `/api/debug/memory${q({ addr: args.addr, count: args.count ?? 64 })}`)
+    }
+    case 'disasm':
+      return cockpit(deps, `/api/debug/disasm${q({ addr: args.addr, count: args.count ?? 16, mode: 2 })}`)
+    case 'evaluate': {
+      if (args.expr === undefined || args.expr === '') throw new Error('evaluate 需要 expr')
+      return cockpit(deps, '/api/debug/evaluate', {
+        method: 'POST',
+        headers: AGENT_JSON,
+        body: JSON.stringify({ expr: args.expr, ...(args.frame !== undefined ? { frame: args.frame } : {}) }),
+      })
+    }
+    default:
+      return {
+        ok: false,
+        code: 'bad-inspect',
+        note: 'what 必须是 session/stack/variables/registers/breakpoints/memory/disasm/evaluate',
+      }
+  }
+}
+
+/** 断点：list/add/update/toggle/remove（函数/地址；条件断点走 update）。 */
+async function debugBreakpoint(
+  deps: ToolsDeps,
+  args: {
+    op: string
+    id?: string
+    kind?: 'func' | 'addr'
+    location?: string
+    condition?: string
+    enabled?: boolean
+    hardware?: boolean
+  },
+): Promise<unknown> {
+  if (args.op === 'list' || args.op === '') return cockpit(deps, '/api/debug/breakpoints')
+  if (!['add', 'update', 'toggle', 'remove'].includes(args.op)) {
+    return { ok: false, code: 'bad-op', note: 'op 必须是 list/add/update/toggle/remove' }
+  }
+  return cockpit(deps, '/api/debug/breakpoints', {
+    method: 'POST',
+    headers: AGENT_JSON,
+    body: JSON.stringify({
+      op: args.op,
+      ...(args.id !== undefined ? { id: args.id } : {}),
+      ...(args.kind !== undefined ? { kind: args.kind } : {}),
+      ...(args.location !== undefined ? { location: args.location } : {}),
+      ...(args.condition !== undefined ? { condition: args.condition } : {}),
+      ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
+      ...(args.hardware === true ? { hardware: true } : {}),
+    }),
+  })
+}
+
+/** 关闭会话：默认 resume=true（monitor reset run），绝不把板子留在 halt。 */
+async function debugClose(deps: ToolsDeps, args: { resume?: boolean }): Promise<unknown> {
+  const r = await cockpit<Record<string, unknown>>(deps, '/api/debug/session', {
+    method: 'DELETE',
+    headers: AGENT_JSON,
+    body: JSON.stringify({ resume: args.resume !== false, reason: 'agent-closed' }),
+  })
+  return {
+    ok: true,
+    ...r,
+    note: r.resumed === true
+      ? '目标已恢复运行（心跳/串口闭环可以继续）'
+      : '目标未恢复运行（resume=false 或恢复命令失败）；如需心跳请重新上电或再开一次会话后正常关闭',
+  }
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 包操作 job 的最小投影（内核 `PkgJob`，见 domain/icd.ts）。 */
@@ -1254,6 +1438,143 @@ export function registerElabTools(
       presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 读日志' }),
       async execute(args: { run?: string; step?: string; tail?: number }) {
         return logTail(deps, args)
+      },
+    }),
+  )
+
+  // ── 调试会话（P0/P1）：Agent 可开、可单步、可读栈/寄存器 ──
+  add(
+    makeTool({
+      name: 'elab_debug_open',
+      description:
+        '打开调试会话（openocd + gdb MI）：复位 → 下载 ELF（可按 load=false 跳过）→ 停在 main。' +
+        '面板会在新会话时自动切到调试视图；你与用户看到同一份调用栈/寄存器（人机同源）。' +
+        '同一时刻只允许一个会话；闭环/串口监视在跑会被 409 拦住。',
+      parameters: {
+        project: { type: 'string', required: true, description: '工程名（elab_status 可查）' },
+        stop_at: { type: 'string', description: 'main（默认）/ reset / none' },
+        load: { type: 'boolean', description: '是否下载 ELF；默认按工程声明（无 flash.images 时下载）' },
+        lease_s: { type: 'number', description: 'agent 租约秒数（默认 600，60–1800；到期自动关闭并恢复运行）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 打开调试会话' }),
+      async execute(args: { project: string; stop_at?: string; load?: boolean; lease_s?: number }) {
+        const stopAt = ['main', 'reset', 'none'].includes(String(args.stop_at ?? ''))
+          ? (args.stop_at as 'main' | 'reset' | 'none')
+          : undefined
+        return debugOpen(deps, {
+          project: args.project,
+          ...(stopAt !== undefined ? { stop_at: stopAt } : {}),
+          ...(args.load !== undefined ? { load: args.load } : {}),
+          ...(typeof args.lease_s === 'number' ? { lease_s: args.lease_s } : {}),
+        })
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_debug_control',
+      description:
+        '驱动调试会话：continue / pause / step_over / step_in / step_out / stepi / reset / restart / run_to。' +
+        '单步类动作会等 stop 后返回新位置（stop_seq 严格递增，避免拿到旧事件）。',
+      parameters: {
+        action: { type: 'string', required: true, description: 'continue/pause/step_over/step_in/step_out/stepi/reset/restart/run_to' },
+        addr: { type: 'string', description: 'run_to 的目标地址（如 0x080001a4）' },
+        confirm: { type: 'boolean', description: 'reset 需要 true（会复位目标）' },
+        wait_s: { type: 'number', description: '单步等待秒数（默认 8，上限 20）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 调试控制' }),
+      async execute(args: { action: string; addr?: string; confirm?: boolean; wait_s?: number }) {
+        return debugControl(deps, args)
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_debug_inspect',
+      description:
+        '读取调试数据（只读）：session / stack / variables / registers / breakpoints / memory / disasm / evaluate。' +
+        '目标运行时返回 debug-target-running；先 pause。',
+      parameters: {
+        what: { type: 'string', required: true, description: 'session/stack/variables/registers/breakpoints/memory/disasm/evaluate' },
+        frame: { type: 'number', description: '栈帧号（variables/evaluate 用）' },
+        scope: { type: 'string', description: 'locals/args/children（variables）' },
+        var: { type: 'string', description: '要展开的变量名（scope=children）' },
+        thread: { type: 'number', description: '线程 id（stack）' },
+        group: { type: 'string', description: 'core/fpu/all（registers）' },
+        format: { type: 'string', description: 'natural/hex（registers）' },
+        addr: { type: 'string', description: 'memory/disasm 起始地址' },
+        count: { type: 'number', description: 'memory 字节数（≤4096）/ disasm 指令数（≤128）' },
+        expr: { type: 'string', description: 'evaluate 表达式（如 dwTickCount）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 读调试数据' }),
+      async execute(args: any) {
+        return debugInspect(deps, args)
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_debug_breakpoint',
+      description:
+        '断点管理：list / add / update / toggle / remove。窄栏没有源码 gutter —— 用函数名或地址断点，条件断点走 update。',
+      parameters: {
+        op: { type: 'string', required: true, description: 'list/add/update/toggle/remove' },
+        id: { type: 'string', description: '断点 id（update/toggle/remove）' },
+        kind: { type: 'string', description: 'func（默认）/ addr' },
+        location: { type: 'string', description: '函数名或地址' },
+        condition: { type: 'string', description: '条件表达式（可选）' },
+        enabled: { type: 'boolean', description: 'update 时启用/禁用' },
+        hardware: { type: 'boolean', description: '硬件断点（-h）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 断点' }),
+      async execute(args: any) {
+        return debugBreakpoint(deps, args)
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_debug_wait',
+      description: '等待下一个 stop（默认从现在起 10s）。命中断点/单步结束后返回位置与 stop_seq。',
+      parameters: {
+        after_seq: { type: 'number', description: '只认比它大的 stop_seq；缺省 = 当前会话的 stop.seq' },
+        timeout_s: { type: 'number', description: '等待秒数（默认 10，上限 60）' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 等调试停止' }),
+      async execute(args: { after_seq?: number; timeout_s?: number }) {
+        let after = args.after_seq
+        if (after === undefined) {
+          const snap = await debugSession(deps)
+          const s = snap.session as Record<string, unknown> | null
+          after = Number(((s?.stop as Record<string, unknown> | null)?.seq) ?? 0)
+        }
+        const timeout = Math.min(60, Math.max(1, Math.round(args.timeout_s ?? 10))) * 1000
+        return waitForStop(deps, Number(after), timeout)
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_debug_close',
+      description:
+        '关闭调试会话并**恢复目标运行**（monitor reset run，C36）。resume=false 才会让板子留在 halt（仅排障用）。',
+      parameters: {
+        resume: { type: 'boolean', description: '默认 true：复位并运行；false = 保持 halt' },
+      },
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'execute', title: 'elab 关闭调试会话' }),
+      async execute(args: { resume?: boolean }) {
+        return debugClose(deps, args)
       },
     }),
   )

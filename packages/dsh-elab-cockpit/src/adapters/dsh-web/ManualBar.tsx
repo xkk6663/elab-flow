@@ -29,7 +29,7 @@ export interface ManualBarProps {
   onRun(planId: string, opts: { clean: boolean; jobs: number | null }): void
   /** 单步执行（构建/烧录/调试）。 */
   onRunOne(step: string): void
-  /** 串口通道的「启动」：切到串口页并打开常驻监视。 */
+  /** 串口通道的启停开关：切到串口页；未开则打开常驻监视，已在跑则关闭并释放串口。 */
   onSerial(): void
   onCancel(): void
   onPreview(opts: { clean: boolean; jobs: number | null }): void
@@ -185,7 +185,7 @@ export function ManualBar(props: ManualBarProps): ReactNode {
         <button
           type="button"
           disabled={running || busy}
-          title={props.serialActive ? '串口监视已在运行：切到串口通道查看' : '启动串口通道：打开常驻监视并实时收设备输出'}
+          title={props.serialActive ? '串口监视正在运行：点击关闭并释放串口（闭环烧录/调试需要）' : '启动串口通道：打开常驻监视并实时收设备输出'}
           onClick={props.onSerial}
           style={{
             ...chipFor(false, running || busy),
@@ -194,7 +194,7 @@ export function ManualBar(props: ManualBarProps): ReactNode {
               : {}),
           }}
         >
-          {props.serialActive ? '\u25cf 串口' : '\u25b6 串口'}
+          {props.serialActive ? '\u25a0 关闭监视' : '\u25b6 串口'}
         </button>
       </div>
 

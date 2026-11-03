@@ -30,6 +30,20 @@
   background: var(--elab-status-fail);
 }
 
+/* inconclusive：空心琥珀 + 中心小点（"跑完了但没证据"，与 ok 的实心绿可辨） */
+.inconclusive {
+  background: transparent;
+  border-color: var(--elab-status-run);
+  position: relative;
+}
+.inconclusive::after {
+  content: "";
+  position: absolute;
+  inset: 30%;
+  border-radius: 50%;
+  background: var(--elab-status-run);
+}
+
 /* skipped：细环灰（明显比 pending 更淡） */
 .skipped {
   background: transparent;

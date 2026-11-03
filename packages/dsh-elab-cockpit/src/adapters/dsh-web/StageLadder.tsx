@@ -3,7 +3,7 @@
  *
  * 设计约束：
  *  ① **组件不推导状态**：`StepView.state` 直接来自 `runStore.reduce()`，
- *     六态 pending / running / ok / failed / skipped / cancelled
+ *     七态 pending / running / ok / failed / inconclusive / skipped / cancelled
  *     （`skipped` = fail-fast 后未执行到的步骤，见 run.py:528 的 break）。
  *  ② **点行 = 聚焦日志，点 ▶ = 单步执行**（Q1：防误触烧录）。
  *  ③ **可用性只有一个来源**：`card.steps[id].ok/reason`（服务端算好）。
@@ -18,7 +18,7 @@ import type { ReactNode } from 'react'
 export interface LadderStep {
   id: string
   index: number
-  state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped' | 'cancelled'
+  state: 'pending' | 'running' | 'ok' | 'failed' | 'inconclusive' | 'skipped' | 'cancelled'
   detail: string
   duration_s: number
 }
@@ -46,6 +46,7 @@ const STATE_TONE: Record<string, { dot: string; text: string; label: string }> =
   running: { dot: 'var(--elab-accent)', text: 'var(--elab-fg-primary)', label: '运行中' },
   ok: { dot: 'var(--elab-status-ok)', text: 'var(--elab-fg-primary)', label: '成功' },
   failed: { dot: 'var(--elab-status-fail)', text: 'var(--elab-status-fail)', label: '失败' },
+  inconclusive: { dot: 'var(--elab-status-run)', text: 'var(--elab-status-run)', label: '未验证' },
   skipped: { dot: 'var(--elab-fg-dimmed)', text: 'var(--elab-fg-dimmed)', label: '未执行' },
   cancelled: { dot: 'var(--elab-status-run)', text: 'var(--elab-status-run)', label: '已取消' },
 }
@@ -55,6 +56,7 @@ const DOT: Record<string, string> = {
   running: '\u25d0',
   ok: '\u25cf',
   failed: '\u2715',
+  inconclusive: '?',
   skipped: '\u2013',
   cancelled: '\u25cb',
 }

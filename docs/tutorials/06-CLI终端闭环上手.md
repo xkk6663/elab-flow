@@ -48,6 +48,11 @@ $env:ELAB_ROOT  = "."
 
 上例 27 行全部 `[OK]`，从工具链到 OTA 布局一路绿灯。
 
+> **串口阶段（第 5/5 步 `monitor`）的硬前提**：`monitor` 读的是**固件已经初始化好的 UART**。
+> 本仓示例（F411 / F103）都走 USART1，115200 8N1，**PA9 = TX / PA10 = RX**；接线要 TX/RX
+> **交叉**并共地。elab 只负责打开主机侧 COM 口，不配置芯片外设——工程没初始化串口时，
+> `monitor` 只会判 `inconclusive`（0 字节），前面的 build/flash/debug 不受影响。
+
 ---
 
 ## 2. 一条命令跑完 5 阶段闭环

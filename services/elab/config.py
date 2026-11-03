@@ -344,6 +344,11 @@ class Host:
     def probes(self) -> dict:
         return (self.data.get("probes") or {}).get("list") or {}
 
+    @property
+    def default_probe(self) -> str:
+        """新接入工程默认使用哪个探针（L0 的 ``probes.default``）。"""
+        return str((self.data.get("probes") or {}).get("default") or "").strip()
+
     def probe(self, name: str) -> dict:
         return self.probes.get(name) or {}
 

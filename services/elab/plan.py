@@ -90,6 +90,39 @@ class Plan:
         """给人类/CI 阅读的单行预览。"""
         return " \\\n  ".join(_shell_join(a) for a in [self.configure_cmd()])
 
+    def debug_profile(self) -> dict:
+        """调试会话需要的派生参数（只读；不改既有字段）。
+
+        ★ 这里是"launch.json 的替代品"：探针/芯片/elf/load 全部从既有
+          ``project.yaml`` + ``chip.yaml`` + ``host.yaml`` 派生，用户不用写配置。
+        """
+        dbg = self.chip.get("debug") or {}
+        probe = self.host.probe(self.probe) if self.probe else {}
+        interface = probe.get("interface_cfg") or dbg.get("openocd_interface") or ""
+        if not interface and probe.get("backend"):
+            interface = f"interface/{probe['backend']}.cfg"
+        return {
+            "project": self.name,
+            "chip": str(self.chip.get("id") or ""),
+            "part": str(self.chip.get("part") or ""),
+            "elf": to_fwd(self.elf),
+            "gdb": to_fwd(self.host.gdb),
+            "openocd": to_fwd(self.host.openocd),
+            "openocd_scripts": to_fwd(self.host.openocd_scripts),
+            "probe": self.probe,
+            "interface": interface,
+            "target": str(dbg.get("openocd_target") or ""),
+            "device": str(dbg.get("device") or ""),
+            "speed": probe.get("speed"),
+            "svd": self.host.resolve_svd(dbg.get("svd")) or "",
+            "svd_name": str(dbg.get("svd") or ""),
+            # C33e 判据：声明了 flash.images = 只调试已烧录镜像，不 load
+            "load": not bool(self.flash_images),
+            "flash_images": list(self.flash_images),
+            "gdb_script": to_fwd(self.gdb_script),
+            "work_dir": self.work_dir,
+        }
+
 
 def _shell_join(parts: list[str]) -> str:
     out = []

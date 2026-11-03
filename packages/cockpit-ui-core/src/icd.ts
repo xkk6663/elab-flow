@@ -73,6 +73,14 @@ export const KNOWN_TOPICS = [
   "serial/close",
   "serial/error",
   "serial/closed-loop",
+  // 调试会话（独立信封 §6.4：没有 run 字段）
+  "debug/opened",
+  "debug/state",
+  "debug/stop",
+  "debug/breakpoint",
+  "debug/output",
+  "debug/error",
+  "debug/closed",
   // 流控制
   "stream/overrun",
   "stream/closed",
@@ -99,12 +107,19 @@ export type StepId =
   | "debug_verify"
   | "monitor";
 
-/** 四态 + skipped/cancelled（§5.2）。`inferred` 用于"超时推断"，UI 画虚线。 */
+/**
+ * 四态 + skipped/cancelled（§5.2）。`inferred` 用于"超时推断"，UI 画虚线。
+ *
+ * ★ `inconclusive`（2026-11-03）：步骤跑完了但没有约定证据（monitor 没收到
+ *   `close_on` 关键字）。**它不是 failed**，也不能画成 ok —— 否则"没接串口"
+ *   在界面上会显示成绿色通过。
+ */
 export type StepState =
   | "pending"
   | "running"
   | "ok"
   | "failed"
+  | "inconclusive"
   | "skipped"
   | "cancelled";
 
@@ -220,6 +235,37 @@ export interface SerialMeta {
   features?: string[];
 }
 
+/**
+ * 调试能力自描述（`capabilities.meta.debug`，镜像内核 `DEBUG_META`）。
+ *
+ * ★ 缺失 = 内核过旧：前端**不**为调试面写兼容分支，而是提示同步内核。
+ *   字段是内核 `DEBUG_META` 的**最小可用子集**，其余字段消费者忽略。
+ */
+export interface DebugMeta {
+  available: boolean;
+  features: string[];
+  stop_at: string[];
+  max_sessions?: number;
+  actions?: string[];
+  breakpoint_kinds?: string[];
+  registers_group?: string[];
+  formats?: string[];
+  watch_formats?: string[];
+  svd?: { tree_path?: string; read?: boolean };
+  rtos?: { available_via?: string; granularity?: string };
+  lease?: { default_s: number; min_s: number; max_s: number };
+  limits?: {
+    memory_read_max: number;
+    disasm_max: number;
+    variables_depth: number;
+    audit_records: number;
+    watch_max?: number;
+  };
+  error_codes?: string[];
+  exclusive_with?: string[];
+  on_close?: { resume?: boolean; method?: string };
+}
+
 export interface Capabilities {
   cockpit: {
     version: string;
@@ -238,6 +284,22 @@ export interface Capabilities {
     plans?: Array<{ id: string; title: string; steps: string[]; requires_hardware?: boolean }>;
     channels?: string[];
     serial?: SerialMeta;
+    /** 调试会话能力（内核 `DEBUG_META`）；缺失 = 内核过旧，面板提示同步 */
+    debug?: DebugMeta;
+    /**
+     * 探针清单（L0 `elab.host.yaml: probes.list`）：面板下拉的选项与可用性
+     * 都由内核给（`available` = interface cfg 是否落地），前端不自行探测。
+     */
+    probes?: {
+      default?: string;
+      list?: Array<{
+        name: string;
+        backend?: string;
+        interface_cfg?: string;
+        speed?: number;
+        available?: boolean;
+      }>;
+    };
     /**
      * 驾驶舱装配清单（`cockpit/profiles/*.yaml`，R7 / P1-4）：
      * 决定右列 Tab 的顺序/集合与项目工具的启停；缺失 = 内置集合。
@@ -308,7 +370,8 @@ export interface RunMeta {
   project: string;
   steps: string[];
   started_at: number;
-  status: "running" | "ok" | "failed" | "cancelled";
+  /** 留档状态：三态（inconclusive = 跑完但没拿到约定证据） */
+  status: "running" | "ok" | "failed" | "inconclusive" | "cancelled";
   last_seq: number;
   proc_bytes: number;
   state_bytes: number;
@@ -927,6 +990,314 @@ export interface PkgVerifyResult {
   sha256: string;
   problems: string[];
   dir: string;
+}
+
+// ── 调试会话（`/api/debug/*`，镜像内核 DEBUG_META / ICD §6）──────────
+// ★ 调试事件有**独立信封**（`GET /api/debug/events`）：没有 `run` 字段，
+//   `EventSource` 必须按 topic 逐个 `addEventListener`（见 KNOWN_TOPICS）。
+
+export type DebugState = "starting" | "running" | "stopped" | "error" | "closed";
+export type DebugActor = "agent" | "human";
+
+export interface DebugFrame {
+  func: string;
+  file: string;
+  line: number | null;
+  addr: string;
+}
+
+export interface DebugStop {
+  seq: number;
+  reason: string;
+  thread: string;
+  frame: DebugFrame;
+  pc: string;
+  bkptno: string;
+  warn?: string;
+}
+
+export interface DebugThread {
+  id: number;
+  name: string;
+  target_id: string;
+  current: boolean;
+}
+
+export interface DebugSessionSnapshot {
+  id: string;
+  open_seq: number;
+  project: string;
+  chip: string;
+  elf: string;
+  state: DebugState;
+  actor: DebugActor;
+  owner: DebugActor;
+  started_at: number;
+  lease_s: number;
+  lease_remaining_s: number;
+  port: number;
+  gdb: string;
+  stop: DebugStop | null;
+  threads: DebugThread[];
+  svd: { available: boolean; file: string };
+  features: string[];
+  error: { code: string; message: string; hint?: string } | null;
+}
+
+export interface DebugSessionResponse {
+  session: DebugSessionSnapshot | null;
+}
+
+export interface DebugStackFrame {
+  level: number;
+  addr: string;
+  func: string;
+  file: string;
+  line: number | null;
+  arch: string;
+  pc: boolean;
+}
+
+export interface DebugStackResponse {
+  ok: boolean;
+  stop_seq: number;
+  frames: DebugStackFrame[];
+  threads: DebugThread[];
+}
+
+export interface DebugReg {
+  name: string;
+  hex: string;
+  natural: string;
+  editable: boolean;
+  pc?: boolean;
+  flags?: Record<string, number>;
+}
+
+export interface DebugRegGroup {
+  name: "core" | "fpu" | string;
+  label: string;
+  regs: DebugReg[];
+}
+
+export interface DebugRegistersResponse {
+  ok: boolean;
+  stop_seq: number;
+  groups: DebugRegGroup[];
+  format: string;
+}
+
+export interface DebugVarNode {
+  name: string;
+  type: string;
+  value: string;
+  hex: string;
+  has_children: boolean;
+  addr: string;
+  obj?: string;
+}
+
+export interface DebugVariablesResponse {
+  ok: boolean;
+  frame: number;
+  scope: string;
+  var?: string;
+  stop_seq: number;
+  nodes: DebugVarNode[];
+  truncated: boolean;
+}
+
+export interface DebugBreakpoint {
+  id: string;
+  gdb_id: string;
+  kind: "func" | "addr" | "loc";
+  location: string;
+  enabled: boolean;
+  condition: string;
+  hit_count: number;
+  verified: boolean;
+  temporary: boolean;
+  hardware: boolean;
+}
+
+export interface DebugBreakpointsResponse {
+  breakpoints: DebugBreakpoint[];
+  /** 工程级配置版本（乐观锁：写回时带上，冲突回 409 debug-rev-conflict） */
+  rev?: number;
+  allow_write?: boolean;
+}
+
+export interface DebugWatchItem {
+  id: string;
+  expr: string;
+  format: string;
+  value: string;
+  type: string;
+  hex: string;
+  natural: string;
+  error?: string;
+}
+
+export interface DebugWatchResponse {
+  ok: boolean;
+  stop_seq: number;
+  rev: number;
+  watches: DebugWatchItem[];
+  state: DebugState;
+}
+
+export interface DebugAuditRecord {
+  ts: number;
+  action: string;
+  session?: string;
+  project?: string;
+  actor?: string;
+  target?: string;
+  addr?: string;
+  value?: string;
+  name?: string;
+  location?: string;
+  id?: string;
+  code?: string;
+  message?: string;
+}
+
+export interface DebugAuditResponse {
+  records: DebugAuditRecord[];
+  count: number;
+  requested: number;
+  path: string;
+}
+
+export interface DebugSvdPeripheral {
+  name: string;
+  base: string;
+  group?: string;
+  description?: string;
+  registers_count?: number;
+}
+
+export interface DebugSvdRegister {
+  name: string;
+  offset: string;
+  addr: string;
+  size: number;
+  access: string;
+  description?: string;
+  fields_count?: number;
+  reset?: string;
+  value?: string | null;
+  fields?: DebugSvdField[];
+}
+
+export interface DebugSvdField {
+  name: string;
+  bits: string;
+  offset: number;
+  width: number;
+  value: number;
+  hex: string;
+  enum: { name: string; value: number; description?: string } | null;
+  description?: string;
+}
+
+export interface DebugPeripheralsResponse {
+  ok: boolean;
+  stop_seq: number;
+  device?: string;
+  level: "device" | "peripheral" | "register";
+  svd: { file: string; name: string };
+  peripherals?: DebugSvdPeripheral[];
+  peripheral?: { name: string; base: string; group?: string; description?: string;
+                 registers?: DebugSvdRegister[] };
+  register?: DebugSvdRegister;
+}
+
+export interface DebugRtosTask {
+  name: string;
+  priority: number | null;
+  state: string;
+  current: boolean;
+  tcb: string;
+  stack_start: string;
+  stack_end: string | null;
+  stack_size_bytes: number | null;
+  free_words: number;
+  free_bytes: number;
+  high_water_mark: number;
+  used_bytes: number | null;
+  used_pct: number | null;
+  health: "ok" | "warn" | "critical";
+  scanned: boolean;
+}
+
+export interface DebugRtosResponse {
+  ok: boolean;
+  stop_seq: number;
+  tasks: DebugRtosTask[];
+  count: number;
+  current_tcb: string;
+  /** pxCurrentTCB=0（调度器未启动）时的说明，不是错误 */
+  note?: string;
+}
+
+export interface DebugMemoryResponse {
+  ok: boolean;
+  addr: string;
+  count: number;
+  /** 空格分隔的 HEX 字节（如 `00 11 22 ...`） */
+  bytes: string;
+  ascii: string;
+  width: number;
+  next: string;
+  stop_seq: number;
+}
+
+export interface DebugDisasmLine {
+  addr: string;
+  mnemonic: string;
+  operands: string;
+  symbol: string;
+  pc: boolean;
+  bp?: string;
+  line?: number | null;
+  file?: string;
+}
+
+export interface DebugDisasmResponse {
+  ok: boolean;
+  addr: string;
+  instructions: DebugDisasmLine[];
+  stop_seq: number;
+}
+
+export interface DebugEvaluateResponse {
+  ok: boolean;
+  expr: string;
+  value: string;
+  type: string;
+  hex: string;
+  natural: string;
+  stop_seq: number;
+}
+
+export interface DebugControlResponse {
+  state: DebugState;
+  stop: DebugStop | null;
+}
+
+export interface DebugOpenOptions {
+  stop_at?: "main" | "reset" | "none";
+  load?: boolean;
+}
+
+/** SSE 信封（`GET /api/debug/events`）。 */
+export interface DebugEventEnvelope {
+  topic: string;
+  seq: number;
+  ts: number;
+  session: string;
+  data: Record<string, unknown>;
 }
 
 // ── 串口监视会话动作（插件侧 / 内核侧同名契约）─────────────────────

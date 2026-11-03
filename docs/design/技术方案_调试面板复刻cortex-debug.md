@@ -643,7 +643,7 @@ class MiSession:
 ### 7.3 会话状态机
 
 ```
-                 ┌──────────── error ◄── spawn/握手/连接失败
+                 ┌──────────── error ◄── spawn/端口/连接失败
                  │                 │
 idle ──open──► starting ──reset/load/bp──► stopped ◄──*stopped── running
                  │                          │  ▲                  │
@@ -655,6 +655,8 @@ idle ──open──► starting ──reset/load/bp──► stopped ◄──
 约束：
 
 - `starting` 总预算 **45s**（openocd 20s + gdb 10s + reset/load 15s），超时 → `error` 并清理子进程。
+- `stop_at` 三档：`main`（默认，临时断点 + continue）、`reset`（停在复位向量）、`none`（不自动停，直接运行）。`main` 符号缺失时**降级为 `reset`** 并在 `debug/stop` 里带 `warn`，不报错。
+- `load` 缺省值：`plan.flash_images` 为空 → `true`（先下载再停）；否则 `false`（只调试已烧录镜像），与 C33e 判据一致。
 - `resume_on_close` 默认 `true`：`-exec-continue`（或 `monitor reset run`，由 `options` 决定）；执行失败也要 `close`，并在 `debug/closed{resumed:false}` 里说明。
 - 任何路径（异常、租约、面板关闭、内核退出）都走 `finally: terminate gdb → terminate openocd → 端口释放`。
 
@@ -967,7 +969,7 @@ DebugView
 - SVD 懒加载与缓存；无 SVD 降级
 - WebUI 工作区 `debugWs`（`cockpit/web/src/workspaces.ts`，一条记录即可）
 - 半主机（OpenOCD `arm semihosting enable`，可选）
-- DoD：STM32F103 的 SVD 首屏 <2s；展开 GPIOA→ODR→字段 <300ms；改 ODR 需 confirm 且读回一致。
+- DoD：STM32F103 的 SVD 首屏 <2s；展开 GPIOA→ODR→字段 <300ms；改 ODR 需 confirm + 写闸门，且读回一致。
 
 ### P3 · 高级（默认关）
 
@@ -987,7 +989,7 @@ DebugView
 `tests/test_gdbmi.py` | 黄金 MI 转录（`^done,stack=[...]`、`*stopped`、`~"..."`、转义、列表/元组混排、错误记录） |
 `tests/test_debugdata.py` | 栈/变量/寄存器/内存整形；`stop_seq` 语义；超限分页 |
 `tests/test_svd.py` | 合成 SVD（`TESTCHIP`，**不是**任何厂商真实芯片）→ 树/位域/枚举；畸形 XML 降级 |
-`tests/test_debugsession.py` | `tests/fake_gdb.py` 桩：启动→握手→reset→bp→continue→step→close；超时/中断/杀进程 |
+`tests/test_debugsession.py` | `tests/fake_gdb.py` 桩：启动→端口就绪→reset→bp→continue→step→close；超时/中断/杀进程 |
 `tests/test_debug_http.py` | 路由形状、409 矩阵、actor/租约、403 写闸门 |
 `packages/.../test/routes.test.mjs` | debug GET/POST 白名单、未知路径 404 |
 `packages/.../test/debug-view.test.mjs` | `open_seq` 只聚焦一次；`userPinnedAway`；`stop_seq` 丢弃 |
@@ -1100,7 +1102,7 @@ Live Watch（P3） | 对 1Hz 心跳间隔 p95 偏差 ≤50ms | 串口日志 + `t
 断点 | `-break-insert [-h] [-t] [cond] loc` / `-break-condition` / `-break-list` / `-break-delete` | |
 内存 | `-data-read-memory-bytes addr n` / `-data-write-memory-bytes addr "hex"` | 分块 ≤256B |
 反汇编 | `-data-disassemble -s a -e b -- 0\|2` | mode 0 含源码行 |
-求值 | `-data-evaluate-expression expr` | Agent 只读；写需闸门 |
+求值 | `-data-evaluate-expression expr` | 统一按写闸门（表达式可能含函数调用） |
 
 ### B. 参考
 

@@ -127,15 +127,21 @@ export function createDiscoverService(ctx, cfg) {
     let cache;
     let inflight;
     const cfgNow = () => ({ ...DEFAULT_CONFIG, ...cfg() });
-    /** 解析这次该扫哪里。 */
+    /** 解析这次该扫哪里。
+     *
+     * ★ **会话工作区优先**：面板要探测的是"用户当前打开的那个工程"，不是内核仓本身。
+     *   两者是不同概念——`elabRoot` 只负责启动内核、读 `projects/*.yaml`（见
+     *   `resolveAdapted`），不该决定"扫哪里"。否则显式配好内核仓后，在任意
+     *   STM32 工程工作区开会话，扫描根都会退化成内核仓，工作区工程永远发现不了。
+     */
     async function resolveRoot(sessionId) {
         const c = cfgNow();
-        if (c.elabRoot !== 'auto' && c.elabRoot.trim() !== '') {
-            return { path: normalizePath(c.elabRoot.trim()), source: 'elabRoot' };
-        }
         const sessionCwd = resolveSessionCwd(ctx, sessionId);
         if (sessionCwd !== undefined)
             return { path: normalizePath(sessionCwd), source: 'session' };
+        if (c.elabRoot !== 'auto' && c.elabRoot.trim() !== '') {
+            return { path: normalizePath(c.elabRoot.trim()), source: 'elabRoot' };
+        }
         const found = await findElabRoot(process.cwd(), 6, c.isElabRoot);
         if (found !== undefined)
             return { path: found, source: 'elabRoot' };
