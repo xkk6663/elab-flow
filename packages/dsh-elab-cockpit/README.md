@@ -26,7 +26,7 @@ DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页
 页签行（`ELAB` + 刷新/设置 + **`▶|` 调试工作区入口**）→ 工程行（下拉 / 归属 / 内核状态 / ↻）→
 适配横幅（自动探测结论，只读不落盘）→ 阶段梯（`编译 烧录 调试校验`：状态点 · 用时 · 证据）→
 手动条（`三连` `闭环` `取消` `预览` + 单步 `▶ 构建 / 烧录 / 调试 / 串口`）→
-通道日志（`构建|烧录|调试|串口` 页签 + 过滤/搜索/导出）→ 底部串口工作区（行/字节/终端/波形 + 通用发送框）。
+通道日志（`构建|烧录|调试|串口` 页签 + 过滤/搜索/导出 + 面板放大/恢复）→ 底部串口工作区（行/字节/终端/波形 + 通用发送框）。
 
 <img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/dsh/01-auto-probe-full.png" width="330" alt="DSH 全窗口：右侧栏 ELAB 面板">
 
@@ -154,6 +154,55 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 - 档位不可用的步骤会置灰（例如没有探针时 `onhw` 步骤被剔除），命令视图与面板视图来自同一判定。
 - 一键闭环的每一步都走内核编排；SSE 事件原样透传，断线可用 `id:` 游标续传。
 
+## DSH 界面：agent 调用教程（跨工程生效）
+
+### 上手流程
+
+1. **装**：`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`，重载窗口后右栏出现 **ELAB** tab。
+2. **开**：点开 ELAB tab，保持与对话同屏。面板按会话 cwd 找 elab 根，工程轨列出 `projects/*.yaml` 与芯片事实。
+3. **说**：第一次先让它调 `elab_guide` 自检；之后直接下指令（见下方话术表）。
+4. **看**：agent 发起 run 后，面板**自动切到对应工程**，阶梯与四通道实时刷新，发起方标 `agent`，你随时可点「■ 取消」。
+
+装好插件后，**不需要在每个新工程里再写 `AGENTS.md` 或 skill**，agent 就能知道这些工具该怎么用：
+
+| 机制 | 生效范围 | 内容 |
+|---|---|---|
+| `elab_*` 工具注册 | 进程级（所有会话） | 编译 / 烧录 / 调试 / 串口的结构化工具；`autoExposeTools` 默认开 |
+| 常驻系统提示段 | 进程级（所有会话） | 插件挂载时注册 `plugin:elab-cockpit`：工具有哪些、推荐顺序、单飞/互斥/写门控/判活纪律 |
+| `elab_guide` 工具 | 按需调用 | 完整工具清单 + 规则 + 面板说明；只读、不启动内核，第一次接手工程或不确定用哪个工具时先调它 |
+| `.agents/skills` / `AGENTS.md` | 工作区级 | 只留给芯片长尾知识（引脚、坑位、验收清单）与工程约定，不再是必需项 |
+
+> 常驻段依赖宿主挂载 `@deepseek-ai/dsh-system-prompt`；未挂载时插件静默跳过这一层，
+> 工具照常可用，agent 可调 `elab_guide` 得到同一份文案。
+
+### 一句话使唤它
+
+```
+你：用 elab 跑三连，把 RAM/FLASH 占用和失败日志给我。
+agent：elab_status（拿工程名）→ elab_triple → elab_log
+```
+
+| 你想要 | 让 agent 走的顺序 |
+|---|---|
+| 只编译 / 看占用 | `elab_status` → `elab_build` → `elab_log` |
+| 编译 + 烧录 + 调试校验 | `elab_status` → `elab_triple` → `elab_log` |
+| 完整体检 + 串口闭环 | `elab_status` → `elab_loop` → `elab_log` |
+| 看运行日志 / 判活 | `elab_serial_monitor(open)` → `elab_serial_wait`（等 `[alive]`）→ `elab_serial_read` |
+| 单步 / 断点 / 寄存器 | `elab_debug_open` → `elab_debug_control` → `elab_debug_inspect` → `elab_debug_close` |
+| 接新工程 / 换芯片包 | `elab_adapt`（`write=false` 先探测）→ `elab_pkg(install/activate)` |
+
+### 三条硬纪律（agent 会从提示段与 `elab_guide` 读到）
+
+- **单飞**：同一会话同时最多 1 个 run；`human-busy` 时等结束或请用户点「■ 取消」，不重试刷屏。
+- **互斥与门控**：串口监视占用时烧录/调试返回 `serial-busy`；串口写、适配写盘、录制默认被
+  `allowAgentWrite` 拒绝（设置页可开），被拒时如实告知用户，不绕路。
+- **判活**：agent 只凭串口 `tick` / `toggles` 判活；「LED 均匀闪烁」必须由用户肉眼确认（C36）。
+
+### 可视化与人机同源
+
+agent 发起的 run 会带 `agent` 标落在右栏面板，阶梯自动点亮、四通道日志实时滚动，用户随时可取消；
+agent 读的 `elab_status` / `elab_log` / 调试会话与面板显示的是**同一份内核数据**，不存在两套状态。
+
 ## 串口工作区
 
 | 能力 | 说明 |
@@ -224,6 +273,7 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 - 环境包清单里的 `sha256` 未核对的条目会按首次下载记录（TOFU）并给出告警。
 - 芯片支持来自适配包（`packs/official/**` 与社区市场），插件不承载芯片知识。
 - 内核版本低于 `2.1.0` 时只提示，不阻断；步骤标签会退回插件内置默认。
+- 常驻系统提示段依赖宿主挂载 `@deepseek-ai/dsh-system-prompt`；缺失时只剩工具 schema 与 `elab_guide`，agent 不一定主动想起这些工具。
 - 串口组件（仅 agent）只支持 UTF-8 / HEX 文本模板；二进制大块灌装（OTA 之外的固件下载）不在组件模型内。
 - 自动格式是**保守识别**：裸十六进制字符串（如 `1234`）按文本发送，要发字节请写 `0x12 0x34` 或 `12,34`。
 
@@ -239,6 +289,7 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 | 定时发送不动 | 上一轮未发完会记「跳过」；检查间隔 ≥ 20 ms、闭环/组件任务是否占用串口 |
 | 自动识别成了文本 | 裸十六进制按文本处理；改写 `0xNN` 或 `NN,NN` 后看预览行确认 |
 | 面板提示"内核旧" | `git -C <elabRoot> pull --ff-only` 后重开面板 |
+| agent 不会用 elab，只回 "Install or manage DSH plugins" | 插件未启用 / `autoExposeTools` 被关 / 宿主未挂 `dsh-system-prompt` | 启用插件并让 agent 调 `elab_guide` 验证工具面；仍不行则整体重启 DSH Desktop |
 
 ## 安装
 

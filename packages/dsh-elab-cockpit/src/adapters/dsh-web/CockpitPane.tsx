@@ -105,6 +105,8 @@ export interface CockpitPaneProps {
   sessionId?: string
   /** 宿主是否把面板显示出来了（不可见时断开 SSE）。 */
   visible?: boolean
+  /** 右栏面板「放大/恢复」：由 Client 工厂注入宿主 sidebarRight 全屏切换。 */
+  onToggleFullscreen?: () => void
 }
 
 /**
@@ -1145,6 +1147,7 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             progress={snap.progress}
             failure={failure}
             onChannel={setChannel}
+            onToggleFullscreen={props.onToggleFullscreen}
             serialContent={
               channel === 'serial' ? (
                 <SerialPane

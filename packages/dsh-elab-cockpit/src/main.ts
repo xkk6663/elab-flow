@@ -25,7 +25,7 @@ import { applyDiscover, type DiscoverConfig } from './adapters/kernel-http/disco
 import { looksLikeElabRoot } from './adapters/kernel-process/host-process.ts'
 import { createSerialMutexTracker } from './adapters/kernel-http/routes.ts'
 import { RunArbiter } from './domain/arbiter.ts'
-import { registerElabTools } from './adapters/dsh-tools/tools.ts'
+import { AGENT_USAGE, registerElabTools } from './adapters/dsh-tools/tools.ts'
 import { registerOnce } from './adapters/kernel-http/route-guard.ts'
 import type { HostRouteConfig, HostRouteContext } from './adapters/kernel-http/routes.ts'
 
@@ -115,6 +115,28 @@ function cwdResolver(ctx: HostRouteContext) {
     const def = workingDirectory?.defaultDirectory
     return typeof def === 'string' && def !== '' ? def : undefined
   }
+}
+
+/**
+ * 常驻系统提示段（`@deepseek-ai/dsh-system-prompt`，可选服务）。
+ *
+ * 为什么放在插件里：工具注册是进程级、skill / AGENTS.md 是工作区级——
+ * 新建工程没带上下文时 agent 就不知道这些工具该怎么用。这里只声明
+ * 「有哪些工具、推荐顺序、纪律」，业务步骤定义仍以内核自描述为准。
+ * 服务缺失（宿主未挂 dsh-system-prompt）时静默跳过，不影响其余功能。
+ */
+function registerAgentAnnouncement(ctx: HostRouteContext): () => void {
+  let dispose: unknown
+  try {
+    const service = ctx.get('systemPrompt') as
+      | { section?(entry: { name: string; order: number; text: string }): unknown }
+      | undefined
+    if (service === undefined || typeof service.section !== 'function') return () => {}
+    dispose = service.section({ name: 'plugin:elab-cockpit', order: 500, text: AGENT_USAGE })
+  } catch {
+    return () => {}
+  }
+  return typeof dispose === 'function' ? (dispose as () => void) : () => {}
 }
 
 export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPath?: string }): () => void {
@@ -215,6 +237,10 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
       warn: (msg: string) => ctx.logger?.warn?.(msg),
     })
   }
+
+  // ④' 常驻系统提示段：让 agent 在任何工程里都知道 elab_* 工具怎么用
+  //     （跨工程生效，不依赖 AGENTS.md / .agents/skills；细节走 elab_guide 按需取）
+  disposers.push(registerAgentAnnouncement(ctx))
 
   return () => {
     for (const d of disposers) {

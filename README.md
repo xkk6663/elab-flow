@@ -148,7 +148,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 </table>
 </div>
 
-安装：`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`（或 `npm install dsh-elab-cockpit`），重载窗口后右栏出现 elab tab。
+安装：`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`（或 `npm install dsh-elab-cockpit`），重载窗口后右栏出现 elab tab。DSH 里的 agent 调用教程见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)。
 
 ### ⑦ CLI：一条命令跑完，也能被 CI 直接调用
 
@@ -172,13 +172,67 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 - **停等协议**：`AA [01|02] SEQ LEN DATA CRC32 EOF 55`，CRC 错 NAK 重传；每 1KB 记页，支持断点续传。
 - **组合工程**：`ota_layout.boot_project: f411_boot` 让 `elab build -p f411` 级联构建；`elab flash` 按 boot bin 的 md5 指纹冻结台账。
 
-### ⑨ Agent 工具：24 个 `elab_*`，与面板同源
+### ⑨ 独立 WebUI：通用 agent 怎么调用
 
-写硬件 / 写盘的工具统一受 `allowAgentWrite`（默认关）；参数里的枚举来自内核自描述，面板不写死业务字段。
+这一节不依赖 DSH 插件，适用于 Claude Code / Cursor / Codex 等任何能跑命令或发 HTTP 的 agent。
+DSH 界面里的 agent 调用教程（开面板、话术、纪律）见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)。
+
+#### 仓库拉下来，agent 就能直接 elab 吗？
+
+能跑命令行，但**不是零配置**。克隆后先做三步，再让 agent 接手：
+
+```bash
+./elab pkg bootstrap                 # ① 内置芯片包 st/stm32（Windows 用 elab.cmd）
+./elab doctor                        # ② 体检：工具链 / 探针 / 端口，缺什么会直说
+./elab adapt ../my-project --write   # ③ 接入工程（先去掉 --write 看只读报告）
+```
+
+之后 agent 可以直接调用 CLI；想让人看到驾驶舱，再起 `cockpit.cmd`（或 `python -m cockpit.server`，需 `PYTHONPATH=services`）。
+
+#### 两种调用方式，区别只有一个：进不进驾驶舱
+
+| 方式 | agent 怎么调 | 用户看到什么 |
+|---|---|---|
+| **CLI** | `elab.cmd loop -p TEST -v`（或 `./elab build -p TEST`） | 终端分色输出 + 退出码（`0` ok / `1` failed / `2` inconclusive）；**不进 WebUI 实时面板** |
+| **HTTP ICD** | `POST http://127.0.0.1:8333/api/run`，body `{"project":"TEST","actor":"agent"}` → `202` + runId | WebUI 三列实时亮：阶梯、四通道日志、串口四视图；发起方标 `agent`，可点取消 |
+
+HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
+
+- `GET /api/runs`：活动 / 历史 run；`GET /api/plan?project=TEST`：只读预览 argv
+- `GET /api/events?run=<id>`：SSE 实时流；不能长连接的 agent 用 `GET /api/run-events?run=<id>&from=0` 轮询
+- `POST /api/cancel {"run":"<id>"}`；串口 `POST /api/serial/monitor`；调试 `POST /api/debug/session`
+- 串口监视占用时，含烧录 / 调试的 run 返回 `409`（先关监视再跑）
+
+#### 给通用 agent 的启动提示词
+
+不装 DSH 插件时，把下面整段贴进工程的 `AGENTS.md` 或会话首条消息（Claude Code / Cursor / Codex 都适用），agent 就知道该怎么用：
+
+```text
+本工程用 elab-Flow 做固件闭环，仓库根是 <ELAB_ROOT>（Windows 用 <ELAB_ROOT>\elab.cmd，其它平台用 <ELAB_ROOT>/elab）。
+- 先 `elab doctor` 判断工具链与探针；没有探针时只能 build / ci，不要反复重试烧录。
+- 改代码后用 `elab build -p <工程>` 看 RAM / FLASH；要烧录或跑闭环用 `elab loop -p <工程> -v`。
+- 需要我实时看驾驶舱时，不要用 CLI 跑长任务：先起 `cockpit.cmd`，再
+  POST http://127.0.0.1:8333/api/run  {"project":"<工程>","actor":"agent"}，
+  用 GET /api/events?run=<id>（或 /api/run-events）跟踪，取消用 POST /api/cancel {"run":"<id>"}。
+- 单飞：同时只跑 1 个 run；串口监视占用时烧录 / 调试会 409，先关监视。
+- 接入新工程优先 `elab adapt <目录>`（先只读），确认后再 `--write`；不要手改 projects/*.yaml。
+- 你只读日志与串口计数；「LED 均匀闪烁」由我肉眼确认后回报（你只凭 tick / toggles 判活）。
+```
+
+#### 不灵时的三件事
+
+- `elab` 找不到 → 用仓库根 `elab.cmd` / `./elab`，或 `PYTHONPATH=services python -m elab doctor`。
+- WebUI 打不开 → `cockpit.cmd` 幂等，重复启动不会起第二个服务；确认顶栏有版本号与「串口后端就绪」。
+- `/api/run` 返回 404 → 端口或路径写错；面板确实在跑再让 agent 发 HTTP，不要对着空端口重试。
+
+#### 在 DSH 界面里用？（可选）
+
+装插件后是另一套入口：右栏 ELAB 面板 + 25 个 `elab_*` 工具（写硬件 / 写盘受 `allowAgentWrite` 门控，默认关）。
+完整调用教程见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)，这里只列工具面：
 
 | 组 | 工具 |
 |---|---|
-| 看 | `elab_status` · `elab_preview`（只读 argv）· `elab_log` |
+| 看 | `elab_status` · `elab_guide`（使用契约）· `elab_preview`（只读 argv）· `elab_log` |
 | 闭环 | `elab_build` · `elab_triple` · `elab_loop` · `elab_step` · `elab_cancel` |
 | 工程与包 | `elab_adapt`（`write=false` 先看只读报告）· `elab_pkg` |
 | 调试 | `elab_debug_open / control / inspect / breakpoint / wait / close` |

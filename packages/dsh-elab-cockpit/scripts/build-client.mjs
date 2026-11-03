@@ -112,6 +112,18 @@ ${bundled}
             console.error('[dsh-elab-cockpit] theme 订阅失败', error)
           }
         })
+        // ★ 面板「放大/恢复」：复用宿主 sidebarRight 的整窗全屏（可选注入；
+        //   宿主缺服务时按钮点击无操作，不影响其余功能）。
+        let elabSidebarRight
+        ctx.inject(['sidebarRight'], (c) => {
+          elabSidebarRight = c.sidebarRight
+        })
+        const toggleElabPaneFullscreen = () => {
+          const rb = elabSidebarRight
+          if (rb === undefined) return
+          const target = rb.commandTarget()
+          if (target !== undefined) rb.toggleFullscreen(target)
+        }
         // ★ 折叠底部面板（侧边栏增强 dsh-better-sidebar 的底部工作台）：
         //   注册为 bottomOnly 工具（终端同款）——只出现在底部面板的「+」菜单，
         //   不重复注册进原生右栏。component 收 { scope, visible }，
@@ -171,7 +183,12 @@ ${bundled}
               key: 'dsh-elab-cockpit',
               id: 'dsh-elab-cockpit',
               inject: (sessionId) => ({ sessionId }),
-            }, module.exports.CockpitPane)
+            }, function ElabCockpitPane(props) {
+              return __hostReact.createElement(module.exports.CockpitPane, {
+                ...props,
+                onToggleFullscreen: toggleElabPaneFullscreen,
+              })
+            })
           } catch (error) {
             console.error('[dsh-elab-cockpit] pane.tab 注册失败', error)
             return undefined

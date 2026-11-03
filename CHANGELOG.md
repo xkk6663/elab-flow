@@ -5,6 +5,26 @@
 
 ---
 
+## [DSH 插件 0.5.1] — 2026-11-04（agent 上下文跨工程生效 · 面板放大/跟随）
+
+### DSH 插件：agent 侧上下文跨工程生效
+
+- 插件挂载时向宿主 `dsh-system-prompt` 注册常驻段 `plugin:elab-cockpit`：
+  工具有哪些、推荐顺序（status → triple/loop → log）、单飞 / 串口互斥 / `allowAgentWrite` 门控 / 判活纪律。
+  新建工程不再需要手工放 `AGENTS.md` 或 `.agents/skills`。
+- 新增只读工具 `elab_guide`：返回完整工具清单、规则与面板说明；常驻提示只留短段，细节按需取。
+- 宿主未挂 `dsh-system-prompt` 时静默跳过提示段，工具与 `elab_guide` 照常可用。
+- 文档分两种调用场景：插件 README 补「DSH 界面：agent 调用教程」（开面板四步 · 话术表 · 硬纪律）；
+  根 README 补「独立 WebUI：通用 agent 怎么调用」（三步接入、CLI vs HTTP ICD、给通用 agent 的启动提示词）；
+  工具数 24 → 25。
+
+### DSH 插件：面板操作
+
+- 右栏面板标题栏新增「放大 / 恢复」按钮：复用宿主 `sidebarRight` 整窗全屏（可选注入，宿主缺服务时按钮不出现）。
+- 证据区把「导出 / 跟随」收进同一工具组，并新增全屏按钮，窄栏下不再挤压标题。
+
+---
+
 ## [V3.1.0] — 2026-11-03（调试工作区 P0–P3 · 探针切换 · 闭环三态 · README 重写）
 
 内核 `COCKPIT_VERSION` 与 `services.elab.__version__` 升到 `3.1.0`，

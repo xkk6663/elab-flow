@@ -2991,7 +2991,7 @@ function EvidenceTail(props) {
         count > 0 ? /* @__PURE__ */ react_default.createElement("span", { style: { opacity: 0.6 } }, ` ${count}`) : null
       );
     }),
-    serialMode ? null : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
+    /* @__PURE__ */ react_default.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" } }, serialMode ? null : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
@@ -2999,7 +2999,6 @@ function EvidenceTail(props) {
         disabled: lines.length === 0,
         title: "\u5BFC\u51FA\u5F53\u524D\u901A\u9053\u7684\u7EAF\u6587\u672C\u65E5\u5FD7\uFF08.log\uFF09",
         style: {
-          marginLeft: "auto",
           padding: "1px 6px",
           fontSize: "11px",
           borderRadius: "4px",
@@ -3027,7 +3026,25 @@ function EvidenceTail(props) {
         }
       },
       follow ? "\u25BE \u8DDF\u968F" : "\u21BA \u6062\u590D"
-    ))
+    )), props.onToggleFullscreen ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: props.onToggleFullscreen,
+        title: "\u653E\u5927\u9762\u677F\uFF08\u8986\u76D6\u6574\u4E2A\u53F3\u4FA7\u680F\uFF09\uFF1B\u518D\u6B21\u70B9\u51FB\u6062\u590D",
+        style: {
+          padding: "1px 6px",
+          fontSize: "12px",
+          lineHeight: "16px",
+          borderRadius: "4px",
+          border: "1px solid var(--elab-border)",
+          background: "transparent",
+          color: "var(--elab-fg-secondary)",
+          cursor: "pointer"
+        }
+      },
+      "\u26F6"
+    ) : null)
   ), serialMode ? /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, props.serialContent) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, progress !== null && progress.total > 0 ? /* @__PURE__ */ react_default.createElement(ProgressBar, { current: progress.current, total: progress.total, label: progress.label, startedAt: null }) : null, failure !== null ? /* @__PURE__ */ react_default.createElement(
     "button",
     {
@@ -6619,6 +6636,7 @@ function CockpitPane(props) {
           progress: snap.progress,
           failure,
           onChannel: setChannel,
+          onToggleFullscreen: props.onToggleFullscreen,
           serialContent: channel === "serial" ? /* @__PURE__ */ react_default.createElement(
             SerialPane,
             {
@@ -6789,6 +6807,18 @@ function applyThemeScheme(scheme) {
             console.error('[dsh-elab-cockpit] theme 订阅失败', error)
           }
         })
+        // ★ 面板「放大/恢复」：复用宿主 sidebarRight 的整窗全屏（可选注入；
+        //   宿主缺服务时按钮点击无操作，不影响其余功能）。
+        let elabSidebarRight
+        ctx.inject(['sidebarRight'], (c) => {
+          elabSidebarRight = c.sidebarRight
+        })
+        const toggleElabPaneFullscreen = () => {
+          const rb = elabSidebarRight
+          if (rb === undefined) return
+          const target = rb.commandTarget()
+          if (target !== undefined) rb.toggleFullscreen(target)
+        }
         // ★ 折叠底部面板（侧边栏增强 dsh-better-sidebar 的底部工作台）：
         //   注册为 bottomOnly 工具（终端同款）——只出现在底部面板的「+」菜单，
         //   不重复注册进原生右栏。component 收 { scope, visible }，
@@ -6848,7 +6878,12 @@ function applyThemeScheme(scheme) {
               key: 'dsh-elab-cockpit',
               id: 'dsh-elab-cockpit',
               inject: (sessionId) => ({ sessionId }),
-            }, module.exports.CockpitPane)
+            }, function ElabCockpitPane(props) {
+              return __hostReact.createElement(module.exports.CockpitPane, {
+                ...props,
+                onToggleFullscreen: toggleElabPaneFullscreen,
+              })
+            })
           } catch (error) {
             console.error('[dsh-elab-cockpit] pane.tab 注册失败', error)
             return undefined

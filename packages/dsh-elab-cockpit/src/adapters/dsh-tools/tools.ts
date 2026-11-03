@@ -496,6 +496,57 @@ function marketSummary(data: Record<string, unknown>, q: string): Record<string,
 }
 
 
+/**
+ * agent 侧使用契约（常驻系统提示段与 `elab_guide` 工具共用同一份文案）。
+ * 只放编排话术与纪律；步骤标签 / 档位定义仍以内核 `STEP_META` / `KERNEL_PLANS` 为准。
+ */
+export const AGENT_USAGE = [
+  'elab 驾驶舱插件已挂载（DSH 右栏 ELAB 面板）。',
+  '- 嵌入式固件任务优先用 elab_* 工具，不要手写 cmake / openocd / pyocd 命令。',
+  '- 先 elab_status 拿工程名与每步可用性；再 elab_triple（编译+烧录+调试校验）或 elab_loop（完整闭环）；日志用 elab_log。',
+  '- 串口：elab_serial_monitor(open) → elab_serial_read / elab_serial_wait；调试：elab_debug_open → elab_debug_control → elab_debug_inspect → elab_debug_close（关闭会恢复运行）。',
+  '- 单飞：同一会话同时只允许 1 个 run；串口监视占用时烧录/调试会被拒；串口写、适配写盘、录制受 allowAgentWrite 门控，被拒时告知用户开权限，不要绕路重试。',
+  '- 你发起的 run 会实时出现在右栏面板，用户可见也可取消；「LED 均匀闪烁」只能由用户肉眼确认，你只凭串口 tick / toggles 判活。',
+  '- 需要完整工具清单与排障时调 elab_guide。',
+].join('\n')
+
+/** `elab_guide` 的结构化正文（渐进披露：常驻提示只留 AGENT_USAGE）。 */
+export function agentGuidePayload(): unknown {
+  return {
+    ok: true,
+    usage: AGENT_USAGE,
+    tools: [
+      { name: 'elab_status', use: '工程列表 + 每步可用性 + 当前 run + 串口现状（只读，写操作前先调）' },
+      { name: 'elab_build', use: '只编译' },
+      { name: 'elab_triple', use: '编译 + 烧录 + 调试校验' },
+      { name: 'elab_loop', use: '完整闭环（缺什么自动剔除并在返回里说明）' },
+      { name: 'elab_step', use: '指定步骤组合，如 build / flash,debug_verify' },
+      { name: 'elab_preview', use: '预览将执行的计划（命令 / 产物 / 超时），不落盘' },
+      { name: 'elab_cancel', use: '取消当前 run（人和 agent 发起的都能取消）' },
+      { name: 'elab_log', use: '读 run 日志尾部 N 行，可按步骤过滤' },
+      { name: 'elab_serial_monitor', use: 'open / close / decoder / clear / pause / resume 串口监视' },
+      { name: 'elab_serial_read', use: '按游标读串口批次（direction=rx/tx/all）' },
+      { name: 'elab_serial_wait', use: '等匹配正则的串口行（判心跳 / 等日志）' },
+      { name: 'elab_serial', use: '向串口写数据（需要 allowAgentWrite）' },
+      { name: 'elab_serial_capture', use: '录制 start / stop / status（写盘需 allowAgentWrite）' },
+      { name: 'elab_debug_open', use: '起 openocd + gdb，停在 main（需内核 meta.debug）' },
+      { name: 'elab_debug_control', use: 'continue / pause / step / reset / run_to' },
+      { name: 'elab_debug_inspect', use: '栈 / 变量 / 寄存器 / 断点 / 内存等只读视图' },
+      { name: 'elab_debug_close', use: '关闭调试并恢复运行（resume=false 才留在 halt）' },
+      { name: 'elab_adapt', use: '接入工程目录（write=false 只读探测）' },
+      { name: 'elab_pkg', use: '芯片适配包 status / search / install / activate / remove' },
+    ],
+    rules: [
+      '同一会话单飞：最多 1 个 run；human-busy 时等结束或请用户取消，不要重试刷屏。',
+      '串口互斥：监视占用时含烧录/调试的 run 返回 serial-busy，先请用户关闭监视。',
+      '写门控：串口写 / 适配写盘 / 录制默认被 allowAgentWrite 拒绝；如实转告用户怎么开。',
+      '可视化：发起 run 后右栏面板自动点亮阶梯与通道日志；失败时把对应通道日志尾转述给人。',
+      '判活纪律：agent 只读串口 tick / toggles；「LED 均匀闪烁」必须由用户肉眼确认。',
+    ],
+    panel: '右栏 ELAB：工程行 · 适配横幅 · 阶段梯 · 三连/闭环/取消/预览 · 构建/烧录/调试/串口通道日志 · 串口四视图。',
+  }
+}
+
 /** 注册全部 elab_* 工具（autoExposeTools=true 时由入口调用）。 */
 export function registerElabTools(
   register: (definition: unknown) => () => void,
@@ -569,6 +620,21 @@ export function registerElabTools(
             monitor: serial.monitor ?? null,
           },
         }
+      },
+    }),
+  )
+
+  add(
+    makeTool({
+      name: 'elab_guide',
+      description:
+        '返回 elab 驾驶舱的 agent 使用契约：工具清单与用途、调用顺序、单飞/串口互斥、写门控、面板可视化与判活纪律。' +
+        '只读、不启动内核；不确定该用哪个 elab_* 工具或第一次接手工程时先调它。',
+      parameters: {},
+      output: jsonOutput,
+      presentCall: () => ({ card: 'generic', kind: 'read', title: '查看 elab 使用指南' }),
+      async execute() {
+        return agentGuidePayload()
       },
     }),
   )

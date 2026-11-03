@@ -44,14 +44,20 @@ const KEYED_SLOTS = new Set(['sidebar.right.pane.tab'])
 const fakeCtx = {
   inject(services, cb) {
     assert.ok(
-      Array.isArray(services) && services.length === 1 && ['sidebarRightTabs', 'betterSidebar', 'theme'].includes(services[0]),
-      `apply 应通过 ctx.inject 注入 sidebarRightTabs / betterSidebar / theme，收到 ${JSON.stringify(services)}`,
+      Array.isArray(services) && services.length === 1 && ['sidebarRightTabs', 'betterSidebar', 'theme', 'sidebarRight'].includes(services[0]),
+      `apply 应通过 ctx.inject 注入 sidebarRightTabs / betterSidebar / theme / sidebarRight，收到 ${JSON.stringify(services)}`,
     )
     const fakeServices = {
-      // 模板读的是 ctx 属性（c.sidebarRightTabs / c.theme / c.betterSidebar）
+      // 模板读的是 ctx 属性（c.sidebarRightTabs / c.theme / c.betterSidebar / c.sidebarRight）
       sidebarRightTabs: fakeCtx,
       theme: { theme: { getTheme: () => ({ active: { colorScheme: 'dark' } }) } },
       betterSidebar: { betterSidebar: { registerTab(def) { betterTabsRegistered.push(def); return () => {} } } },
+      sidebarRight: {
+        sidebarRight: {
+          commandTarget: () => ({ sessionId: 's', paneId: 'p', host: 'dock' }),
+          toggleFullscreen: () => {},
+        },
+      },
     }
     cb(fakeServices[services[0]])
     return () => {}

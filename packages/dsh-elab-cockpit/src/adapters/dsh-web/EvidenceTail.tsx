@@ -54,6 +54,8 @@ export interface EvidenceTailProps {
   onChannel(channel: LogChannelId): void
   /** 串口通道的融合工作区（行/字节/终端/波形 + 发送）；给定后替代日志区。 */
   serialContent?: ReactNode
+  /** 右栏面板「放大/恢复」（宿主 sidebarRight 全屏）；缺省时不显示按钮。 */
+  onToggleFullscreen?: () => void
 }
 
 const TONE_COLOR: Record<TailLine['tone'], string> = {
@@ -195,44 +197,64 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
             )
           })}
 
-        {serialMode ? null : (
-          <>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          {serialMode ? null : (
+            <>
+              <button
+                type="button"
+                onClick={doExport}
+                disabled={lines.length === 0}
+                title="导出当前通道的纯文本日志（.log）"
+                style={{
+                  padding: '1px 6px',
+                  fontSize: '11px',
+                  borderRadius: '4px',
+                  border: '1px solid var(--elab-border)',
+                  background: 'transparent',
+                  color: lines.length === 0 ? 'var(--elab-fg-dimmed)' : 'var(--elab-fg-secondary)',
+                  cursor: lines.length === 0 ? 'default' : 'pointer',
+                }}
+              >
+                {'\u2913 导出'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setFollow((v) => !v)}
+                title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
+                style={{
+                  padding: '1px 6px',
+                  fontSize: '11px',
+                  borderRadius: '4px',
+                  border: '1px solid var(--elab-border)',
+                  background: 'transparent',
+                  color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
+                  cursor: 'pointer',
+                }}
+              >
+                {follow ? '\u25be 跟随' : '\u21ba 恢复'}
+              </button>
+            </>
+          )}
+          {props.onToggleFullscreen ? (
             <button
               type="button"
-              onClick={doExport}
-              disabled={lines.length === 0}
-              title="导出当前通道的纯文本日志（.log）"
+              onClick={props.onToggleFullscreen}
+              title="放大面板（覆盖整个右侧栏）；再次点击恢复"
               style={{
-                marginLeft: 'auto',
                 padding: '1px 6px',
-                fontSize: '11px',
+                fontSize: '12px',
+                lineHeight: '16px',
                 borderRadius: '4px',
                 border: '1px solid var(--elab-border)',
                 background: 'transparent',
-                color: lines.length === 0 ? 'var(--elab-fg-dimmed)' : 'var(--elab-fg-secondary)',
-                cursor: lines.length === 0 ? 'default' : 'pointer',
-              }}
-            >
-              {'\u2913 导出'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setFollow((v) => !v)}
-              title={follow ? '正在跟随最新输出；点击暂停' : '已暂停跟随；点击恢复'}
-              style={{
-                padding: '1px 6px',
-                fontSize: '11px',
-                borderRadius: '4px',
-                border: '1px solid var(--elab-border)',
-                background: 'transparent',
-                color: follow ? 'var(--elab-accent)' : 'var(--elab-fg-dimmed)',
+                color: 'var(--elab-fg-secondary)',
                 cursor: 'pointer',
               }}
             >
-              {follow ? '\u25be 跟随' : '\u21ba 恢复'}
+              {'\u26f6'}
             </button>
-          </>
-        )}
+          ) : null}
+        </div>
       </div>
 
       {serialMode ? (
