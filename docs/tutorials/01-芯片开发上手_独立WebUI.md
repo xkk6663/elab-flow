@@ -70,9 +70,13 @@ elab.cmd pkg activate st/stm32  # 启用（一次只启用一套）
 
 步骤：
 
-1. 点左列「＋ 适配」，面板展开后填入厂商工程的**绝对路径**（本例：`C:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/examples/STM32F411CEU6`）；
-2. 点「探测」——内核按厂商指纹匹配，给出只读报告；
+1. 点左列「＋ 适配」——内核会弹出**系统「选择文件夹」对话框**（和资源管理器里选目录一样），选中厂商工程根目录即可；
+2. 选完自动填入路径并**立即只读探测**，内核按厂商指纹匹配，给出报告；
 3. 确认无误后点「写入」，新工程卡出现在左列并自动选中（效果即第 1 章 A-01 中的 `f411` 卡；本仓已随带该工程，故不重复演示写入）。
+
+> 浏览器沙箱拿不到本地目录的绝对路径，所以对话框由**同机运行的内核**代开
+> （`POST /api/pick-folder`）；没有桌面会话或精简 Python 时，面板会自动回落为
+> 手工输入框（也可随时点面板里的「浏览…」重开对话框）。
 
 ![A-02 适配面板](assets/webui/A-02-adapt-panel.png)
 
@@ -89,6 +93,221 @@ elab.cmd pkg activate st/stm32  # 启用（一次只启用一套）
 | 证据链 | 逐条列出命中的指纹与来源文件 |
 
 **常见坑**：探测结论是 T3（需人工补全）时别硬写——先看证据链里缺了哪条，多半是工程目录里没有可识别的工程文件。
+
+### 3.1 导入外部 STM32 工程（实机：`vscode-STM32/TEST`）
+
+外部工程**不需要搬进仓库**：适配只写一份 `projects/<name>.yaml`，`root` 指向工程的绝对路径，
+构建产物落在本仓 `.work/<name>`——业务工程一个字节都不改（构建日志里的「零改动守卫」会证明这一点）。
+
+> 实机口径：2026-11-03，外部工程 `C:/Users/xiao1/Desktop/vscode-STM32/TEST`
+> （CubeMX + CMake + FreeRTOS，芯片 `st/stm32f103xb`），板子 STM32F103C8T6，COM10@115200。
+
+步骤：
+
+1. 点左列「＋ 适配」——弹出系统「选择文件夹」对话框，选中：
+   `C:/Users/xiao1/Desktop/vscode-STM32/TEST`（也可在面板里点「浏览…」重选）；
+2. 选完自动只读探测：内核按厂商指纹匹配，报告 `T1 · 可适配 / 置信度 high / stm32cubemx / st/stm32f103xb`；
+3. 「工程名」默认取目录名 `test`——**这就是卡片名**，可以现在改，也可以写入后再改名（见 3.2）；
+4. 点「写入」：生成 `projects/test.yaml`，卡片出现在左列并自动选中。
+
+![B-01 探测外部工程（只读）](assets/webui/B-01-adapt-probe-ext.png)
+
+![B-02 写入成功：接入层落盘 + 中列切到新工程](assets/webui/B-02-adapt-written.png)
+
+写入后先看卡片上的事实（B-04 里 `ext_test` 卡同款）：
+
+| 卡片字段 | 实测值 | 含义 |
+|---|---|---|
+| 包 / 芯片 | `st/stm32f103xb` | 来自当前启用的适配包，不是前端猜的 |
+| 类别 / 构建 | `A 类 · Ninja` | archetype 与构建系统 |
+| 串口 | `auto` | 端口自动探测（本机解析到 COM10） |
+| 闭环判据 | `monitor 不可用` | **本工程没有串口输出能力**，`close_on ×0`（原因与修复见 3.3） |
+
+然后就能直接单步「编译」，不需要在驾驶舱外先跑一遍 CMake：
+
+![B-05 外部工程编译证据](assets/webui/B-05-build-ext.png)
+
+实测（B-05，与图同源）：
+
+| 证据 | 值 |
+|---|---|
+| 编译 | `37/37`，`Linking C executable TEST.elf` |
+| RAM | 8712 B / 20 KB = **42.54%** |
+| FLASH | 37776 B / 64 KB = **57.65%** |
+| 零改动保证 | `[elab] ✓ 零改动保证：C:/Users/xiao1/Desktop/vscode-STM32/TEST 的 1145 个文件均未被触碰` |
+| 阶段账本 | `退出步骤 build 用时 12.19s` |
+
+烧录同样可用（本机 `elab flash -p ext_test` 实测通过）。但**先别急着跑 monitor**：
+`TEST` 工程里没有串口心跳，监视步骤只能判 inconclusive——这正是下一节要补的第一关。
+
+### 3.2 管理左侧工程：改名 / 重新探测 / 移除
+
+管理入口：鼠标移到卡片右上角，出现「⋯」（悬停才显示，避免界面噪声）：
+
+![B-03 工程管理菜单](assets/webui/B-03-rename-menu.png)
+
+三项分别做什么：
+
+| 菜单项 | 行为 | 边界 |
+|---|---|---|
+| **重命名** | 输入新名字 → 「改名」：改 `projects/<old>.yaml` 的**文件基名**、`name:` 行、按工程名派生的 `work_dir`；成功后自动选中新卡 | 业务工程零改动；`.work/<旧名>` 不迁移，首次编译会重建。被芯片 `ota_layout.boot_project` 引用的 boot 工程会被拒绝改名（会断裂跳转级联） |
+| **重新探测** | 只读复检：`identical`（一致）/ `drift`（工程已变更，接入文件需重写）/ `missing` | 不改任何文件；工程加了源文件、补了串口输出后用它判断要不要重写 yaml |
+| **移除** | 二次确认后删 `projects/<name>.yaml`，并自动留 `projects/<name>.yaml.bak` | 业务工程零改动；恢复时把 `.bak` 改回 `.yaml` 即可（`.bak` 已 gitignore） |
+
+改名后的实机结果（`test` → `ext_test`，Toast 同步提示）：
+
+![B-04 改名后：卡片 ext_test 已选中](assets/webui/B-04-renamed-card.png)
+
+**「驾驶舱里的工程命名到底存在哪」**：
+
+| 名字 | 存储位置 | 正确改法 |
+|---|---|---|
+| 卡片名（左侧显示） | `projects/<name>.yaml` 的 `name:` 字段 | 「⋯ → 重命名」（推荐）；手工改必须**同时**改文件名与 `name:` 行 |
+| 固件名（产物/ELF） | yaml 的 `project_name: TEST` | 属于业务事实（可执行文件名、链接脚本），**不要**跟着卡片名改 |
+| 卡片顺序 | 按 `name` 字母序 | 不提供手工排序 |
+
+CLI 等价操作（无 UI 时的兜底）：
+
+```powershell
+elab.cmd adapt "C:/Users/xiao1/Desktop/vscode-STM32/TEST"          # 只读探测
+elab.cmd adapt "C:/Users/xiao1/Desktop/vscode-STM32/TEST" --write  # 写入 projects/test.yaml
+```
+
+改名 / 移除目前只走 UI（内核接口 `POST /api/project`，`action=rename|remove`）。
+
+**管理建议**：
+
+- 一个外部工程只留一张卡；重名会被内核拒绝（`工程名已被占用`），顺手用「重新探测」确认是否 `identical`；
+- 卡名用短名（如 `ext_test`），固件名保持原样（`TEST`），排障时不会混淆；
+- 外部工程继续用你自己的 Git 管理；elab 只往 `.work/` 写产物（本仓 `.gitignore` 已覆盖）。
+
+### 3.3 外部工程没有串口输出：补齐第一关再闭环
+
+`TEST` 卡片显示 `monitor 不可用`，不是驾驶舱坏了，而是探测结论：
+
+- 工程在 `Core/Src/freertos.c` 里只重写了 `fputc`（Keil/MDK 的常见写法）；
+- 本工具链是 GCC + newlib/picolibc，`printf` 走 `_write → __io_putchar`，而 `__io_putchar` 只有 weak 声明；
+- 实测烧录后串口 **8 秒 0 字节**，监视步骤没有判据。
+
+修复就是在工程里补一个强定义（与 [F103 心跳样例](../../examples/STM32F103C8T6/Core/Src/main.c) 同一写法）：
+
+```c
+int __io_putchar(int ch)
+{
+  uint8_t byte = (uint8_t)ch;
+  (void)HAL_UART_Transmit(&huart1, &byte, 1, 10);
+  return ch;
+}
+```
+
+然后按 [第一关](#第一关新芯片先验-1hz-心跳--板载-led推荐) 补 1Hz `[alive]` 心跳 + 板载 LED 同频；
+改完回到「⋯ → 重新探测」，若显示 `drift`（工程能力变了、接入文件还是旧的），再点「写入」更新
+`projects/ext_test.yaml`，`monitor.close_on` 就会随之生成，闭环才具备可判据。
+
+> **实机复核（2026-11-03，`stm32c8_test`）**：补强定义 + 心跳任务后，
+> `elab loop -p stm32c8_test --no-debug` 全绿：
+> `[serial] +0.92s [alive] test tick=1 stage=main_loop`、`+1.84s tick=2`，
+> `[monitor] ✓ 串口闭环：OK（命中 close_on）`。
+> 注意该工程 `configTOTAL_HEAP_SIZE` 只有 3072 B，新增心跳任务要先提到 6144 B，
+> 否则 `osThreadNew` 返回 NULL（编译/烧录都正常，只是串口没有 `[alive]`）。
+>
+> 另一个老工程常见坑：tickless idle 的 `PreSleepProcessing` / `PostSleepProcessing`
+> 把 `RCC_SYSCLKSOURCE_HSI`（枚举值 0）当成 `RCC_ClkInitTypeDef*` 传给
+> `HAL_RCC_ClockConfig()` → 每次空闲睡眠都 `HAL_ERROR(1)`，串口被
+> `HAL_RCC_ClockConfig error: 1` 刷屏。修法是构造完整的 `RCC_ClkInitTypeDef`
+> 并保存/恢复 PLL 配置，或先留空钩子（不切时钟）。
+
+
+---
+
+## 第一关：新芯片先验 1Hz 心跳 + 板载 LED（推荐）
+
+> 这一关先于 OTA / boot / 业务外设。新芯片接上后，不要一上来就跑完整业务工程；
+> 先用最小固件证明 **时钟 → SysTick → GPIO → UART TX → 主循环** 这条最底层的链路是通的。
+>
+> **本关已固化为仓库规则**：`AGENTS.md`「芯片闭环第一关」+ [设计约束 C36](../design/设计约束.md)。
+> 以后接任何芯片，agent 的第一件事都是跑通心跳并把 LED 跟随情况交给用户肉眼确认。
+
+### 判定标准
+
+- 串口每 **1 秒** 输出一条 `[alive]`，`tick` 递增（**给 agent 看的事实源**）；
+- 同一条时间基驱动板载 LED：**每 500ms 翻转一次**，亮灭周期 1s，与心跳同频（**给人看**）；
+- agent 侧心跳不乱拍 **且** 用户肉眼确认 LED 均匀亮灭 → 两方都收到信息，第一关通过。
+
+### 最小固件要素
+
+| 要素 | 要求 |
+|---|---|
+| 时钟 | 先不接复杂外设，HSI/HSE + PLL 到目标主频，日志打印实际 `SYSCLK/HCLK/PCLK2` |
+| SysTick | `HAL_Init()` 提供 1ms 时基；心跳只读 `HAL_GetTick()`，**不用 `HAL_Delay`** |
+| UART TX | 初始化完立刻打印 `[log]` 阶段日志；TX 引脚、波特率与接线一致 |
+| GPIO LED | 板载 LED 或任选空闲 GPIO；注意**极性**（F103C8T6 的 PC13 是低电平点亮） |
+| 主循环 | 非阻塞：命令处理、LED 翻转、心跳打印都在同一循环里按时间戳推进 |
+
+### 同步实现（F103C8T6 实测）
+
+同一个 500ms 节拍同时驱动两者，避免两个定时器漂移：
+
+```c
+#define LED_HALF_PERIOD_MS 500u
+
+if (HAL_GetTick() - last_tick >= LED_HALF_PERIOD_MS) {
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);   /* 亮灭周期 1s */
+    g_led_toggles++;
+
+    if ((g_led_toggles & 1u) == 0u) {             /* 每 2 次翻转 = 1s = 一次心跳 */
+        printf("[alive] test tick=%lu led=1Hz toggles=%lu stage=%s\r\n",
+               (unsigned long)g_tick, (unsigned long)g_led_toggles, g_stage);
+        g_tick++;
+    }
+    last_tick += LED_HALF_PERIOD_MS;
+}
+```
+
+实测日志（复位后 8 秒，`COM10 @115200`）：
+
+```text
+[alive] test tick=0 cmds=0 led=1Hz toggles=2  stage=main_loop
+[alive] test tick=1 cmds=0 led=1Hz toggles=4  stage=main_loop
+[alive] test tick=2 cmds=0 led=1Hz toggles=6  stage=main_loop
+[alive] test tick=3 cmds=0 led=1Hz toggles=8  stage=main_loop
+[alive] test tick=4 cmds=0 led=1Hz toggles=10 stage=main_loop
+[alive] test tick=5 cmds=0 led=1Hz toggles=12 stage=main_loop
+[alive] test tick=6 cmds=0 led=1Hz toggles=14 stage=main_loop
+[alive] test tick=7 cmds=0 led=1Hz toggles=16 stage=main_loop
+[cmd] STAT stage=main_loop tick=8 cmds=1 rx=5B led_toggles=16 uptime=8007ms
+```
+
+- 相邻心跳到达间隔：`1.000 / 1.000 / 0.999 / 1.001 / 1.000 / 0.999` 秒；
+- 每次心跳 `toggles` 严格 +2（两次 500ms 翻转）；
+- `STAT` 里的 `led_toggles` 与串口心跳同源，可用来核对 LED 是否真的在翻。
+
+**两方确认结果（2026-11-03）**：
+
+| 一方 | 证据 | 结论 |
+|---|---|---|
+| agent（串口） | 8 条心跳、间隔 ≈1.000s、`toggles` 每次 +2、`STAT` 可核对 | PASS |
+| 人（肉眼） | 板载 PC13 LED 1Hz 均匀亮灭 | 已确认 |
+
+两方都成立 → 本关通过。若只有 agent 侧 PASS 而灯不亮，按上表「串口有心跳但 LED 不闪」排查，**不得**直接进入业务开发。
+
+### 现象 → 问题定位
+
+| 现象 | 最可能的原因 |
+|---|---|
+| LED 均匀闪 + 串口 1Hz 心跳 | ✅ 第一关通过，再往下接外设 |
+| LED 闪但串口没输出 | UART TX 引脚 / 波特率 / 接线 / `printf` 重定向未定义 |
+| 串口有心跳但 LED 不闪 | LED 引脚或极性错、GPIO 时钟没开、`HAL_GPIO_TogglePin` 未执行 |
+| 两者都没有 | 时钟配置失败、startup/链接脚本错、芯片一直复位 |
+| LED 闪但节奏不均匀 / 心跳漏拍 | 主循环里有阻塞延时（`HAL_Delay`、忙等、长 `printf`） |
+
+### 注意
+
+- **串口是事实源，LED 是肉眼确认**：最终判据仍是 `elab monitor` 判 ok + 命令回显；
+  板子没有用户 LED 时，用空闲 GPIO + 示波器/逻辑分析仪，或只看日志里的 `toggles` 递增。
+- 不要占用 SWD / 串口复用脚；换板子先确认 LED 是高电平点亮还是低电平点亮。
+- 这一步不需要 OTA、boot 或双槽分区——**一级 boot 是量产升级能力**，不是新芯片 bring-up 的前置条件。
+- 代码位置：`examples/STM32F103C8T6/Core/Src/main.c` 的主循环与 `[log]` 初始化段。
 
 ---
 

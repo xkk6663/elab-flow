@@ -18,12 +18,21 @@ import type {
   Capabilities,
   SerialChunk,
   SerialFormat,
-  SerialWidget,
-  SerialWidgetParam,
+  SerialPreviewResult,
   SerialWidgetRunResult,
 } from "../api/types";
-import { asciiOf, captureText, hexDump, hexDumpRows, parseAnsi, textOf } from "@elab/cockpit-ui-core";
-import type { SerialRepr } from "@elab/cockpit-ui-core";
+import {
+  asciiOf,
+  captureText,
+  hexDump,
+  hexDumpRows,
+  parseAnsi,
+  parseSendHistory,
+  pushSendHistory,
+  serializeSendHistory,
+  textOf,
+} from "@elab/cockpit-ui-core";
+import type { SendHistoryEntry, SerialRepr } from "@elab/cockpit-ui-core";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { SegmentedTabs } from "../primitives/SegmentedTabs";
@@ -62,6 +71,7 @@ const DIRS: Array<{ id: Dir; label: string }> = [
 ];
 
 const FORMATS: Array<{ id: SerialFormat; label: string }> = [
+  { id: "auto", label: "自动" },
   { id: "utf8", label: "文本" },
   { id: "ascii", label: "ASCII" },
   { id: "gbk", label: "GBK" },
@@ -81,90 +91,34 @@ const MAX_BYTE_BLOCKS = 300;
 /** 波形最大回看字节（超出只取最近一段，避免每次轮询都重解 1 MiB） */
 const MAX_WAVE_BYTES = 64 * 1024;
 
-/** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆 */
+/** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆（含格式与行尾） */
 const HISTORY_KEY = "elab.serial.send.history";
-const HISTORY_MAX = 50;
 /** 文件按行发送的行数上限（按行逐条发，太多行会把发送面板占住很久） */
 const MAX_FILE_LINES = 2000;
 
-function loadHistory(): string[] {
+function loadHistory(): SendHistoryEntry[] {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (raw === null) return [];
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((x): x is string => typeof x === "string").slice(-HISTORY_MAX)
-      : [];
+    return parseSendHistory(localStorage.getItem(HISTORY_KEY));
   } catch {
     return [];
   }
 }
 
-function saveHistory(items: string[]): void {
+function saveHistory(items: SendHistoryEntry[]): void {
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)));
+    localStorage.setItem(HISTORY_KEY, serializeSendHistory(items));
   } catch {
     // 隐私模式/配额满：历史只是便利，不写也不影响发送
   }
 }
 
-// ── 自定义发送组件（M1）────────────────────────────────────────
-/** 参数默认值（服务端已归一化；前端只做展示初值，不承担校验） */
-function widgetDefaults(w: SerialWidget): Record<string, string | boolean> {
-  const out: Record<string, string | boolean> = {};
-  for (const p of w.params ?? []) {
-    out[p.name] =
-      p.type === "bool"
-        ? Boolean(p.default)
-        : p.default === undefined || p.default === null
-          ? ""
-          : String(p.default);
-  }
-  return out;
-}
-
-function widgetOption(
-  o: string | { label: string; value: string },
-): { label: string; value: string } {
-  return typeof o === "string" ? { label: o, value: o } : o;
-}
-
-/** 参数的输入提示（范围/宽度由服务端 schema 给出，不在前端另立规则） */
-function widgetParamHint(p: SerialWidgetParam): string {
-  if (p.type === "int" || p.type === "float") {
-    const bits: string[] = [];
-    if (p.min !== undefined) bits.push(`≥ ${p.min}`);
-    if (p.max !== undefined) bits.push(`≤ ${p.max}`);
-    if (p.type === "int" && p.render === "hex") bits.push(`HEX ${p.width ?? 2} 位`);
-    return bits.join(" · ");
-  }
-  if (p.type === "hex") {
-    return `HEX ${p.width ?? 1} 字节${p.endian === "le" ? "（小端）" : ""}`;
-  }
-  if (p.type === "string") return `≤ ${p.max_len ?? 256} 字`;
-  if (p.type === "enum") return "下拉选择";
-  return "";
-}
-
+// ── 发送任务（定时发送 / 组件任务共用内核任务引擎）────────────────
 /** 任务是否仍在跑（轮询到终态才停）。 */
-function widgetJobActive(j: SerialWidgetRunResult | null): boolean {
+function jobActive(j: SerialWidgetRunResult | null): boolean {
   return (
     j !== null &&
     (j.state === "running" || j.state === "paused" || j.state === "cancelling")
   );
-}
-
-/** 预览字节 → HEX（服务端返回的 preview_b64 是**唯一**的发送字节） */
-function widgetHex(b64: string | undefined): string {
-  if (!b64) return "";
-  try {
-    return Array.from(b64ToBytes(b64))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join(" ")
-      .toUpperCase();
-  } catch {
-    return "";
-  }
 }
 
 export interface SerialWorkspaceProps {
@@ -243,33 +197,34 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [query, setQuery] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const [draft, setDraft] = useState("");
-  const [sendFormat, setSendFormat] = useState<SerialFormat>("utf8");
+  const [sendFormat, setSendFormat] = useState<SerialFormat>("auto");
   const [eol, setEol] = useState("crlf");
   const [notice, setNotice] = useState<string | null>(null);
   const [decoder, setDecoder] = useState("justfloat");
-  /** 发送历史（↑/↓ 调取；跨会话记忆） */
-  const [history, setHistory] = useState<string[]>(loadHistory);
+  /** 发送历史（↑/↓ 调取；跨会话记忆，含当时的格式与行尾） */
+  const [history, setHistory] = useState<SendHistoryEntry[]>(loadHistory);
   const [histIdx, setHistIdx] = useState(-1);
+  /** 服务端预览（dry_run）：自动识别的结果与待发字节 */
+  const [sendPreview, setSendPreview] = useState<SerialPreviewResult | null>(null);
+  /** 定时发送间隔（毫秒）；下限由内核校验，面板不写死 */
+  const [loopInterval, setLoopInterval] = useState("100");
   const [fileBusy, setFileBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // ── 自定义发送组件（M1）：chips + 参数 + 服务端预览 ───────────
-  const [widgets, setWidgets] = useState<SerialWidget[]>([]);
-  const [widgetWarn, setWidgetWarn] = useState<string[]>([]);
-  const [widgetFileError, setWidgetFileError] = useState<string | null>(null);
-  const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
-  const [widgetParams, setWidgetParams] = useState<Record<string, string | boolean>>({});
-  const [widgetPreview, setWidgetPreview] = useState<SerialWidgetRunResult | null>(null);
-  const [widgetErr, setWidgetErr] = useState<string | null>(null);
-  const [widgetBusy, setWidgetBusy] = useState(false);
-  const [widgetNotice, setWidgetNotice] = useState<string | null>(null);
-  /** M2：异步任务快照 + 轮询 id（run / job 返回同一形状） */
-  const [widgetJob, setWidgetJob] = useState<SerialWidgetRunResult | null>(null);
-  const [widgetJobId, setWidgetJobId] = useState("");
-  const activeWidget = useMemo(
-    () => widgets.find((w) => w.id === activeWidgetId) ?? null,
-    [widgets, activeWidgetId],
-  );
+  /** 记一条历史（连格式与行尾一起存，回填时才能"原样重发"）。 */
+  const remember = useCallback((entry: SendHistoryEntry): void => {
+    setHistory((prev) => {
+      const next = pushSendHistory(prev, entry);
+      saveHistory(next);
+      return next;
+    });
+    setHistIdx(-1);
+  }, []);
+
+  // ── 发送任务：异步任务快照 + 轮询 id（定时发送 / 组件任务同一形状）──
+  const [job, setJob] = useState<SerialWidgetRunResult | null>(null);
+  const [jobId, setJobId] = useState("");
+  const [jobNotice, setJobNotice] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<{
@@ -281,86 +236,9 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
 
   const epoch = stream.snap?.epoch ?? 0;
 
-  // ── 组件：加载 / 选中 / 参数默认值 / 150ms 防抖预览 ────────────
-  useEffect(() => {
-    let cancelled = false;
-    setWidgetNotice(null);
-    if (!project) {
-      setWidgets([]);
-      setWidgetWarn([]);
-      setWidgetFileError(null);
-      setActiveWidgetId(null);
-      return;
-    }
-    api
-      .serialWidgets(project)
-      .then((r) => {
-        if (cancelled) return;
-        setWidgets(r.widgets ?? []);
-        setWidgetWarn(r.warnings ?? []);
-        setWidgetFileError(r.error ?? null);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setWidgets([]);
-        setWidgetWarn([]);
-        setWidgetFileError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project]);
-
-  useEffect(() => {
-    if (activeWidgetId && !widgets.some((w) => w.id === activeWidgetId)) {
-      setActiveWidgetId(null);
-    }
-  }, [widgets, activeWidgetId]);
-
-  useEffect(() => {
-    if (!activeWidget) return;
-    setWidgetParams(widgetDefaults(activeWidget));
-    setWidgetPreview(null);
-    setWidgetErr(null);
-  }, [activeWidget]);
-
-  useEffect(() => {
-    if (!project || !activeWidget) {
-      setWidgetPreview(null);
-      setWidgetErr(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      api
-        .serialWidgetRun({
-          project,
-          id: activeWidget.id,
-          params: widgetParams,
-          dryRun: true,
-        })
-        .then((r) => {
-          if (cancelled) return;
-          if (!r.ok) {
-            setWidgetErr(r.error ?? "预览失败");
-            setWidgetPreview(null);
-            return;
-          }
-          setWidgetErr(null);
-          setWidgetPreview(r);
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          setWidgetErr(e instanceof Error ? e.message : String(e));
-        });
-    }, 150);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [project, activeWidget, widgetParams]);
-
-  const widgetJobRunning = widgetJobActive(widgetJob);
+  const jobRunning = jobActive(job);
+  /** 当前跑的是「发送框定时发送」（source=raw），而不是组件任务 */
+  const rawLoopActive = jobRunning && job?.source === "raw";
 
   /** 刷新页面/换工程后找回仍在跑的任务（run 只等 2s，长任务只能靠轮询）。 */
   useEffect(() => {
@@ -369,10 +247,9 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     api
       .serialWidgetJob()
       .then((j) => {
-        if (cancelled || !widgetJobActive(j) || !j.job_id) return;
-        setWidgetJob(j);
-        setWidgetJobId(j.job_id);
-        setWidgetBusy(true);
+        if (cancelled || !jobActive(j) || !j.job_id) return;
+        setJob(j);
+        setJobId(j.job_id);
       })
       .catch(() => {
         // 404 = 没有在跑的任务，是常态；不打扰用户
@@ -384,29 +261,27 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
 
   /** 任务轮询：400ms 一次，直到终态（不新增 SSE topic）。 */
   useEffect(() => {
-    if (!widgetJobId) return;
+    if (!jobId) return;
     let cancelled = false;
     let timer = 0;
     const tick = async (): Promise<void> => {
       try {
-        const j = await api.serialWidgetJob(widgetJobId);
+        const j = await api.serialWidgetJob(jobId);
         if (cancelled) return;
-        setWidgetJob(j);
-        if (widgetJobActive(j)) {
+        setJob(j);
+        if (jobActive(j)) {
           timer = window.setTimeout(() => void tick(), 400);
           return;
         }
-        setWidgetBusy(false);
-        setWidgetNotice(
+        setJobNotice(
           j.ok
-            ? `✓ 组件任务结束：${j.rounds ?? 0} 轮 · ${j.total_bytes ?? 0} B` +
+            ? `✓ 任务结束：${j.rounds ?? 0} 轮 · ${j.total_bytes ?? 0} B` +
               ((j.skipped ?? 0) > 0 ? ` · 跳过 ${j.skipped} 拍` : "")
-            : `✗ 组件任务失败：${j.error ?? "未知原因"}`,
+            : `✗ 任务失败：${j.error ?? "未知原因"}`,
         );
       } catch (e) {
         if (cancelled) return;
-        setWidgetBusy(false);
-        setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+        setJobNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
       }
     };
     void tick();
@@ -414,98 +289,54 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [widgetJobId]);
+  }, [jobId]);
 
-  const doWidgetRun = useCallback(
-    async (repeat: boolean) => {
-      if (!project || !activeWidget || running || widgetBusy || widgetJobRunning) return;
-      if (
-        activeWidget.confirm &&
-        !window.confirm(`发送组件「${activeWidget.label}」？该组件被标记为需要确认。`)
-      ) {
+  /** 定时发送：发到 `/api/serial/loop`（内核瞬态任务，不落盘）。 */
+  const startLoop = useCallback(async () => {
+    if (!project || !draft.trim() || running) return;
+    const ms = Number(loopInterval);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      setNotice("✗ 定时发送间隔必须是正数（毫秒）");
+      return;
+    }
+    setNotice(null);
+    try {
+      const r = await api.serialLoop({
+        project,
+        data: draft,
+        format: sendFormat,
+        eol,
+        interval_ms: Math.round(ms),
+        count: 0,
+      });
+      if (r.job_id) setJobId(r.job_id);
+      setJob(r);
+      if (!r.ok) {
+        setNotice(`✗ ${r.error ?? "定时发送被拒绝"}`);
         return;
       }
-      setWidgetNotice(null);
-      setWidgetBusy(true);
-      try {
-        const r = await api.serialWidgetRun({
-          project,
-          id: activeWidget.id,
-          params: widgetParams,
-          repeat,
-          confirm: activeWidget.confirm === true,
-        });
-        setWidgetJob(r);
-        if (r.job_id) setWidgetJobId(r.job_id);
-        if (widgetJobActive(r)) {
-          setWidgetNotice(
-            `✓ 已启动${r.repeat ? "周期" : ""}任务 —— 波形区会持续刷新，可暂停/停止`,
-          );
-          return;
-        }
-        setWidgetBusy(false);
-        if (!r.ok) {
-          setWidgetNotice(`✗ 组件发送失败：${r.error ?? "未知原因"}`);
-          return;
-        }
-        setWidgetNotice(
-          `✓ 组件「${activeWidget.label}」已发送 ${r.total_bytes ?? 0} B` +
-            (r.via === "monitor" ? "（经监视会话，回显见实时流）" : ""),
-        );
-      } catch (e) {
-        setWidgetBusy(false);
-        setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
-      }
-    },
-    [project, activeWidget, running, widgetBusy, widgetJobRunning, widgetParams],
-  );
+      setNotice(`⏵ 定时发送中：每 ${Math.round(ms)}ms（停止后才可手发）`);
+      remember({
+        text: draft,
+        format: sendFormat,
+        eol: eol as SendHistoryEntry["eol"],
+        at: Date.now(),
+      });
+    } catch (e) {
+      setNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, draft, running, loopInterval, sendFormat, eol, remember]);
 
-  const doWidgetCancel = useCallback(async () => {
-    const id = widgetJob?.job_id || widgetJobId;
+  const cancelJob = useCallback(async () => {
+    const id = job?.job_id || jobId;
     if (!id) return;
     try {
       await api.serialWidgetCancel(id);
-      setWidgetJob(await api.serialWidgetJob(id));
+      setJob(await api.serialWidgetJob(id));
     } catch (e) {
-      setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      setJobNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [widgetJob, widgetJobId]);
-
-  const doWidgetPause = useCallback(async () => {
-    const id = widgetJob?.job_id || widgetJobId;
-    if (!id) return;
-    const paused = widgetJob?.state !== "paused";
-    try {
-      await api.serialWidgetPause(id, paused);
-      setWidgetJob(await api.serialWidgetJob(id));
-    } catch (e) {
-      setWidgetNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [widgetJob, widgetJobId]);
-
-  const widgetPreviewHex = useMemo(
-    () => widgetHex(widgetPreview?.preview_b64),
-    [widgetPreview],
-  );
-
-  /** 任务进度：轮次 / 跳过节拍 / 累计字节（周期任务的主要可观测面）。 */
-  const widgetProgress = useMemo(() => {
-    const j = widgetJob;
-    if (!j || j.state === undefined) return "";
-    const rounds = j.rounds ?? 0;
-    const skipped = j.skipped ?? 0;
-    const bytes = j.total_bytes ?? 0;
-    if (widgetJobActive(j)) {
-      const label = j.state === "paused" ? "已暂停" : j.state === "cancelling" ? "停止中…" : "运行中";
-      return `${label} · 第 ${rounds} 轮${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ""} · ${bytes} B`;
-    }
-    if (j.state === "done") {
-      return `完成 · ${rounds} 轮 · ${bytes} B${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ""}`;
-    }
-    if (j.state === "cancelled") return `已停止 · ${bytes} B`;
-    if (j.state === "failed") return `失败${j.error ? ` · ${j.error}` : ""}`;
-    return "";
-  }, [widgetJob]);
+  }, [job, jobId]);
 
   const decoders = caps?.meta?.serial?.decoders ?? [
     { id: "justfloat", label: "JustFloat", channels: "auto" as const },
@@ -757,15 +588,20 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   }, [filtered, stream.snap?.port]);
 
-  const remember = useCallback((text: string): void => {
-    setHistory((prev) => {
-      if (prev.length > 0 && prev[prev.length - 1] === text) return prev;
-      const next = [...prev, text].slice(-HISTORY_MAX);
-      saveHistory(next);
-      return next;
-    });
-    setHistIdx(-1);
-  }, []);
+  /** 服务端预览：150ms 防抖。前端不编码 —— 否则"看的字节"与"发的字节"会漂移。 */
+  const previewSend = stream.preview;
+  useEffect(() => {
+    if (!draft.trim()) {
+      setSendPreview(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      previewSend(draft, { format: sendFormat, eol })
+        .then(setSendPreview)
+        .catch(() => setSendPreview(null));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [draft, sendFormat, eol, previewSend]);
 
   const doSend = useCallback(
     async (e: FormEvent) => {
@@ -780,9 +616,15 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
         }
         setNotice(
           `✓ 已发送 ${r.written} B → ${r.port}@${r.baud}` +
+            (r.format ? `（识别为 ${r.format.toUpperCase()}）` : "") +
             (r.via === "monitor" ? "（经监视会话，回显见实时流）" : ""),
         );
-        remember(draft);
+        remember({
+          text: draft,
+          format: sendFormat,
+          eol: eol as SendHistoryEntry["eol"],
+          at: Date.now(),
+        });
         setDraft("");
       } catch (err) {
         setNotice(`✗ ${err instanceof Error ? err.message : String(err)}`);
@@ -801,7 +643,9 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       if (key === "ArrowUp") {
         const next = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1);
         setHistIdx(next);
-        setDraft(history[next]);
+        setDraft(history[next].text);
+        setSendFormat(history[next].format);
+        setEol(history[next].eol);
         return;
       }
       if (histIdx === -1) return;
@@ -811,7 +655,9 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
         setDraft("");
       } else {
         setHistIdx(next);
-        setDraft(history[next]);
+        setDraft(history[next].text);
+        setSendFormat(history[next].format);
+        setEol(history[next].eol);
       }
     },
     [history, histIdx],
@@ -1213,229 +1059,141 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
         ) : null}
       </div>
 
-      {/* ── 自定义发送组件（M1）：chips + 参数 + 服务端预览 ── */}
-      {project && (widgets.length > 0 || widgetWarn.length > 0 || widgetFileError) ? (
-        <div className={s.widgetBar}>
-          <span className={s.widgetTitle}>组件</span>
-          {widgets.map((w) => (
-            <button
-              key={w.id}
-              type="button"
-              className={activeWidgetId === w.id ? s.widgetChipOn : s.widgetChip}
-              title={`${w.label} · ${w.steps.length} 步${w.group ? ` · ${w.group}` : ""}`}
-              onClick={() =>
-                setActiveWidgetId(activeWidgetId === w.id ? null : w.id)
-              }
-            >
-              {w.label}
-            </button>
-          ))}
-          {widgetFileError ? (
-            <span className={s.widgetErr}>✗ {widgetFileError}</span>
-          ) : null}
-          {widgetWarn.length > 0 ? (
-            <span className={s.widgetErr} title={widgetWarn.join("\n")}>
-              ⚠ {widgetWarn.length} 处配置问题
-            </span>
-          ) : null}
-          <span className={s.spacer} />
-        </div>
-      ) : null}
-
-      {activeWidget ? (
-        <div className={s.widgetPanel}>
-          {(activeWidget.params ?? []).length === 0 ? (
-            <span className={s.meta}>无参数</span>
-          ) : (
-            (activeWidget.params ?? []).map((p) => (
-              <label key={p.name} className={s.widgetField}>
-                <span>{p.label ?? p.name}</span>
-                {p.type === "bool" ? (
-                  <Switch
-                    id={`widget-${activeWidget.id}-${p.name}`}
-                    checked={Boolean(widgetParams[p.name])}
-                    onChange={(v) =>
-                      setWidgetParams((prev) => ({ ...prev, [p.name]: v }))
-                    }
-                  />
-                ) : p.type === "enum" ? (
-                  <select
-                    className={s.select}
-                    value={String(widgetParams[p.name] ?? "")}
-                    onChange={(e) =>
-                      setWidgetParams((prev) => ({
-                        ...prev,
-                        [p.name]: e.currentTarget.value,
-                      }))
-                    }
-                  >
-                    {(p.options ?? []).map((o) => {
-                      const x = widgetOption(o);
-                      return (
-                        <option key={x.value} value={x.value}>
-                          {x.label}
-                        </option>
-                      );
-                    })}
-                  </select>
-                ) : (
-                  <Input
-                    mono
-                    size="sm"
-                    className={s.widgetInput}
-                    value={String(widgetParams[p.name] ?? "")}
-                    placeholder={widgetParamHint(p)}
-                    onChange={(e) =>
-                      setWidgetParams((prev) => ({
-                        ...prev,
-                        [p.name]: e.currentTarget.value,
-                      }))
-                    }
-                  />
-                )}
-              </label>
-            ))
-          )}
-          <span className={s.widgetPreview} title={widgetErr ?? widgetPreviewHex}>
-            {widgetErr
-              ? `✗ ${widgetErr}`
-              : widgetPreview
-                ? `预览 ${widgetPreview.bytes ?? 0} B · ${widgetPreviewHex}`
-                : "预览中…"}
-          </span>
-          {widgetProgress ? (
-            <span className={s.widgetPreview} title={widgetProgress}>
-              {widgetProgress}
-            </span>
-          ) : null}
-          <span className={s.spacer} />
-          {activeWidget.repeat ? (
-            <Button
-              size="sm"
-              variant="outline"
-              type="button"
-              title={`周期发送：每 ${activeWidget.repeat.interval_ms} ms 一轮${
-                activeWidget.repeat.count
-                  ? `，共 ${activeWidget.repeat.count} 轮`
-                  : "，直到手动停止"
-              }`}
-              disabled={running || widgetBusy || !!widgetErr || widgetJobRunning}
-              onClick={() => void doWidgetRun(true)}
-            >
-              ↻ 周期
-            </Button>
-          ) : null}
-          {widgetJobRunning ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                type="button"
-                onClick={() => void doWidgetPause()}
-              >
-                {widgetJob?.state === "paused" ? "▶ 继续任务" : "❚❚ 暂停任务"}
-              </Button>
-              <Button
-                size="sm"
-                variant="danger"
-                type="button"
-                onClick={() => void doWidgetCancel()}
-              >
-                ■ 停止任务
-              </Button>
-            </>
-          ) : null}
-          <Button
-            size="sm"
-            variant="primary"
-            type="button"
-            disabled={running || widgetBusy || !!widgetErr || widgetJobRunning}
-            onClick={() => void doWidgetRun(false)}
-          >
-            {widgetBusy ? "执行中…" : "▶ 发送"}
-          </Button>
-        </div>
-      ) : null}
-
-      {widgetNotice ? (
+      {jobNotice ? (
         <div
-          className={widgetNotice.startsWith("✗") ? s.warn : s.info}
+          className={jobNotice.startsWith("✗") ? s.warn : s.info}
           role="status"
         >
-          {widgetNotice}
+          {jobNotice}
         </div>
       ) : null}
 
       {/* ── 发送面板：与监视会话同一个口（写穿，不重开）── */}
       <form className={s.write} onSubmit={(e) => void doSend(e)}>
-        <IconTerminal className={s.writeIcon} />
-        <select
-          className={s.select}
-          value={sendFormat}
-          onChange={(e) => setSendFormat(e.currentTarget.value as SerialFormat)}
-          aria-label="发送格式"
-          title="发送表示：HEX 模式按十六进制解析，且不追加行尾"
-        >
-          {FORMATS.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.label}
-            </option>
-          ))}
-        </select>
-        <select
-          className={s.select}
-          value={eol}
-          onChange={(e) => setEol(e.currentTarget.value)}
-          aria-label="行结束符"
-          disabled={sendFormat === "hex"}
-          title={sendFormat === "hex" ? "HEX 模式不追加行尾（二进制帧多一个字节就是错）" : "追加的行结束符"}
-        >
-          {EOLS.map((x) => (
-            <option key={x.id} value={x.id}>
-              {x.label}
-            </option>
-          ))}
-        </select>
-        <Input
-          mono
-          placeholder={
-            running
-              ? "有 run 在跑：串口与 run 互斥（约束 N5），等它结束"
-              : sendFormat === "hex"
-                ? "输入十六进制，如 01 A0 FF"
-                : "输入一行并按回车发送到设备"
-          }
-          aria-label="串口发送内容"
-          value={draft}
-          disabled={running}
-          onKeyDown={onDraftKey}
-          onChange={(e) => {
-            setDraft(e.currentTarget.value);
-            setHistIdx(-1);
-          }}
-        />
-        <Button size="sm" variant="primary" type="submit" disabled={running || !draft.trim()}>
-          发送
-        </Button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".txt,.csv,.log,.json,.hex,text/plain"
-          onChange={(e) => void doSendFile(e)}
-          style={{ display: "none" }}
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          type="button"
-          disabled={running || fileBusy}
-          onClick={() => fileRef.current?.click()}
-          title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
-        >
-          {fileBusy ? "发送中…" : "文件"}
-        </Button>
+        <div className={s.writeMain}>
+          <IconTerminal className={s.writeIcon} />
+          <Input
+            mono
+            className={s.writeInput}
+            placeholder={
+              running
+                ? "有 run 在跑：串口与 run 互斥（约束 N5），等它结束"
+                : sendFormat === "hex"
+                  ? "输入十六进制，如 01 A0 FF"
+                  : sendFormat === "auto"
+                    ? "输入任意内容：自动识别 HEX/文本（↑/↓ 调取历史，含格式）"
+                    : "输入一行并按回车发送到设备"
+            }
+            aria-label="串口发送内容"
+            value={draft}
+            disabled={running}
+            onKeyDown={onDraftKey}
+            onChange={(e) => {
+              setDraft(e.currentTarget.value);
+              setHistIdx(-1);
+            }}
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            type="submit"
+            disabled={running || jobRunning || !draft.trim()}
+          >
+            发送
+          </Button>
+        </div>
+        <div className={s.writeOpts}>
+          <select
+            className={s.select}
+            value={sendFormat}
+            onChange={(e) => setSendFormat(e.currentTarget.value as SerialFormat)}
+            aria-label="发送格式"
+            title="发送表示：HEX 模式按十六进制解析，且不追加行尾"
+          >
+            {FORMATS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className={s.select}
+            value={eol}
+            onChange={(e) => setEol(e.currentTarget.value)}
+            aria-label="行结束符"
+            disabled={sendFormat === "hex" || (sendFormat === "auto" && sendPreview?.format === "hex")}
+            title={
+              sendFormat === "hex" || (sendFormat === "auto" && sendPreview?.format === "hex")
+                ? "HEX 模式不追加行尾（二进制帧多一个字节就是错）"
+                : "追加的行结束符"
+            }
+          >
+            {EOLS.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            className={s.select}
+            style={{ width: 72, minWidth: 72 }}
+            value={loopInterval}
+            onChange={(e) => setLoopInterval(e.currentTarget.value)}
+            aria-label="定时发送间隔"
+            title="定时发送间隔（毫秒，≥20；由内核校验）"
+            min={20}
+            step={10}
+            disabled={rawLoopActive || running}
+          />
+          <span style={{ fontSize: 12, color: "var(--elab-fg-dimmed)" }}>ms</span>
+          <Button
+            size="sm"
+            variant="outline"
+            type="button"
+            disabled={running || (!rawLoopActive && !draft.trim())}
+            onClick={() => void (rawLoopActive ? cancelJob() : startLoop())}
+            title="按固定间隔重复发送输入框内容（复用内核任务引擎）"
+          >
+            {rawLoopActive ? "■ 停止定时" : "⏵ 定时"}
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".txt,.csv,.log,.json,.hex,text/plain"
+            onChange={(e) => void doSendFile(e)}
+            style={{ display: "none" }}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            type="button"
+            disabled={running || fileBusy}
+            onClick={() => fileRef.current?.click()}
+            title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
+          >
+            {fileBusy ? "发送中…" : "文件"}
+          </Button>
+        </div>
       </form>
 
+      {sendPreview ? (
+        sendPreview.ok ? (
+          <div className={s.info} role="status">
+            {`将发送 ${sendPreview.bytes} B · ${sendPreview.preview_hex || "（空）"}` +
+              (sendPreview.format
+                ? ` · 识别为 ${FORMATS.find((f) => f.id === sendPreview.format)?.label ?? sendPreview.format}`
+                : "") +
+              (sendPreview.format !== "hex" && sendPreview.eol_key
+                ? ` · 行尾 ${sendPreview.eol_key}`
+                : "")}
+          </div>
+        ) : (
+          <div className={s.warn} role="status">
+            {sendPreview.error ?? "预览失败"}
+          </div>
+        )
+      ) : null}
       {notice ? (
         <div className={notice.startsWith("✗") ? s.warn : s.info} role="status">
           {notice}

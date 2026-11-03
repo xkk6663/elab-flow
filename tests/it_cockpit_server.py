@@ -33,9 +33,9 @@ sys.path.insert(0, str(ROOT / "services"))
 from cockpit import server as srv_mod          # noqa: E402
 from elab.config import Config                 # noqa: E402
 
-PROJECT = "at32_test"
+PROJECT = "at32f421g8u7"
 #: 第二个工程，用来说明"跨芯片也能预览"（它的 monitor 判据是真的、非空）
-PROJECT_SERIAL = "at32f421g8u7"
+PROJECT_SERIAL = "STM32F103C8T6"
 
 
 def _free_port() -> int:
@@ -222,11 +222,11 @@ class CockpitIntegration(unittest.TestCase):
         names = {p["name"] for p in d["projects"]}
         self.assertIn(PROJECT, names)
         p = next(x for x in d["projects"] if x["name"] == PROJECT)
-        # 逐字段核对来源 = projects/at32_test.yaml
+        # 逐字段核对来源 = projects/at32f421g8u7.yaml
         self.assertEqual(p["archetype"], "B")
         self.assertEqual(p["chip"], "artery/at32f421g8")
-        self.assertEqual(p["project_name"], "TEST")
-        self.assertTrue(p["root"].endswith("examples/AT32_TEST"))
+        self.assertEqual(p["project_name"], "AT32F421G8U7")
+        self.assertTrue(p["root"].endswith("examples/AT32F421G8U7"))
         self.assertEqual(p["chip_info"]["core"]["cpu"], "cortex-m4")
         # 派生状态位（非新元数据）
         self.assertIn("built", p["derived"])
@@ -715,6 +715,133 @@ class CockpitIntegration(unittest.TestCase):
             finally:
                 cc.close()
 
+    # ── 通用发送：服务端预览（dry_run）+ 定时发送（/api/serial/loop）────
+    def test_serial_dry_run_reports_resolved_bytes_without_touching_port(self):
+        """预览与实发共用 resolve_payload：界面展示的字节就是会发出去的字节。
+
+        预览必须在 `_serial_blocker` **之前**返回：闭环跑着时用户仍可编辑并看到
+        「会发什么」，只是暂时不能发。
+        """
+        with unittest.mock.patch.object(
+                srv_mod, "_serial_blocker",
+                return_value={"run": "r1", "alive": True, "steps": ["monitor"]}), \
+                unittest.mock.patch.object(
+                    srv_mod.serialterm_mod, "roundtrip") as rt, \
+                unittest.mock.patch.object(
+                    srv_mod.serialmon_mod, "write_through") as wt:
+            cc, r = self.client.post("/api/serial", {
+                "project": PROJECT, "data": "0A FF", "format": "auto",
+                "dry_run": True,
+            })
+            try:
+                self.assertEqual(r.status, 200)
+                got = json.loads(r.read().decode())
+            finally:
+                cc.close()
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["format"], "hex", "含分隔符的全十六进制应识别为 HEX")
+        self.assertEqual(got["eol_key"], "none", "HEX 不追加行尾")
+        self.assertEqual(got["preview_hex"], "0A FF")
+        self.assertEqual(got["bytes"], 2)
+        rt.assert_not_called()
+        wt.assert_not_called()
+
+    def test_serial_dry_run_bad_format_is_200_with_error(self):
+        """预览期错误也是 200 + ok:false：输入还在编辑中，不该当成请求非法。"""
+        cc, r = self.client.post("/api/serial", {
+            "project": PROJECT, "data": "hi", "format": "nope", "dry_run": True,
+        })
+        try:
+            self.assertEqual(r.status, 200)
+            got = json.loads(r.read().decode())
+        finally:
+            cc.close()
+        self.assertFalse(got["ok"])
+        self.assertIn("auto", got["error"])
+
+    def test_serial_loop_missing_data_is_400(self):
+        cc, r = self.client.post("/api/serial/loop", {"project": PROJECT})
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            cc.close()
+
+    def test_serial_loop_blocked_by_running_closure_is_409(self):
+        """定时任务同样要让路于闭环（N5）：两条发送入口共用一套互斥语义。"""
+        fake = {"run": "r2", "alive": True, "steps": ["monitor"]}
+        with unittest.mock.patch.object(
+                srv_mod, "_serial_blocker", return_value=fake):
+            cc, r = self.client.post("/api/serial/loop", {
+                "project": PROJECT, "data": "hi", "interval_ms": 100,
+            })
+            try:
+                self.assertEqual(r.status, 409)
+            finally:
+                cc.close()
+
+    def test_serial_loop_interval_below_min_is_400(self):
+        cc, r = self.client.post("/api/serial/loop", {
+            "project": PROJECT, "data": "hi", "interval_ms": 1,
+        })
+        try:
+            self.assertEqual(r.status, 400)
+        finally:
+            cc.close()
+
+    def test_serial_loop_dry_run_skips_blocker_and_touches_no_port(self):
+        with unittest.mock.patch.object(
+                srv_mod, "_serial_blocker") as blocker, \
+                unittest.mock.patch.object(
+                    srv_mod.serialwidgets_mod, "run_raw",
+                    return_value={"ok": True, "dry_run": True, "bytes": 4,
+                                  "format": "utf8", "eol_key": "crlf"}) as mk:
+            cc, r = self.client.post("/api/serial/loop", {
+                "project": PROJECT, "data": "hi", "interval_ms": 100,
+                "dry_run": True,
+            })
+            try:
+                self.assertEqual(r.status, 200)
+            finally:
+                cc.close()
+        blocker.assert_not_called()
+        self.assertTrue(mk.call_args.kwargs.get("dry_run"))
+        self.assertEqual(mk.call_args.kwargs.get("interval_ms"), 100)
+
+    def test_serial_loop_passes_interval_and_count(self):
+        payload = {"ok": True, "job_id": "jid", "state": "done",
+                   "source": "raw", "label": "发送框", "rounds": 2,
+                   "total_bytes": 8}
+        with unittest.mock.patch.object(
+                srv_mod.serialwidgets_mod, "run_raw",
+                return_value=payload) as mk:
+            cc, r = self.client.post("/api/serial/loop", {
+                "project": PROJECT, "data": "hi", "format": "auto",
+                "interval_ms": 100, "count": 2,
+            })
+            try:
+                self.assertEqual(r.status, 200)
+                got = json.loads(r.read().decode())
+            finally:
+                cc.close()
+        self.assertEqual(got["source"], "raw")
+        self.assertEqual(mk.call_args.kwargs.get("interval_ms"), 100)
+        self.assertEqual(mk.call_args.kwargs.get("count"), 2)
+        self.assertEqual(mk.call_args.kwargs.get("format"), "auto")
+
+    def test_serial_loop_busy_is_409(self):
+        """单任务锁被另一条周期任务占着 → 409，而不是排队或偷偷并行。"""
+        with unittest.mock.patch.object(
+                srv_mod.serialwidgets_mod, "run_raw",
+                return_value={"ok": False, "stage": "busy",
+                              "error": "已有周期任务在跑"}):
+            cc, r = self.client.post("/api/serial/loop", {
+                "project": PROJECT, "data": "hi", "interval_ms": 100,
+            })
+            try:
+                self.assertEqual(r.status, 409)
+            finally:
+                cc.close()
+
     # ── 手写通道的落盘留档（M3-b2）──────────────────────────────
     def test_serial_console_info_in_capabilities(self):
         """留档的位置与条数必须由服务端说 —— 界面猜不出来（本地缓冲重载即失）。"""
@@ -879,14 +1006,14 @@ class CockpitIntegration(unittest.TestCase):
         cards_before = sorted(x["name"] for x in
                               self.client.get_json("/api/projects")["projects"])
         cc, resp = self.client.post("/api/adapt",
-                                    {"action": "probe", "path": str(ROOT / "examples" / "AT32_TEST")})
+                                    {"action": "probe", "path": str(ROOT / "examples" / "AT32F421G8U7")})
         try:
             self.assertEqual(resp.status, 200)
             d = json.loads(resp.read().decode())
         finally:
             cc.close()
         self.assertEqual(d["tier"], "T1")
-        self.assertEqual(d["name"], "at32_test", "目录名推导的默认工程名")
+        self.assertEqual(d["name"], "at32f421g8u7", "目录名推导的默认工程名")
         self.assertTrue(d["probe"]["chip_ref"], "芯片必须匹配到 chips/*.yaml")
         self.assertEqual(d["next"]["steps"], ["doctor_deep", "build"],
                          "三绿灯由现有 run 通道跑，这里只给引导")
@@ -906,11 +1033,21 @@ class CockpitIntegration(unittest.TestCase):
             cc.close()
 
     def test_adapt_write_is_rejected_for_hand_edited(self):
-        """★ A7 人工接管保护在真实文件上的回归：projects/at32_test.yaml 是手写的
-        （无 generated-by 标记）→ 拒覆盖。这一例同时证明了 probe/write 与
-        CLI `elab adapt` 共用同一份实现。"""
+        """★ A7 人工接管保护在真实文件上的回归：人工写出的 yaml（无 generated-by
+        标记）→ 拒覆盖。这一例同时证明了 probe/write 与 CLI `elab adapt`
+        共用同一份实现。"""
+        name = "it_adapt_hand"
+        out = ROOT / "projects" / f"{name}.yaml"
+        self.addCleanup(lambda: out.unlink(missing_ok=True))
+        out.write_text(
+            f"# 人工接管的接入文件（无 generated-by 标记）\n"
+            f"name: {name}\n"
+            f"root: ${{ELAB_ROOT}}/examples/AT32F421G8U7\n",
+            encoding="utf-8",
+        )
         cc, resp = self.client.post("/api/adapt",
-                                    {"action": "write", "path": str(ROOT / "examples" / "AT32_TEST")})
+                                    {"action": "write", "name": name,
+                                     "path": str(ROOT / "examples" / "AT32F421G8U7")})
         try:
             self.assertEqual(resp.status, 200)
             d = json.loads(resp.read().decode())
@@ -933,7 +1070,7 @@ class CockpitIntegration(unittest.TestCase):
         self.addCleanup(lambda: out.unlink(missing_ok=True))
         cc, resp = self.client.post(
             "/api/adapt", {"action": "write",
-                           "path": str(ROOT / "examples" / "AT32_TEST"), "name": name})
+                           "path": str(ROOT / "examples" / "AT32F421G8U7"), "name": name})
         try:
             self.assertEqual(resp.status, 200)
             d = json.loads(resp.read().decode())
@@ -948,9 +1085,9 @@ class CockpitIntegration(unittest.TestCase):
 
     def test_adapt_rejects_bad_input(self):
         """三类入口校验：相对路径 / 不存在的目录 / 未知 action —— 全部 400。"""
-        for body in ({"action": "probe", "path": "examples/AT32_TEST"},
+        for body in ({"action": "probe", "path": "examples/AT32F421G8U7"},
                      {"action": "probe", "path": "C:/does/not/exist-elab-it"},
-                     {"action": "teleport", "path": str(ROOT / "examples" / "AT32_TEST")},
+                     {"action": "teleport", "path": str(ROOT / "examples" / "AT32F421G8U7")},
                      {"action": "probe"}):
             with self.subTest(body=body):
                 cc, resp = self.client.post("/api/adapt", body)

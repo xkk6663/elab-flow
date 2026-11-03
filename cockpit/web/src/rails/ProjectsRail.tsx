@@ -23,6 +23,8 @@ export interface ProjectsRailProps {
   loading: boolean;
   /** 适配写入成功后由 App 收尾：刷新目录 + 选中新工程（M5.6） */
   onAdapted: (name: string) => void;
+  /** 工程改名 / 移除成功后由 App 收尾：刷新目录并重新选中 */
+  onManaged: (res: { action: "rename" | "remove"; name: string; new_name?: string }) => void;
 }
 
 /**
@@ -41,11 +43,82 @@ export function ProjectsRail({
   locked,
   loading,
   onAdapted,
+  onManaged,
 }: ProjectsRailProps) {
   // 串口能力来自 /api/capabilities（后端能力协商结果），不是前端猜的
   const serialOk = caps?.serial.available ?? false;
   // boot 子工程分组展开状态（默认展开——首次见到的用户仍能"看见"归属关系）
   const [bootOpen, setBootOpen] = useState<Record<string, boolean>>({});
+  // 工程管理菜单（同一时刻只开一个）：重命名 / 重新探测 / 移除
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [busyMan, setBusyMan] = useState(false);
+  const [manErr, setManErr] = useState("");
+  const [manNote, setManNote] = useState("");
+
+  async function doRename(name: string) {
+    const next = renameValue.trim();
+    if (!next || next === name) {
+      setMenuFor(null);
+      return;
+    }
+    setBusyMan(true);
+    setManErr("");
+    setManNote("");
+    try {
+      const r = await api.projectAdmin({ action: "rename", name, new_name: next });
+      setMenuFor(null);
+      onManaged({ action: "rename", name, new_name: r.name });
+    } catch (e) {
+      setManErr(errmsg(e));
+    } finally {
+      setBusyMan(false);
+    }
+  }
+
+  async function doRemove(name: string) {
+    const ok = window.confirm(
+      `移除工程 ${name}？\n\n只会删除 projects/${name}.yaml（自动保留 .yaml.bak），` +
+        "业务工程一个字节都不会改；需要恢复时把 .bak 改回 .yaml 即可。",
+    );
+    if (!ok) return;
+    setBusyMan(true);
+    setManErr("");
+    setManNote("");
+    try {
+      const r = await api.projectAdmin({ action: "remove", name });
+      setMenuFor(null);
+      onManaged({ action: "remove", name: r.name });
+    } catch (e) {
+      setManErr(errmsg(e));
+    } finally {
+      setBusyMan(false);
+    }
+  }
+
+  /** 重新探测 = 只读校验：工程文件有没有变（identical / drift / missing）。 */
+  async function doCheck(name: string, root: string) {
+    setBusyMan(true);
+    setManErr("");
+    setManNote("");
+    try {
+      const r = await api.adapt({ action: "check", path: root, name });
+      const st = r.result?.status ?? "";
+      setManNote(
+        st === "identical"
+          ? "✓ 接入文件与工程当前状态一致（no-op）"
+          : st === "drift"
+            ? "⚠ 工程已变更（配置漂移）：建议重新适配写入，或手工核对"
+            : st === "missing"
+              ? "尚未适配（接入文件不存在）"
+              : `检查结果：${st || "未知"}`,
+      );
+    } catch (e) {
+      setManErr(errmsg(e));
+    } finally {
+      setBusyMan(false);
+    }
+  }
 
   /** 单张工程卡。bootChild=true 时渲染为宿主卡的正下方缩进形态（C1 归属语义）。 */
   const projectCard = (p: ProjectCard, bootChild = false) => {
@@ -53,6 +126,7 @@ export function ProjectsRail({
     const blocked = (Object.keys(p.steps) as StepId[]).filter((k) => !p.steps[k].ok);
     const stamp = p.ota?.boot_stamp ?? null;
     return (
+      <div className={s.cardWrap} key={p.name}>
       <button
         type="button"
         className={[s.card, isSel ? s.sel : "", bootChild ? s.cardBoot : ""]
@@ -113,6 +187,74 @@ export function ProjectsRail({
           </div>
         ) : null}
       </button>
+
+      {/* 「⋯」工程管理：重命名 / 重新探测（只读）/ 移除接入文件 */}
+      {!bootChild ? (
+        <button
+          type="button"
+          className={[s.moreBtn, menuFor === p.name ? s.moreBtnOn : ""]
+            .filter(Boolean)
+            .join(" ")}
+          aria-label={`管理工程 ${p.name}`}
+          title="重命名 / 重新探测 / 移除"
+          onClick={() => {
+            const next = menuFor === p.name ? null : p.name;
+            setMenuFor(next);
+            setRenameValue(p.name);
+            setManErr("");
+            setManNote("");
+          }}
+        >
+          ⋯
+        </button>
+      ) : null}
+
+      {menuFor === p.name ? (
+        <div className={s.menu} role="menu" aria-label={`工程 ${p.name} 管理`}>
+          <div className={s.menuTitle}>
+            <span className={s.menuName}>{p.name}</span>
+            <span className={s.menuRoot} title={p.root}>{p.root}</span>
+          </div>
+          <label className={s.menuRename}>
+            <span>重命名</span>
+            <input
+              className={s.menuInput}
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void doRename(p.name);
+                if (e.key === "Escape") setMenuFor(null);
+              }}
+              aria-label="新工程名"
+              spellCheck={false}
+            />
+          </label>
+          <div className={s.menuRow}>
+            <Button variant="toolbar" disabled={busyMan} onClick={() => void doRename(p.name)}>
+              改名
+            </Button>
+            <Button
+              variant="toolbar"
+              disabled={busyMan}
+              title="只读复探测：工程变更后接入文件是否已漂移"
+              onClick={() => void doCheck(p.name, p.root)}
+            >
+              重新探测
+            </Button>
+            <Button
+              variant="toolbar"
+              disabled={busyMan}
+              title="移除 projects/<name>.yaml（保留 .bak；业务工程不动）"
+              onClick={() => void doRemove(p.name)}
+            >
+              移除
+            </Button>
+          </div>
+          {manErr ? <div className={s.adaptErr}>{manErr}</div> : null}
+          {manNote ? <div className={s.adaptNote}>{manNote}</div> : null}
+        </div>
+      ) : null}
+      </div>
     );
   };
 
@@ -287,11 +429,40 @@ function AdaptPanel({
   locked: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [path, setPath] = useState("");
+  // 记住上次适配的工程路径：换工程/重导时少敲一次长路径（只存本地，不上传）
+  const [path, setPath] = useState(() => {
+    try {
+      return localStorage.getItem("elab.adapt.path") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [name, setName] = useState("");
   const [busy, setBusy] = useState<"probe" | "write" | null>(null);
+  const [picking, setPicking] = useState(false);
   const [res, setRes] = useState<AdaptResponse | null>(null);
   const [err, setErr] = useState("");
+
+  /** 请同机内核代开系统原生「选择文件夹」对话框（浏览器拿不到本地绝对路径）。 */
+  async function browse(initial = "") {
+    setPicking(true);
+    setErr("");
+    try {
+      const r = await api.pickFolder(initial);
+      if (r.path) {
+        setOpen(true);
+        setPath(r.path);
+        setRes(null);
+        await run("probe", r.path);
+      }
+    } catch (e) {
+      // 无桌面会话 / 精简 Python 没有 tkinter：回落到手工输入
+      setOpen(true);
+      setErr(`无法打开系统目录选择框（${errmsg(e)}）—— 请手工输入绝对路径`);
+    } finally {
+      setPicking(false);
+    }
+  }
 
   if (!open) {
     return (
@@ -299,14 +470,11 @@ function AdaptPanel({
         type="button"
         className={s.adaptBtn}
         aria-label="适配新工程"
-        title="把图形配置器导出的工程接进 elab（先探测，再写入）"
-        onClick={() => {
-          setOpen(true);
-          setRes(null);
-          setErr("");
-        }}
+        title="打开系统「选择文件夹」对话框，选中工程后自动只读探测"
+        disabled={picking}
+        onClick={() => void browse(path)}
       >
-        ＋ 适配
+        {picking ? "选择中…" : "＋ 适配"}
       </button>
     );
   }
@@ -316,13 +484,18 @@ function AdaptPanel({
   const writeStatus = res?.action === "write" ? res.result?.status : undefined;
   const writeOk = writeStatus === "written" || writeStatus === "identical";
 
-  async function run(action: "probe" | "write") {
+  async function run(action: "probe" | "write", target = path) {
     setBusy(action);
     setErr("");
     try {
-      const r = await api.adapt({ action, path, name: name || undefined });
+      const r = await api.adapt({ action, path: target, name: name || undefined });
       setRes(r);
       setName(r.name);
+      try {
+        localStorage.setItem("elab.adapt.path", target.trim());
+      } catch {
+        /* 隐私模式禁用 localStorage：忽略 */
+      }
       if (action === "write" &&
           (r.result?.status === "written" || r.result?.status === "identical")) {
         onAdapted(r.name);
@@ -344,6 +517,16 @@ function AdaptPanel({
           placeholder="工程根目录（绝对路径，含 CMakeLists.txt）"
           aria-label="待适配工程路径"
         />
+        <button
+          type="button"
+          className={s.adaptBtn}
+          aria-label="浏览工程目录"
+          title="打开系统「选择文件夹」对话框"
+          disabled={picking || busy !== null}
+          onClick={() => void browse(path)}
+        >
+          {picking ? "选择中…" : "浏览…"}
+        </button>
         <Button
           variant="toolbar"
           disabled={!path.trim() || busy !== null}

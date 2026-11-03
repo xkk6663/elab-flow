@@ -561,9 +561,28 @@ export interface SerialDecodeResult {
   error?: string;
 }
 
-/** 发送面板的表示/行尾（与服务端 `serialterm` 的词汇一致） */
-export type SerialFormat = "ascii" | "utf8" | "gbk" | "hex";
+/**
+ * 发送面板的表示/行尾（与服务端 `serialterm` 的词汇一致）。
+ *
+ * `"auto"` 不是一种编码，而是「让服务端替你选」：唯一事实源在
+ * `serialterm.detect_format`（HEX 需要明确线索，裸数字按文本）。
+ */
+export type SerialFormat = "auto" | "ascii" | "utf8" | "gbk" | "hex";
 export type SerialEol = "none" | "lf" | "cr" | "crlf" | "tab";
+
+/** `POST /api/serial` 的 `dry_run` 结果：只算字节，不碰串口。 */
+export interface SerialPreviewResult {
+  ok: boolean;
+  dry_run: true;
+  bytes: number;
+  /** 待发字节的 HEX（大写、空格分隔）—— 前端直接展示，不自己编码 */
+  preview_hex: string;
+  /** 服务端解析后的实际格式（auto 会落成 utf8/hex） */
+  format?: SerialFormat;
+  eol_key?: SerialEol;
+  eol?: string;
+  error?: string | null;
+}
 
 /** 监视中写一行（路由进会话，不重开口）。与 SerialWriteResult 同形但有 via 标记 */
 export interface SerialMonitorWriteResult {
@@ -692,8 +711,12 @@ export interface SerialWidgetRunResult {
   ok: boolean;
   /** true = 已受理，任务仍在后台跑（看 job_id 轮询） */
   accepted?: boolean;
-  /** 组件 id */
+  /** 组件 id；raw 定时任务为 `raw.<ts>` */
   id?: string;
+  /** 任务来源：组件 / 发送框定时（不落盘） */
+  source?: "widget" | "raw";
+  /** 展示名（raw 为「发送框」） */
+  label?: string;
   job_id?: string;
   state?: SerialWidgetJobState;
   actor?: string;

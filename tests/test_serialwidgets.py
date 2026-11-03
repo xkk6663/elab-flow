@@ -493,5 +493,96 @@ class TestRun(Base):
         self.assertFalse(r["ok"])
 
 
+# ══════════════════════════════════════════════════════════════════
+#  发送框定时发送（run_raw）：瞬态任务、不落盘、与手发共用编码
+# ══════════════════════════════════════════════════════════════════
+class TestRaw(Base):
+    def test_dry_run_reports_bytes_like_real_send(self):
+        """dry_run 与实发共用 resolve_payload：预览字节就是实发字节。"""
+        r = sw.run_raw(self.cfg, "f411", "0A FF", format="auto", dry_run=True)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["dry_run"])
+        self.assertEqual(r["format"], "hex")
+        self.assertEqual(r["eol_key"], "none")
+        self.assertEqual(r["preview_hex"], "0A FF")
+        self.assertEqual(r["bytes"], 2)
+
+    def test_dry_run_does_not_touch_port(self):
+        with mock.patch.object(sw.sm, "write_through") as w:
+            sw.run_raw(self.cfg, "f411", "PING", format="utf8", dry_run=True)
+        w.assert_not_called()
+
+    def test_auto_text_keeps_eol_and_trailing_newline(self):
+        r = sw.run_raw(self.cfg, "f411", "1234", format="auto",
+                       eol="crlf", dry_run=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["format"], "utf8")
+        self.assertEqual(r["eol_key"], "crlf")
+        self.assertEqual(r["bytes"], 6)
+
+    def test_interval_below_min_rejected(self):
+        r = sw.run_raw(self.cfg, "f411", "PING", interval_ms=sw.MIN_REPEAT_MS - 1)
+        self.assertEqual(r["stage"], "validate")
+        self.assertIn("不能小于", r["error"])
+
+    def test_interval_above_max_rejected(self):
+        r = sw.run_raw(self.cfg, "f411", "PING",
+                       interval_ms=sw.MAX_REPEAT_S * 1000 + 1)
+        self.assertEqual(r["stage"], "validate")
+        self.assertIn("不能大于", r["error"])
+
+    def test_negative_count_rejected(self):
+        r = sw.run_raw(self.cfg, "f411", "PING", interval_ms=100, count=-1)
+        self.assertEqual(r["stage"], "validate")
+        self.assertIn("负数", r["error"])
+
+    def test_empty_data_rejected(self):
+        r = sw.run_raw(self.cfg, "f411", "", interval_ms=100)
+        self.assertEqual(r["stage"], "validate")
+
+    def test_busy_when_another_job_running(self):
+        self.assertTrue(sw._JOB_LOCK.acquire(blocking=False))
+        try:
+            r = sw.run_raw(self.cfg, "f411", "PING", interval_ms=100)
+        finally:
+            sw._JOB_LOCK.release()
+        self.assertEqual(r["stage"], "busy")
+
+    def test_raw_loop_runs_count_without_writing_widget_file(self):
+        sent = []
+
+        def fake_roundtrip(cfg, name, **kw):
+            sent.append(kw["data"])
+            return {"ok": True, "written": 8, "error": None,
+                    "port": "COM10", "baud": 115200, "echoed": []}
+
+        with mock.patch.object(sw.sm, "write_through", return_value=None), \
+                mock.patch.object(sw.st, "roundtrip", side_effect=fake_roundtrip):
+            journal = []
+            r = sw.run_raw(self.cfg, "f411", "PING", format="utf8",
+                           interval_ms=50, count=3,
+                           journal=lambda rec: journal.append(rec))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["state"], "done")
+        self.assertEqual(r["source"], "raw")
+        self.assertEqual(r["label"], "发送框")
+        self.assertEqual(r["rounds"], 3)
+        self.assertEqual(sent, ["PING"] * 3)
+        self.assertTrue(all(rec["via"] == "raw-loop" for rec in journal))
+        # 不落盘：工程里没有 widgets 文件被创建
+        self.assertFalse((self.root / "projects" / "f411.widgets.json").exists())
+
+    def test_single_send_without_interval(self):
+        with mock.patch.object(sw.sm, "write_through", return_value=6), \
+                mock.patch.object(sw.sm, "status",
+                                  return_value={"active": True, "port": "COM10",
+                                                "baud": 115200}):
+            r = sw.run_raw(self.cfg, "f411", "PING", format="utf8")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["source"], "raw")
+        self.assertEqual(r["rounds"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+

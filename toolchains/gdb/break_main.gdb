@@ -1,6 +1,6 @@
 # toolchains/gdb/break_main.gdb —— 由 `elab debug -x` 加载
 # 作用：连接后停在 main 入口，交给人继续单步/查寄存器。
-# 用法：elab debug -p at32_test --run
+# 用法：elab debug -p at32f421g8u7 --run
 #
 # 前置（由 elab debug 在 -x 之前注入）：
 #   target extended-remote localhost:3333

@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -81,45 +82,103 @@ SEND_FORMATS = ("ascii", "utf8", "gbk", "hex")
 EOLS = {"none": b"", "lf": b"\n", "cr": b"\r", "crlf": b"\r\n", "tab": b"\t"}
 
 
-def build_payload(data: str, *, newline: bool = True, hex_: bool = False,
-                  format: str | None = None, eol: str | None = None,
-                  encoding: str | None = None) -> tuple[bytes, str]:
-    """把用户输入编成待发字节。返回 ``(payload, error)``；``error`` 非空即失败。
+#: 自动识别（面板的「自动」选项）—— 不放进 ``SEND_FORMATS``：
+#: 它是「让内核替你选」，不是一个真正的编码。
+AUTO_FORMAT = "auto"
 
-    ``hex_`` 模式下按十六进制解析（``"01 A0 FF"`` 与 ``"01A0FF"`` 都收），
-    此时**不加**行结束符 —— 发的是二进制帧，多一个 CR 就是多一个字节。
+#: 十六进制串里的分隔符（含中文逗号）。
+_HEX_SEPS = (" ", "\t", "\n", "\r", ",", "，", ":", ";")
+#: 一个十六进制「段」：可带 0x/\x 前缀，1–2 位。
+_HEX_TOKEN_RE = re.compile(r"^(?:0x|\\x)?[0-9a-fA-F]{1,2}$", re.I)
+_HEX_PREFIX_RE = re.compile(r"(?:0x|\\x)", re.I)
 
-    P1 扩展（全部向后兼容）：
-      - ``format`` ∈ ascii / utf8 / gbk / hex（缺省由 ``hex_`` 推出来）；
-      - ``eol`` ∈ none / lf / cr / crlf / tab（缺省由 ``newline`` 推出来）；
-      - ``encoding`` 显式指定文本编码（缺省由 format 推）。
 
-    ★ 空输入**先于**加行结束符判定：否则 ``""`` 会变成 ``b"\\r\\n"`` 被当成有效
-      载荷发出去（一个"空回车"照样能打断固件的行解析器）。
+def normalize_hex(data: str) -> str:
+    """把「人写的十六进制」归一成 ``bytes.fromhex`` 能吃的形式。
+
+    支持 ``0A FF`` / ``0A,FF`` / ``0A:FF`` / ``0x0A 0xFF`` / ``\\x0A\\xFF``；
+    前缀替换成空格而不是直接删掉，避免 ``0x0A0xFF`` 被粘成 5 位。
+    """
+    s = _HEX_PREFIX_RE.sub(" ", data or "")
+    s = re.sub(r"[,，:;]", " ", s)
+    return "".join(s.split())
+
+
+def detect_format(data: str) -> str:
+    """「自动」模式下判定这段输入按 HEX 还是文本发。
+
+    ★ 保守是刻意的：HEX 需要**明确线索**（``0x``/``\\x`` 前缀，或分隔符 +
+      每段都是十六进制、总位数为偶数）。裸 ``1234`` 一律按文本 ——
+      固件命令里的 ``PING:42`` 这类数字绝不能因为"长得像十六进制"被发成二进制。
+    """
+    s = (data or "").strip()
+    if not s:
+        return "utf8"
+    if _HEX_PREFIX_RE.search(s):
+        return "hex"
+    if any(sep in s for sep in _HEX_SEPS):
+        tokens = [t for t in re.split(r"[\s,，:;]+", s) if t]
+        if tokens and all(_HEX_TOKEN_RE.match(t) for t in tokens):
+            digits = sum(len(_HEX_PREFIX_RE.sub("", t)) for t in tokens)
+            if digits and digits % 2 == 0:
+                return "hex"
+    return "utf8"
+
+
+def resolve_payload(data: str, *, newline: bool = True, hex_: bool = False,
+                    format: str | None = None, eol: str | None = None,
+                    encoding: str | None = None) -> tuple[bytes, str, str, str]:
+    """把用户输入编成待发字节，并**回传解析后的格式与行尾**。
+
+    返回 ``(payload, format, eol, error)``；``error`` 非空即失败。
+    预览与真实发送共用这一个函数 —— 否则"预览看到的字节"和"实际发出去的字节"
+    会在两条代码路径上慢慢漂移。
+
+    ``format="auto"`` 走 :func:`detect_format`；HEX **不加**行结束符
+    （发的是二进制帧，多一个 CR 就是多一个字节）。
     """
     if not (data or "").strip():
-        return b"", "内容为空 —— 没有可发送的字节"
+        return b"", "", "", "内容为空 —— 没有可发送的字节"
     fmt = (format or ("hex" if hex_ else "utf8")).lower()
+    if fmt == AUTO_FORMAT:
+        fmt = detect_format(data)
     if fmt not in SEND_FORMATS:
-        return b"", f"未知发送格式：{format!r}（可选 {'/'.join(SEND_FORMATS)}）"
+        return b"", fmt, "", (
+            f"未知发送格式：{format!r}（可选 {'/'.join(SEND_FORMATS)} / {AUTO_FORMAT}）")
     if fmt == "hex":
         try:
-            return bytes.fromhex("".join((data or "").split())), ""
+            return bytes.fromhex(normalize_hex(data)), "hex", "none", ""
         except ValueError as exc:
-            return b"", f"不是合法十六进制（{exc}）：{data!r}"
+            return b"", "hex", "none", (
+                f"不是合法十六进制（{exc}）：{data!r}")
     eol_key = eol
     if eol_key is None:
         eol_key = "crlf" if newline else "none"
     eol_key = str(eol_key).lower()
     if eol_key not in EOLS:
-        return b"", f"未知行尾：{eol!r}（可选 {'/'.join(EOLS)}）"
+        return b"", fmt, eol_key, (
+            f"未知行尾：{eol!r}（可选 {'/'.join(EOLS)}）")
     enc = encoding or ("gbk" if fmt == "gbk" else ("ascii" if fmt == "ascii" else "utf-8"))
     try:
         payload = (data or "").encode(enc)
     except (LookupError, UnicodeEncodeError) as exc:
-        return b"", f"编码失败（encoding={enc}）：{exc}"
+        return b"", fmt, eol_key, f"编码失败（encoding={enc}）：{exc}"
     payload += EOLS[eol_key]
-    return payload, ""
+    return payload, fmt, eol_key, ""
+
+
+def build_payload(data: str, *, newline: bool = True, hex_: bool = False,
+                  format: str | None = None, eol: str | None = None,
+                  encoding: str | None = None) -> tuple[bytes, str]:
+    """``resolve_payload`` 的旧签名薄封装：``(payload, error)``。
+
+    保留它是为了 CLI / 旧调用方不用改；新代码请用 ``resolve_payload`` 拿
+    解析后的 ``format``/``eol``（预览要显示它们）。
+    """
+    payload, _fmt, _eol, err = resolve_payload(
+        data, newline=newline, hex_=hex_, format=format, eol=eol,
+        encoding=encoding)
+    return payload, err
 
 
 def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 0,
@@ -137,8 +196,9 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
     except (TypeError, ValueError):
         read_ms = DEFAULT_READ_MS
 
-    fmt = (format or ("hex" if hex_ else "utf8")).lower()
-    eol_key = "none" if fmt == "hex" else (eol or ("crlf" if newline else "none"))
+    payload, fmt, eol_key, perr = resolve_payload(
+        data, newline=newline, hex_=hex_, format=format, eol=eol,
+        encoding=encoding)
     res: dict = {
         "ok": False, "port": "", "baud": 0, "backend": "", "layer": "",
         "written": 0, "payload_bytes": 0, "echoed": [], "bytes_read": 0,
@@ -148,8 +208,6 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
         "error": None,
     }
 
-    payload, perr = build_payload(data, newline=newline, hex_=hex_,
-                                  format=format, eol=eol, encoding=encoding)
     if perr:
         res["error"] = perr
         return res
@@ -235,7 +293,8 @@ def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 
     res = _roundtrip(cfg, name, data=data, port=port, baud=baud, read_ms=read_ms,
                      newline=newline, hex_=hex_, format=format, eol=eol,
                      encoding=encoding, log=log)
-    _journal(journal, res, data=data, hex_=hex_ or (format or "").lower() == "hex",
+    _journal(journal, res, data=data,
+             hex_=(res.get("format") or "").lower() == "hex",
              newline=newline, log=log)
     return res
 

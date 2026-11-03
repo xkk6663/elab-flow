@@ -52,7 +52,7 @@ try:
         print('TIMEOUT: 未等到监听')
         raise SystemExit(1)
 
-    project = sys.argv[1] if len(sys.argv) > 1 else 'at32_test'
+    project = sys.argv[1] if len(sys.argv) > 1 else 'at32f421g8u7'
     print(f'>>> POST /api/run project={project} steps=build')
     t_start = time.time()
     res = post('/api/run', {'project': project, 'steps': ['build'], 'actor': 'human'})

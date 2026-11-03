@@ -143,7 +143,10 @@ test('回归 2026-10-26：/elab/host 带 sessionId → 用会话 cwd 解析 elab
     name === 'sessions'
       ? { get: (id) => (id === 's1' ? { header: { cwd: fixture } } : undefined) }
       : undefined
-  applyHostPackage(ctx)
+  // ★ persistPath 必须隔离：否则读到本机 ~/.dsh 里设过的 elabRoot，
+  //   `auto` 会被顶成显式路径，这条回归就在开发机上假红。
+  const persistPath = join(mkdtempSync(join(tmpdir(), 'elab-persist-')), 'config.json')
+  applyHostPackage(ctx, undefined, { persistPath })
   const hostRoute = ctx.routes.find((r) => r.path === '/elab/host')
   assert.ok(hostRoute, 'apply 应注册 /elab/host')
   const withSession = await call(hostRoute, 'GET', '/elab/host?sessionId=s1')

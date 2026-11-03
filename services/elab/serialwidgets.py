@@ -758,7 +758,7 @@ def _wait_step(job: dict, step: dict, cursors: dict) -> dict:
             "error": f"等待超时（{step['within_s']:g}s 内没有匹配 {kind}:{value}）"}
 
 
-def _send_step(cfg: Config, project: str, wid: str, params: dict,
+def _send_step(cfg: Config, project: str, via_label: str, params: dict,
                step: dict, journal, log) -> dict:
     """执行一条 send 步（与手写发送共用写穿 / 无状态往返两条路径）。"""
     t0 = time.perf_counter()
@@ -772,7 +772,7 @@ def _send_step(cfg: Config, project: str, wid: str, params: dict,
             cfg, project, data=step["text"], read_ms=0,
             format=step["format"], eol=step["eol"],
             journal=(None if journal is None else (lambda rec: journal({
-                **rec, "via": f"widget:{wid}", "params": params}))),
+                **rec, "via": via_label, "params": params}))),
             log=log)
         n = int(res.get("written") or 0)
         ok = bool(res.get("ok"))
@@ -788,7 +788,7 @@ def _send_step(cfg: Config, project: str, wid: str, params: dict,
             try:
                 journal({"dir": "tx", "text": step["text"], "ok": ok,
                          "written": n, "payload_bytes": len(step["payload"]),
-                         "via": f"widget:{wid}", "params": params,
+                         "via": via_label, "params": params,
                          "format": step["format"], "port": port,
                          "baud": baud, "error": err})
             except Exception as exc:        # noqa: BLE001
@@ -798,7 +798,7 @@ def _send_step(cfg: Config, project: str, wid: str, params: dict,
             "t_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
 
-def _run_round(cfg: Config, project: str, wid: str, plan: dict,
+def _run_round(cfg: Config, project: str, via_label: str, plan: dict,
                job: dict, journal, log, rnd: int) -> bool:
     """跑一轮全部步骤。返回 ``False`` 表示失败或取消（错误已写进 job）。"""
     # 游标在**本轮发送之前**建立：wait 只看这一轮之后的 RX，不会命中旧数据。
@@ -810,7 +810,7 @@ def _run_round(cfg: Config, project: str, wid: str, plan: dict,
         while _paused(job) and not job["cancel"]:
             time.sleep(0.05)
         if step["kind"] == "send":
-            res = _send_step(cfg, project, wid, job["params"], step, journal, log)
+            res = _send_step(cfg, project, via_label, job["params"], step, journal, log)
             rec = {k: res[k] for k in ("i", "kind", "ok", "t_ms", "text", "via")}
             rec.update({"round": rnd, "bytes": res["n"], "error": res["err"]})
             _push_step(job, rec)
@@ -847,7 +847,7 @@ def _run_round(cfg: Config, project: str, wid: str, plan: dict,
     return True
 
 
-def _job_main(cfg: Config, project: str, wid: str, plan: dict, job: dict,
+def _job_main(cfg: Config, project: str, via_label: str, plan: dict, job: dict,
               repeat_cfg: dict | None, journal, log) -> None:
     state = "done"
     started = time.monotonic()
@@ -882,7 +882,7 @@ def _job_main(cfg: Config, project: str, wid: str, plan: dict, job: dict,
             if job["cancel"]:
                 state = "cancelled"
                 break
-            ok = _run_round(cfg, project, wid, plan, job, journal, log, rounds + 1)
+            ok = _run_round(cfg, project, via_label, plan, job, journal, log, rounds + 1)
             rounds += 1
             job["rounds"] = rounds
             if not ok:
@@ -914,6 +914,8 @@ def _job_result(job: dict) -> dict:
         "ok": job["state"] in ("done", "running", "paused", "cancelling"),
         "accepted": job["state"] in ("running", "paused", "cancelling"),
         "id": job["widget"], "job_id": job["id"], "state": job["state"],
+        "source": job.get("source") or "widget",
+        "label": job.get("label") or "",
         "actor": job.get("actor"), "params": job.get("params") or {},
         "rounds": int(job.get("rounds") or 0),
         "skipped": int(job.get("skipped") or 0),
@@ -961,6 +963,18 @@ def run(cfg: Config, project: str, wid: str, params: dict | None = None, *,
     plan = _plan(w, params)
     if not plan["ok"]:
         return plan
+    return _start_job(cfg, project, wid, w["label"], "widget", plan, repeat_cfg,
+                      journal=journal, actor=actor, log=log)
+
+
+def _start_job(cfg: Config, project: str, wid: str, label: str, source: str,
+               plan: dict, repeat_cfg: dict | None, *, journal=None,
+               actor: str = "human", log=print) -> dict:
+    """组件任务与「发送框定时发送」共用的启动逻辑。
+
+    ``source`` 只影响留档标签与 job 的 ``source`` 字段（``widget`` / ``raw``）；
+    锁、节拍、暂停/取消、超时全部同一套 —— 两条发送入口不允许出现两套周期语义。
+    """
     has_wait = any(s["kind"] == "wait" for s in plan["exec_steps"])
     if has_wait and not sm.status().get("active"):
         return {"ok": False, "stage": "validate",
@@ -968,11 +982,11 @@ def run(cfg: Config, project: str, wid: str, params: dict | None = None, *,
                           "单条/纯延时组件不需要")}
     if not _JOB_LOCK.acquire(blocking=False):
         return {"ok": False, "stage": "busy",
-                "error": "已有组件任务在跑 —— 组件任务占用串口，等它结束或先取消"}
+                "error": "已有周期/组件任务在跑 —— 它占用串口，等它结束或先取消"}
 
     meta = _preview_payload(plan)
-    jid = f"w{int(time.time() * 1000):x}-{wid}"
-    job = {"id": jid, "widget": wid, "label": w["label"],
+    jid = f"{'r' if source == 'raw' else 'w'}{int(time.time() * 1000):x}-{wid}"
+    job = {"id": jid, "widget": wid, "label": label, "source": source,
            "project": project, "state": "running", "actor": actor,
            "params": plan["params"], "started_at": round(time.time(), 3),
            "steps": [], "total_bytes": 0, "cancel": False, "paused": False,
@@ -982,12 +996,70 @@ def run(cfg: Config, project: str, wid: str, params: dict | None = None, *,
            "preview_steps": meta["steps"], "last_port": "", "last_baud": 0,
            "last_via": ""}
     _remember(job)
+    via_label = "raw-loop" if source == "raw" else f"widget:{wid}"
     th = threading.Thread(target=_job_main,
-                          args=(cfg, project, wid, plan, job, repeat_cfg,
-                                journal, log), daemon=True, name=f"widget-{jid}")
+                          args=(cfg, project, via_label, plan, job, repeat_cfg,
+                                journal, log), daemon=True, name=f"{source}-{jid}")
     th.start()
     th.join(2.0)
     return _job_result(job)
+
+
+def run_raw(cfg: Config, project: str, data: str, *, newline: bool = True,
+            hex_: bool = False, format: str | None = None,
+            eol: str | None = None, encoding: str | None = None,
+            interval_ms: int | None = None, count: int = 0,
+            actor: str = "human", journal=None, log=print,
+            dry_run: bool = False) -> dict:
+    """「发送框定时发送」：把一段自由帧当成瞬态任务跑，**不落盘**。
+
+    ``interval_ms`` 为空 = 单次发送；给了就是周期（``count=0`` 直到手动停止，
+    仍受 ``MAX_REPEAT_S`` 上限约束）。编码/行尾与 ``POST /api/serial`` 共用
+    ``serialterm.resolve_payload``，预览与实发因此天然一致。
+    """
+    payload, rfmt, reol, perr = st.resolve_payload(
+        data, newline=newline, hex_=hex_, format=format, eol=eol,
+        encoding=encoding)
+    if perr:
+        return {"ok": False, "stage": "validate", "error": perr}
+
+    repeat_cfg = None
+    if interval_ms is not None:
+        try:
+            interval_ms = int(interval_ms)
+        except (TypeError, ValueError):
+            return {"ok": False, "stage": "validate",
+                    "error": f"interval_ms 必须是整数：{interval_ms!r}"}
+        if interval_ms < MIN_REPEAT_MS:
+            return {"ok": False, "stage": "validate",
+                    "error": f"发送间隔不能小于 {MIN_REPEAT_MS}ms（当前 {interval_ms}ms）"}
+        if interval_ms > MAX_REPEAT_S * 1000:
+            return {"ok": False, "stage": "validate",
+                    "error": f"发送间隔不能大于 {MAX_REPEAT_S * 1000}ms"}
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return {"ok": False, "stage": "validate",
+                    "error": f"count 必须是整数：{count!r}"}
+        if count < 0:
+            return {"ok": False, "stage": "validate", "error": "count 不能为负数"}
+        repeat_cfg = {"interval_ms": interval_ms, "count": count}
+
+    step = {"i": 1, "kind": "send", "text": data, "format": rfmt, "eol": reol,
+            "payload": payload, "bytes": len(payload)}
+    plan = {"ok": True, "params": {}, "steps": [step], "exec_steps": [step],
+            "deferred": [], "bytes": len(payload), "format": rfmt, "eol": reol}
+
+    if dry_run:
+        meta = _preview_payload(plan)
+        return {"ok": True, "dry_run": True, "bytes": meta["bytes"],
+                "preview_b64": meta["preview_b64"], "preview_hex": payload.hex(" ").upper(),
+                "format": rfmt, "eol_key": reol,
+                "steps": meta["steps"]}
+
+    return _start_job(cfg, project, f"raw.{int(time.time() * 1000):x}",
+                      "发送框", "raw", plan, repeat_cfg,
+                      journal=journal, actor=actor, log=log)
 
 
 def job_status(job_id: str = "") -> dict | None:
@@ -1093,7 +1165,9 @@ def meta() -> dict:
         "step_kinds": list(STEP_KINDS),
         "match_kinds": list(MATCH_KINDS),
         "features": {"sequence": True, "repeat": True, "pause": True,
-                     "agent": True, "preview": True},
+                     "agent": True, "preview": True,
+                     # 发送框的瞬态周期任务（不落盘）：与组件共享同一个任务引擎
+                     "raw_loop": True},
         "limits": {"max_widgets": MAX_WIDGETS, "max_steps": MAX_STEPS,
                    "max_params": MAX_PARAMS, "max_template": MAX_TEMPLATE,
                    "max_file_bytes": MAX_FILE_BYTES,

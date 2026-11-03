@@ -41,6 +41,23 @@
 9. **外置包仓库必须带 `.gitattributes`（`* -text`）**：内容哈希按字节计算，
    换行转换会导致 `sha256` 校验失败。
 
+## 芯片闭环第一关（硬）
+
+接一颗**新芯片**（或换新板）的第一件事**不是**跑业务工程，而是先跑 heartbeat bring-up：
+
+1. **串口心跳给 agent 看**：1Hz `[alive]`，行内必须带可核对的 `tick` / `toggles` / `stage`。
+   这是事实源——agent 用串口抓包判定（相邻间隔 ≈1.000s、每次心跳 `toggles` 严格 +2）。
+2. **板载 LED 给人看**：与心跳**同一时基**驱动，每 500ms 翻转（亮灭周期 1s）。
+   agent 物理上看不到灯，只能读 `toggles`；**「LED 均匀闪烁」必须由用户肉眼确认后回报**，
+   agent 不得只凭串口计数单方面宣布通过。
+3. **两方都收到信息（agent 拿到心跳 + 人确认灯在闪）才算第一关通过**，之后才接业务外设 / OTA / boot。
+4. 主循环**禁止阻塞延时**（`HAL_Delay`、忙等、长 `printf`）；不许占用 SWD / 串口复用脚；
+   注意 LED 极性（STM32F103C8T6 的 PC13 是**低电平点亮**）。
+5. 板子没有用户 LED 时，用空闲 GPIO + 示波器/逻辑分析仪；判据回落到 `toggles` 递增 + `elab monitor` ok。
+
+依据与实现样例见 [设计约束 C36](docs/design/设计约束.md)、
+[01-芯片开发上手 §第一关](docs/tutorials/01-芯片开发上手_独立WebUI.md)。
+
 ## 验证
 
 - 插件：`npm test` / `tsc --noEmit`（host + client）/ `npm run build`（cwd = `packages/dsh-elab-cockpit`）；

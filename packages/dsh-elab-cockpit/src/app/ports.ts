@@ -31,6 +31,7 @@ import type {
   SerialWidget,
   SerialWidgetRunResult,
   SerialWidgetsDoc,
+  SerialPreviewResult,
   SerialWriteResult,
 } from '../domain/icd.ts'
 import type { RunArbiter } from '../domain/arbiter.ts'
@@ -147,6 +148,31 @@ export interface SerialPort {
     encoding?: string
     sessionId?: string
   }): Promise<SerialWriteResult>
+  /** 只算字节、不碰串口（dry_run）：预览与发送共用服务端解析 */
+  serialPreview(opts: {
+    project: string
+    data: string
+    port?: string
+    baud?: number
+    format?: string
+    eol?: string
+    encoding?: string
+    sessionId?: string
+  }): Promise<SerialPreviewResult>
+  /** 发送框定时发送：瞬态任务（不落盘），与组件共用任务引擎 */
+  serialLoop(opts: {
+    project: string
+    data: string
+    port?: string
+    baud?: number
+    format?: string
+    eol?: string
+    encoding?: string
+    interval_ms?: number
+    count?: number
+    dry_run?: boolean
+    sessionId?: string
+  }): Promise<SerialWidgetRunResult>
   serialMonitor(after?: number, sessionId?: string): Promise<SerialMonitorTail>
   serialMonitorBytes(
     after?: number,

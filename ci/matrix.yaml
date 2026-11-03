@@ -22,7 +22,7 @@ jobs:
     #   而 at32 是外置仓库、只能走市场索引安装 —— 放进云端门禁就要联网下载外置包，
     #   且与 st 工程无法在同一次运行里同时生效。at32 的编译/烧录由 onhw-gate
     #   （self-hosted，本机已装包）覆盖。
-    projects: [stm32_test]
+    projects: [STM32F103C8T6]
     steps:
       - doctor_deep       # 真跑 configure，校验实际编译命令与 chip.yaml 一致
       - build             # 编译 + 统一产出 hex/bin + 零改动快照
@@ -36,7 +36,7 @@ jobs:
   # ── 档 2：上板门禁（需要探针，self-hosted）─────────────────────
   - name: onhw-gate
     desc: 烧录 + 断到 main 自检（需要探针接在机器上）
-    projects: [at32_test]
+    projects: [at32f421g8u7]
     steps:
       - flash
       - debug_verify

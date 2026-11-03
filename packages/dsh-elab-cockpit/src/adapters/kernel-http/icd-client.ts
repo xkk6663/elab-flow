@@ -31,6 +31,7 @@ import type {
   SerialDecodeResult,
   SerialDecodedTail,
   SerialMonitorTail,
+  SerialPreviewResult,
   SerialWidget,
   SerialWidgetRunResult,
   SerialWidgetsDoc,
@@ -153,6 +154,39 @@ export const elabApi = {
     encoding?: string
     sessionId?: string
   }) => post<SerialWriteResult>(withSession('/elab/api/serial', opts.sessionId), opts),
+  /**
+   * 只算字节、不碰串口（`dry_run`）。
+   * ★ 自动识别/预览的唯一事实源在服务端；前端不在本地编码。
+   */
+  serialPreview: (opts: {
+    project: string
+    data: string
+    port?: string
+    baud?: number
+    format?: string
+    eol?: string
+    encoding?: string
+    sessionId?: string
+  }) =>
+    post<SerialPreviewResult>(withSession('/elab/api/serial', opts.sessionId), {
+      ...opts,
+      dry_run: true,
+    }),
+  /** 发送框定时发送：瞬态任务（不落盘），与组件共用任务引擎。 */
+  serialLoop: (opts: {
+    project: string
+    data: string
+    port?: string
+    baud?: number
+    format?: string
+    eol?: string
+    encoding?: string
+    interval_ms?: number
+    count?: number
+    dry_run?: boolean
+    sessionId?: string
+  }) =>
+    post<SerialWidgetRunResult>(withSession('/elab/api/serial/loop', opts.sessionId), opts),
   serialMonitor: (after = 0, sessionId?: string) =>
     request<SerialMonitorTail>(withSession(`/elab/api/serial/monitor?after=${after}`, sessionId)),
   /** P1 字节真值：增量拉取原始批次（方向/时间/序号 + base64）。 */

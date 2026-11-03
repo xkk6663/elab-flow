@@ -215,6 +215,7 @@ export default function App() {
               : (p.projects[0]?.name ?? "");
           if (want) await selectProject(want);
         }
+        return p;
       } catch (e) {
         setFatal(errmsg(e));
       } finally {
@@ -322,6 +323,30 @@ export default function App() {
     [loadAll, selectProject],
   );
 
+  /**
+   * 工程改名 / 移除后的收尾（左侧「⋯」菜单）。
+   * ★ 顺序：先刷目录再选中 —— 改名要选**新名**；移除当前选中时要落到剩余第一个，
+   *   否则阶段轨会继续引用一个已不存在的工程（下次 run 直接 400）。
+   */
+  const onManaged = useCallback(
+    (res: { action: "rename" | "remove"; name: string; new_name?: string }) => {
+      void (async () => {
+        const p = await loadAll(false);
+        if (res.action === "rename" && res.new_name) {
+          await selectProject(res.new_name);
+          setNotice(`工程已重命名为 ${res.new_name}`);
+          return;
+        }
+        setNotice(`已移除工程 ${res.name}（projects/${res.name}.yaml.bak 可恢复）`);
+        if (selectedRef.current === res.name) {
+          const want = p?.projects[0]?.name;
+          if (want) await selectProject(want);
+        }
+      })();
+    },
+    [loadAll, selectProject],
+  );
+
   const card = catalog?.projects.find((p) => p.name === selected) ?? null;
   const serialPort = card?.serial.port || caps?.serial.host_default || "";
   const ThemeIcon = THEME_ICON[theme];
@@ -422,6 +447,7 @@ export default function App() {
             locked={run.status === "running"}
             loading={loading}
             onAdapted={onAdapted}
+            onManaged={onManaged}
           />
         }
         stage={

@@ -61,6 +61,10 @@ export interface SerialStream {
     written: number
     port: string
     baud: number
+    /** 服务端实际使用的格式（auto 会落成 utf8/hex） */
+    format?: string
+    /** 实际追加的行尾（HEX 为空串） */
+    eol?: string
     via?: 'monitor'
     echoed: string[]
     read_ms: number

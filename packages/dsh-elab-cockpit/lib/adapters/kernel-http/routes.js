@@ -58,7 +58,9 @@ const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial
     // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
     'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate',
     // 工程级发送组件（M1/M2）：保存/删除（rev 乐观锁）+ 执行/取消/暂停
-    'serial/widgets', 'serial/widget/run', 'serial/widget/cancel', 'serial/widget/pause']);
+    'serial/widgets', 'serial/widget/run', 'serial/widget/cancel', 'serial/widget/pause',
+    // 发送框的定时发送：瞬态任务，不落盘（与组件共用任务引擎）
+    'serial/loop']);
 function json(res, code, body) {
     const text = JSON.stringify(body);
     res.statusCode = code;

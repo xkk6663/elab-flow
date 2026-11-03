@@ -48,7 +48,7 @@ try:
     if not wait_listen():
         print('TIMEOUT')
         raise SystemExit(1)
-    project = sys.argv[1] if len(sys.argv) > 1 else 'at32_test'
+    project = sys.argv[1] if len(sys.argv) > 1 else 'at32f421g8u7'
     print(f'>>> clean build project={project}')
     t0 = time.time()
     res = post('/api/run', {'project': project, 'steps': ['build'], 'clean': True, 'actor': 'human'})

@@ -1,7 +1,7 @@
 """在**副本**构建目录里做实打实的全量编译，观察 Ninja 流式输出形态。
 
 ★ 绝不改业务工程（外骨骼原则）：只用 .work 下的一次性目录。
-  步骤：cmake -S examples/AT32_TEST -B .work/_bench_ninja（同 elab 的 configure 参数）
+  步骤：cmake -S examples/AT32F421G8U7 -B .work/_bench_ninja（同 elab 的 configure 参数）
         然后分别用 ninja 默认 / ninja -v 各跑一次全量编译。
 """
 import os

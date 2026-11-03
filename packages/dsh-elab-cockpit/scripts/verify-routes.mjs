@@ -67,7 +67,7 @@ console.log('\n### 7. 起一个 run（actor 注入为 human）')
 const run = await j(`${base}/elab/api/run`, {
   method: 'POST',
   headers: { ...H, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ project: 'at32_test', steps: ['build'] }),
+  body: JSON.stringify({ project: 'at32f421g8u7', steps: ['build'] }),
 })
 console.log('status', run.status, '| run', run.body?.run, '| actor', run.body?.actor)
 const runId = run.body?.run

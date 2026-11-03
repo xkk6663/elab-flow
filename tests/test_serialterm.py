@@ -105,6 +105,49 @@ class TestBuildPayload(unittest.TestCase):
         self.assertEqual(p, "你好".encode("utf-8"))
 
 
+class TestAutoFormat(unittest.TestCase):
+    """「自动」识别：HEX 必须有明确线索，裸数字按文本（保守原则）。"""
+
+    def test_detect_hex_with_separators(self):
+        for s in ("0A FF", "0A,FF", "0A:FF", "0A\tFF", "0x0A 0xFF", "\\x0A\\xFF"):
+            self.assertEqual(st.detect_format(s), "hex", s)
+
+    def test_detect_plain_text(self):
+        for s in ("PING:42", "1234", "你好", "0A F", "help", "", "   "):
+            self.assertEqual(st.detect_format(s), "utf8", s)
+
+    def test_resolve_auto_hex_has_no_eol(self):
+        p, fmt, eol, err = st.resolve_payload("0A FF", format="auto", eol="crlf")
+        self.assertEqual(err, "")
+        self.assertEqual(p, b"\x0a\xff")
+        self.assertEqual((fmt, eol), ("hex", "none"))
+
+    def test_resolve_auto_text_keeps_eol(self):
+        p, fmt, eol, err = st.resolve_payload("PING:42", format="auto")
+        self.assertEqual(err, "")
+        self.assertEqual(p, b"PING:42\r\n")
+        self.assertEqual((fmt, eol), ("utf8", "crlf"))
+
+    def test_resolve_auto_plain_number_is_text(self):
+        p, fmt, _, err = st.resolve_payload("1234", format="auto", newline=False)
+        self.assertEqual(err, "")
+        self.assertEqual(p, b"1234")
+        self.assertEqual(fmt, "utf8")
+
+    def test_resolve_returns_resolved_format_for_explicit(self):
+        _, fmt, eol, _ = st.resolve_payload("hi", format="gbk", eol="lf")
+        self.assertEqual((fmt, eol), ("gbk", "lf"))
+
+    def test_explicit_hex_accepts_prefixed_input(self):
+        p, err = st.build_payload("0x0A 0xFF", hex_=True)
+        self.assertEqual(err, "")
+        self.assertEqual(p, b"\x0a\xff")
+
+    def test_unknown_format_mentions_auto(self):
+        _, _, _, err = st.resolve_payload("hi", format="nope")
+        self.assertIn("auto", err)
+
+
 class TestOpenErrorMessage(unittest.TestCase):
     """★ 错误提示必须**对症** —— 这是实测抓到的缺陷。"""
 

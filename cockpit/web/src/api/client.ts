@@ -11,6 +11,7 @@ import type {
   SerialFormat,
   SerialMonitorSnapshot,
   SerialMonitorTail,
+  SerialPreviewResult,
   SerialWriteResult,
   SerialWidget,
   SerialWidgetJob,
@@ -140,6 +141,45 @@ export const api = {
         eol: opts.eol,
         encoding: opts.encoding,
       }),
+    }),
+
+  /** 发送框定时发送：瞬态任务（不落盘），与组件共用内核任务引擎。 */
+  serialLoop: (opts: {
+    project: string;
+    data: string;
+    port?: string;
+    baud?: number;
+    format?: SerialFormat;
+    eol?: string;
+    encoding?: string;
+    interval_ms?: number;
+    count?: number;
+    dry_run?: boolean;
+  }) =>
+    req<SerialWidgetRunResult>("/api/serial/loop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    }),
+
+  /**
+   * 只算字节、不碰串口（`dry_run`）。
+   * ★ 「自动格式」与字节预览的**唯一事实源**在服务端 ——
+   *   前端不在本地编码，否则"预览的字节"与"真发出去的字节"会漂移。
+   */
+  serialPreview: (opts: {
+    project: string;
+    data: string;
+    port?: string;
+    baud?: number;
+    format?: SerialFormat;
+    eol?: string;
+    encoding?: string;
+  }) =>
+    req<SerialPreviewResult>("/api/serial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...opts, dry_run: true }),
     }),
 
   /**
@@ -341,7 +381,7 @@ export const api = {
    * `tier:"T3"` **不是**错误 —— 它是探测数据（"需要真改造"），界面要能说清原因。
    */
   adapt: (opts: {
-    action: "probe" | "write";
+    action: "probe" | "write" | "check";
     path: string;
     name?: string;
     force?: boolean;
@@ -351,6 +391,35 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts),
     }),
+
+  /**
+   * POST /api/pick-folder：请**同机内核**代开系统原生「选择文件夹」对话框。
+   *
+   * 浏览器沙箱拿不到本地目录的绝对路径，而适配要求绝对路径 —— 内核与用户
+   * 在同一台机器上，是唯一合适的中介。返回 `{ path }` 或 `{ cancelled: true }`。
+   */
+  pickFolder: (initial?: string) =>
+    req<{ path?: string; cancelled?: boolean }>("/api/pick-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial: initial ?? "" }),
+    }),
+
+  /**
+   * POST /api/project：工程接入文件的重命名 / 移除。
+   *
+   * 只动 `projects/<name>.yaml`（业务工程零改动）；成功后服务端已重载 Config，
+   * 前端只需重新拉 `/api/projects`。移除会先留 `<name>.yaml.bak`。
+   */
+  projectAdmin: (
+    opts:
+      | { action: "rename"; name: string; new_name: string }
+      | { action: "remove"; name: string },
+  ) =>
+    post<{ action: string; status: string; name: string; old?: string; path: string }>(
+      "/api/project",
+      opts,
+    ),
 
   // ── 适配包 / 社区市场（与 DSH 面板同形；逻辑全在内核）──────────────
   /** GET /api/packs：已装包 + （可选）市场条目。market=false 跳过市场索引读取。 */

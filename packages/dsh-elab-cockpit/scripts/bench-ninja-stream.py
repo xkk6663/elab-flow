@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-work = Path('.work/at32_test')
+work = Path('.work/at32f421g8u7')
 ninja = 'C:/Users/xiao1/AppData/Local/at32-tools/ninja/V1.11.1/ninja.exe'
 
 

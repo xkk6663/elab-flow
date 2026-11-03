@@ -2,7 +2,7 @@
 # elab —— elab-Flow 命令行入口（L3）
 # 零第三方依赖：只需要一个 python3（>=3.8）。
 #
-# 用法：  ./elab build -p stm32_test
+# 用法：  ./elab build -p STM32F103C8T6
 #         ./elab doctor --deep
 #         ./elab list --json
 #

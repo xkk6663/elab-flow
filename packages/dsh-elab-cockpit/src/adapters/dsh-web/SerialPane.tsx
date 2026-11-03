@@ -15,7 +15,11 @@ import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { SerialPort } from '../../app/ports.ts'
-import type { SerialChunk, SerialWidget, SerialWidgetsDoc, SerialWidgetRunResult } from '../../domain/icd.ts'
+import type {
+  SerialChunk,
+  SerialPreviewResult,
+  SerialWidgetRunResult,
+} from '../../domain/icd.ts'
 import {
   b64ToBytes,
   bytesToB64,
@@ -23,9 +27,12 @@ import {
   hexDump,
   hexDumpRows,
   parseAnsi,
+  parseSendHistory,
+  pushSendHistory,
+  serializeSendHistory,
   textOf,
 } from '@elab/cockpit-ui-core'
-import type { HexRow, SerialRepr } from '@elab/cockpit-ui-core'
+import type { HexRow, SendHistoryEntry, SerialRepr } from '@elab/cockpit-ui-core'
 import { AnsiTerminal, StreamTextDecoder } from './serial/ansiTerminal.ts'
 import type { TermLine } from './serial/ansiTerminal.ts'
 import type { SerialStream } from './serial/useSerialStream.ts'
@@ -55,6 +62,7 @@ const DIRS: Array<{ id: Dir; label: string }> = [
 ]
 
 const FORMATS = [
+  { id: 'auto', label: '自动' },
   { id: 'utf8', label: '文本' },
   { id: 'ascii', label: 'ASCII' },
   { id: 'gbk', label: 'GBK' },
@@ -89,55 +97,19 @@ const HISTORY_MAX = 50
 /** 文件按行发送的行数上限（按行逐条发，太多行会把发送面板占住很久）。 */
 const MAX_FILE_LINES = 2000
 
-function loadHistory(): string[] {
+function loadHistory(): SendHistoryEntry[] {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY)
-    if (raw === null) return []
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string').slice(-HISTORY_MAX) : []
+    return parseSendHistory(localStorage.getItem(HISTORY_KEY))
   } catch {
     return []
   }
 }
 
-function saveHistory(items: string[]): void {
+function saveHistory(items: SendHistoryEntry[]): void {
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)))
+    localStorage.setItem(HISTORY_KEY, serializeSendHistory(items))
   } catch {
     // 隐私模式/配额满：历史只是便利，不写也不影响发送
-  }
-}
-
-/** 参数控件里都是字符串；提交前按组件声明的类型转成 JSON 值（服务端还会再校验一次）。 */
-function coerceWidgetParams(w: SerialWidget, raw: Record<string, string>): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const p of w.params) {
-    const v = raw[p.name] ?? ''
-    if (p.type === 'int') {
-      const n = Number.parseInt(v, 10)
-      out[p.name] = Number.isNaN(n) ? v : n
-    } else if (p.type === 'float') {
-      const n = Number(v)
-      out[p.name] = Number.isNaN(n) ? v : n
-    } else if (p.type === 'bool') {
-      out[p.name] = v === 'true' || v === '1'
-    } else {
-      out[p.name] = v
-    }
-  }
-  return out
-}
-
-/** 预览字节 → HEX（服务端返回的 preview_b64 是唯一的发送字节；与宽栏同一展示口径）。 */
-function widgetHex(b64: string | undefined): string {
-  if (b64 === undefined || b64 === '') return ''
-  try {
-    return Array.from(b64ToBytes(b64))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join(' ')
-      .toUpperCase()
-  } catch {
-    return ''
   }
 }
 
@@ -300,105 +272,6 @@ const metaStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
-/** 组件参数输入（窄栏里尽量小；宽度按类型由 width 决定） */
-const widgetInputStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  height: '20px',
-  padding: '0 4px',
-  fontFamily: 'var(--elab-font-mono)',
-  fontSize: 'var(--elab-fs-xs)',
-  color: 'var(--elab-fg-primary)',
-  background: 'var(--elab-bg-surface)',
-  border: '1px solid var(--elab-border)',
-  borderRadius: 'var(--elab-radius-sm)',
-  width: '6.5em',
-}
-
-const widgetBarStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '4px',
-  padding: '4px 12px',
-  borderTop: '1px solid var(--elab-border)',
-  background: 'var(--elab-bg-surface)',
-  flexWrap: 'wrap',
-  minWidth: 0,
-}
-
-const widgetTitleStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  fontSize: 'var(--elab-fs-xs)',
-  color: 'var(--elab-fg-faint)',
-  letterSpacing: '0.04em',
-  marginRight: '2px',
-}
-
-const widgetChipStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  padding: '2px 8px',
-  fontFamily: 'var(--elab-font-mono)',
-  fontSize: 'var(--elab-fs-xs)',
-  lineHeight: 1.4,
-  background: 'var(--elab-bg-code)',
-  color: 'var(--elab-fg-secondary)',
-  border: '1px solid var(--elab-border)',
-  borderRadius: 'var(--elab-radius-sm)',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-}
-
-/**
- * 选中态：**描边 + 浅底 + 加粗**，不用「品牌填充 + 反白字」。
- * §15.6b 的教训在本宿主主题上重演：`--elab-accent` 映射的 brand-primary 在这里
- * 是近白，白底白字 = 选中项直接消失；而 accent 本身又和正文色同值，
- * 只靠文字色也分不出来。故强调走「可读的三重信号」：实心 accent 描边 + 浅色
- * 悬停底 + 加粗字形 —— 任意主题下都能看出选中了哪个。
- */
-const widgetChipOnStyle: React.CSSProperties = {
-  ...widgetChipStyle,
-  background: 'var(--elab-btn-primary-bg)',
-  color: 'var(--elab-fg-primary)',
-  borderColor: 'var(--elab-accent)',
-  fontWeight: 600,
-}
-
-const widgetErrStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  fontSize: 'var(--elab-fs-xs)',
-  color: 'var(--elab-status-fail)',
-  cursor: 'help',
-}
-
-const widgetPanelStyle: React.CSSProperties = {
-  flex: '0 0 auto',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '6px',
-  flexWrap: 'wrap',
-  padding: '5px 12px',
-  borderTop: '1px dashed var(--elab-border)',
-  background: 'color-mix(in srgb, var(--elab-btn-primary-bg) 35%, transparent)',
-  minWidth: 0,
-}
-
-const widgetPreviewStyle: React.CSSProperties = {
-  flex: '0 1 auto',
-  minWidth: 0,
-  fontFamily: 'var(--elab-font-mono)',
-  fontSize: 'var(--elab-fs-xs)',
-  color: 'var(--elab-fg-faint)',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-}
-
-const widgetLabelStyle: React.CSSProperties = {
-  fontSize: 'var(--elab-fs-xs)',
-  color: 'var(--elab-fg-dimmed)',
-  whiteSpace: 'nowrap',
-}
-
 /** 波形页的共享解码标记（「共享解码」+「agent 选定」） */
 const waveBadge: React.CSSProperties = {
   padding: '1px 6px',
@@ -514,26 +387,24 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [query, setQuery] = useState('')
   const [follow, setFollow] = useState(true)
   const [draft, setDraft] = useState('')
-  const [sendFormat, setSendFormat] = useState('utf8')
+  const [sendFormat, setSendFormat] = useState('auto')
   const [eol, setEol] = useState('crlf')
   const [notice, setNotice] = useState<string | null>(null)
-  /** 发送历史（↑/↓ 调取；只留最近 HISTORY_MAX 条，跨会话记忆）。 */
-  const [history, setHistory] = useState<string[]>(loadHistory)
+  /** 服务端预览（dry_run）：自动识别结果 + 待发字节 */
+  const [sendPreview, setSendPreview] = useState<SerialPreviewResult | null>(null)
+  /** 定时发送间隔（毫秒）；丢给内核校验，面板不写死下限 */
+  const [loopInterval, setLoopInterval] = useState('100')
+  /** 发送历史（↑/↓ 调取；含当时的格式与行尾，跨会话记忆）。 */
+  const [history, setHistory] = useState<SendHistoryEntry[]>(loadHistory)
   const [histIdx, setHistIdx] = useState(-1)
   const [fileBusy, setFileBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const [replay, setReplay] = useState<ReplayData | null>(null)
   const [replayErr, setReplayErr] = useState<string | null>(null)
   const replayRef = useRef<HTMLInputElement | null>(null)
-  // 发送组件（M2）：下拉 + 类型化参数 + 服务端预览 + 异步任务（轮询/暂停/停止）
-  const [widgetDoc, setWidgetDoc] = useState<SerialWidgetsDoc | null>(null)
-  const [widgetId, setWidgetId] = useState('')
-  const [widgetParams, setWidgetParams] = useState<Record<string, string>>({})
-  const [widgetPreview, setWidgetPreview] = useState('')
-  const [widgetErr, setWidgetErr] = useState<string | null>(null)
-  const [widgetBusy, setWidgetBusy] = useState(false)
-  const [widgetJob, setWidgetJob] = useState<SerialWidgetRunResult | null>(null)
-  const [widgetJobId, setWidgetJobId] = useState('')
+  // 发送任务（定时发送 / 组件任务）：异步任务快照 + 轮询 id
+  const [job, setJob] = useState<SerialWidgetRunResult | null>(null)
+  const [jobId, setJobId] = useState('')
   // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
 
@@ -774,7 +645,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   //   跟随开关与独立 WebUI 同口径：只由「跟随/恢复」按钮控制，不用 scroll 事件反推
   //   —— 环形缓冲挤出时浏览器 scroll anchoring 会改 scrollTop，反推会把跟随误关掉。
   //   ★ 波形视图**不参与**文本跟随：波形有自己面板级的跟随（viewports）；而窄栏在
-  //   组件行出现后内容会溢出，贴底滚动会把「全部 / ＋新建面板 / 通道绑定 CH」那一行
+  //   发送栏出现后内容会溢出，贴底滚动会把「全部 / ＋新建面板 / 通道绑定 CH」那一行
   //   滚出可视区（实测：切到波形后通道绑定整行消失）。
   useEffect(() => {
     const el = scrollRef.current
@@ -815,10 +686,31 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4000)
   }, [filtered, stream.snap, project])
 
-  const remember = useCallback((text: string): void => {
+  /** 服务端预览：150ms 防抖（自动识别/字节都来自服务端，前端不编码）。 */
+  const previewSend = api.serialPreview
+  useEffect(() => {
+    if (draft.trim() === '') {
+      setSendPreview(null)
+      return
+    }
+    const timer = window.setTimeout(() => {
+      previewSend({
+        project: project ?? '',
+        data: draft,
+        port,
+        baud,
+        format: sendFormat,
+        eol,
+      })
+        .then(setSendPreview)
+        .catch(() => setSendPreview(null))
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [draft, sendFormat, eol, project, port, baud, previewSend])
+
+  const remember = useCallback((entry: SendHistoryEntry): void => {
     setHistory((prev) => {
-      if (prev.length > 0 && prev[prev.length - 1] === text) return prev
-      const next = [...prev, text].slice(-HISTORY_MAX)
+      const next = pushSendHistory(prev, entry)
       saveHistory(next)
       return next
     })
@@ -840,9 +732,11 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           return
         }
         setNotice(
-          `✓ 已发送 ${r.written} B → ${r.port}@${r.baud}` + (r.via === 'monitor' ? '（经监视会话，回显见实时流）' : ''),
+          `✓ 已发送 ${r.written} B → ${r.port}@${r.baud}` +
+            (r.format ? `（识别为 ${String(r.format).toUpperCase()}）` : '') +
+            (r.via === 'monitor' ? '（经监视会话，回显见实时流）' : ''),
         )
-        remember(draft)
+        remember({ text: draft, format: sendFormat as SendHistoryEntry['format'], eol: eol as SendHistoryEntry['eol'], at: Date.now() })
         setDraft('')
       } catch (err) {
         setNotice(`✗ ${err instanceof Error ? err.message : String(err)}`)
@@ -861,7 +755,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       if (key === 'ArrowUp') {
         const next = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1)
         setHistIdx(next)
-        setDraft(history[next])
+        setDraft(history[next].text)
+        setSendFormat(history[next].format)
+        setEol(history[next].eol)
         return
       }
       if (histIdx === -1) return
@@ -871,7 +767,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         setDraft('')
       } else {
         setHistIdx(next)
-        setDraft(history[next])
+        setDraft(history[next].text)
+        setSendFormat(history[next].format)
+        setEol(history[next].eol)
       }
     },
     [history, histIdx],
@@ -932,95 +830,11 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
     [running, writable, sendFormat, eol, stream],
   )
 
-  // ── 发送组件（M1/M2）────────────────────────────────────────────
-  const widgets = useMemo<SerialWidget[]>(() => widgetDoc?.widgets ?? [], [widgetDoc])
-  const activeWidget = useMemo(
-    () => widgets.find((w) => w.id === widgetId) ?? null,
-    [widgets, widgetId],
-  )
-  const jobActive = widgetJob !== null
-    && (widgetJob.state === 'running' || widgetJob.state === 'paused' || widgetJob.state === 'cancelling')
-  const widgetProgress = (() => {
-    if (widgetJob === null) return ''
-    const rounds = widgetJob.rounds ?? 0
-    const skipped = widgetJob.skipped ?? 0
-    const bytes = widgetJob.total_bytes ?? 0
-    const st = widgetJob.state ?? ''
-    if (jobActive) {
-      const skip = skipped > 0 ? ` · 跳过 ${skipped} 拍` : ''
-      const label = st === 'paused' ? '已暂停' : st === 'cancelling' ? '停止中…' : '运行中'
-      return `${label} · 第 ${rounds} 轮${skip} · ${bytes} B`
-    }
-    if (st === 'done') return `完成 · ${rounds} 轮 · ${bytes} B${skipped > 0 ? ` · 跳过 ${skipped} 拍` : ''}`
-    if (st === 'cancelled') return `已停止 · ${bytes} B`
-    if (st === 'failed') return `失败${widgetJob.error ? ` · ${widgetJob.error}` : ''}`
-    return ''
-  })()
-
-  /** 读取工程组件（坏文件/坏组件不阻塞：error/warnings 原样展示）。 */
-  useEffect(() => {
-    if (project === '') {
-      setWidgetDoc(null)
-      setWidgetId('')
-      return
-    }
-    let alive = true
-    void api.serialWidgets(project).then((d) => {
-      if (!alive) return
-      setWidgetDoc(d)
-      setWidgetErr(d.error)
-      // 与独立 WebUI 同口径：默认**不选中**任何组件（用户点 chip 才展开参数面板），
-      // 只在组件消失时清掉已失效的选中项。
-      setWidgetId((cur) => (d.widgets.some((w) => w.id === cur) ? cur : ''))
-    }).catch((e: unknown) => {
-      if (alive) setWidgetErr(e instanceof Error ? e.message : String(e))
-    })
-    return () => { alive = false }
-  }, [api, project])
-
-  /** 切组件时把参数重置为默认值（类型化控件显示的都是字符串，提交前再转换）。 */
-  useEffect(() => {
-    if (activeWidget === null) {
-      setWidgetParams({})
-      return
-    }
-    const next: Record<string, string> = {}
-    for (const p of activeWidget.params) {
-      next[p.name] = p.type === 'bool'
-        ? (p.default === true ? 'true' : 'false')
-        : String(p.default ?? '')
-    }
-    setWidgetParams(next)
-  }, [activeWidget?.id])
-
-  /** 预览字节由服务端渲染（与真正发送共用同一条路径；这里只展示）。 */
-  useEffect(() => {
-    if (activeWidget === null || project === '') {
-      setWidgetPreview('')
-      return
-    }
-    let alive = true
-    const timer = window.setTimeout(() => {
-      void api.serialWidgetRun({
-        project,
-        id: activeWidget.id,
-        params: coerceWidgetParams(activeWidget, widgetParams),
-        dryRun: true,
-      }).then((r) => {
-        if (!alive) return
-        if (!r.ok) {
-          setWidgetPreview('')
-          setWidgetErr(r.error ?? '预览失败')
-          return
-        }
-        setWidgetErr(null)
-        setWidgetPreview(`预览 ${r.bytes ?? 0} B · ${widgetHex(r.preview_b64)}`)
-      }).catch((e: unknown) => {
-        if (alive) setWidgetErr(e instanceof Error ? e.message : String(e))
-      })
-    }, 150)
-    return () => { alive = false; window.clearTimeout(timer) }
-  }, [api, project, activeWidget, widgetParams])
+  // ── 发送任务（定时发送 / 组件任务共用内核任务引擎）──────────────
+  const jobActive = job !== null
+    && (job.state === 'running' || job.state === 'paused' || job.state === 'cancelling')
+  /** 当前跑的是「发送框定时发送」（source=raw），而不是组件任务 */
+  const rawLoopActive = jobActive && job?.source === 'raw'
 
   /** 刷新/换工程后找回仍在跑的任务（run 只等 2s，长任务只能靠轮询）。 */
   useEffect(() => {
@@ -1030,9 +844,8 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       if (!alive) return
       const active = j.state === 'running' || j.state === 'paused' || j.state === 'cancelling'
       if (!active || j.job_id === undefined || j.job_id === '') return
-      setWidgetJob(j)
-      setWidgetJobId(j.job_id)
-      setWidgetBusy(true)
+      setJob(j)
+      setJobId(j.job_id)
     }).catch(() => {
       // 404 = 没有在跑的任务，是常态；不打扰用户
     })
@@ -1041,80 +854,78 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
 
   /** 任务轮询：run 返回 running 后 400ms 一次，直到终态（不新增 SSE）。 */
   useEffect(() => {
-    if (widgetJobId === '') return
+    if (jobId === '') return
     let alive = true
     let timer = 0
     const isActive = (s?: string): boolean =>
       s === 'running' || s === 'paused' || s === 'cancelling'
     const tick = async (): Promise<void> => {
       try {
-        const j = await api.serialWidgetJob(widgetJobId)
+        const j = await api.serialWidgetJob(jobId)
         if (!alive) return
-        setWidgetJob(j)
+        setJob(j)
         if (isActive(j.state)) {
           timer = window.setTimeout(() => void tick(), 400)
-        } else {
-          setWidgetBusy(false)
-          if (!j.ok) setWidgetErr(j.error ?? '执行失败')
+        } else if (!j.ok) {
+          setNotice(`✗ 任务失败：${j.error ?? '未知原因'}`)
         }
       } catch (e) {
         if (!alive) return
-        setWidgetBusy(false)
-        setWidgetErr(e instanceof Error ? e.message : String(e))
+        setNotice(`✗ ${e instanceof Error ? e.message : String(e)}`)
       }
     }
     void tick()
     return () => { alive = false; window.clearTimeout(timer) }
-  }, [api, widgetJobId])
+  }, [api, jobId])
 
-  const doWidgetRun = useCallback(async (repeat: boolean): Promise<void> => {
-    if (activeWidget === null || running || !writable || widgetBusy || jobActive) return
-    if (activeWidget.confirm && !window.confirm(`组件「${activeWidget.label}」需要确认后执行，继续？`)) return
-    setWidgetErr(null)
-    setWidgetBusy(true)
-    try {
-      const r = await api.serialWidgetRun({
-        project,
-        id: activeWidget.id,
-        params: coerceWidgetParams(activeWidget, widgetParams),
-        repeat,
-        confirm: activeWidget.confirm,
-      })
-      setWidgetJob(r)
-      if (r.job_id !== undefined && r.job_id !== '') setWidgetJobId(r.job_id)
-      const stillActive = r.state === 'running' || r.state === 'paused' || r.state === 'cancelling'
-      if (!stillActive) {
-        setWidgetBusy(false)
-        if (!r.ok) setWidgetErr(r.error ?? '执行失败')
-      }
-    } catch (e) {
-      setWidgetBusy(false)
-      setWidgetErr(e instanceof Error ? e.message : String(e))
-    }
-  }, [activeWidget, running, writable, widgetBusy, jobActive, api, project, widgetParams])
-
-  const doWidgetCancel = useCallback(async (): Promise<void> => {
-    const id = widgetJob?.job_id ?? widgetJobId
+  const cancelJob = useCallback(async (): Promise<void> => {
+    const id = job?.job_id ?? jobId
     if (id === '') return
     try {
       await api.serialWidgetCancel(id)
-      setWidgetJob(await api.serialWidgetJob(id))
+      setJob(await api.serialWidgetJob(id))
     } catch (e) {
-      setWidgetErr(e instanceof Error ? e.message : String(e))
+      setNotice(`✗ ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [api, widgetJob, widgetJobId])
+  }, [api, job, jobId])
 
-  const doWidgetPause = useCallback(async (): Promise<void> => {
-    const id = widgetJob?.job_id ?? widgetJobId
-    if (id === '') return
-    const paused = widgetJob?.state !== 'paused'
-    try {
-      await api.serialWidgetPause(id, paused)
-      setWidgetJob(await api.serialWidgetJob(id))
-    } catch (e) {
-      setWidgetErr(e instanceof Error ? e.message : String(e))
+  /** 定时发送：发到 `/api/serial/loop`（内核瞬态任务，不落盘）。 */
+  const startLoop = useCallback(async (): Promise<void> => {
+    if (draft.trim() === '' || running || !writable) return
+    const ms = Number(loopInterval)
+    if (!Number.isFinite(ms) || ms <= 0) {
+      setNotice('✗ 定时发送间隔必须是正数（毫秒）')
+      return
     }
-  }, [api, widgetJob, widgetJobId])
+    setNotice(null)
+    try {
+      const r = await api.serialLoop({
+        project: project ?? '',
+        data: draft,
+        port,
+        baud,
+        format: sendFormat,
+        eol,
+        interval_ms: Math.round(ms),
+        count: 0,
+      })
+      if (r.job_id !== undefined) setJobId(r.job_id)
+      setJob(r)
+      if (!r.ok) {
+        setNotice(`✗ ${r.error ?? '定时发送被拒绝'}`)
+        return
+      }
+      setNotice(`⏵ 定时发送中：每 ${Math.round(ms)}ms（停止后才可手发）`)
+      remember({
+        text: draft,
+        format: sendFormat as SendHistoryEntry['format'],
+        eol: eol as SendHistoryEntry['eol'],
+        at: Date.now(),
+      })
+    } catch (e) {
+      setNotice(`✗ ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [api, project, draft, port, baud, sendFormat, eol, loopInterval, running, writable, remember])
 
   /** 选一个录制 JSONL 在本地回放（纯前端只读，不打开串口）。 */
   const doReplay = useCallback(async (e: any): Promise<void> => {
@@ -1154,7 +965,8 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const capActive = cap?.active === true
 
   const reachable = stream.active || running
-  const sendDisabled = running || !writable
+  // 周期/组件任务在跑时不交错手发（一个口只允许一个发送源）
+  const sendDisabled = running || !writable || jobActive
 
   return (
     <div style={{ flex: '1 1 auto', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1731,244 +1543,197 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         ) : null}
       </div>
 
-      {/* ── 发送组件（M1/M2）：chips + 类型化参数 + 服务端预览 + 执行/周期/暂停/停止 ── */}
-      {widgetDoc !== null && project !== ''
-        && (widgets.length > 0 || widgetDoc.warnings.length > 0 || widgetDoc.error !== null) ? (
-        <div style={widgetBarStyle}>
-          <span style={widgetTitleStyle}>{'组件'}</span>
-          {widgets.map((w) => (
-            <button
-              key={w.id}
-              type="button"
-              title={`${w.label} · ${w.steps.length} 步${w.group ? ` · ${w.group}` : ''}`}
-              onClick={() => setWidgetId(widgetId === w.id ? '' : w.id)}
-              style={widgetId === w.id ? widgetChipOnStyle : widgetChipStyle}
-            >
-              {w.label}
-            </button>
-          ))}
-          {widgetDoc.error !== null ? (
-            <span style={widgetErrStyle}>{`✗ ${widgetDoc.error}`}</span>
-          ) : null}
-          {widgetDoc.warnings.length > 0 ? (
-            <span style={widgetErrStyle} title={widgetDoc.warnings.join('\n')}>
-              {`⚠ ${widgetDoc.warnings.length} 处配置问题`}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-
-      {activeWidget !== null ? (
-        <div style={widgetPanelStyle}>
-          {activeWidget.params.length === 0 ? (
-            <span style={widgetLabelStyle}>{'无参数'}</span>
-          ) : (
-            activeWidget.params.map((p) => (
-              <label key={p.name} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }} title={p.name}>
-                <span style={widgetLabelStyle}>{p.label ?? p.name}</span>
-                {p.type === 'bool' ? (
-                  <input
-                    type="checkbox"
-                    checked={widgetParams[p.name] === 'true'}
-                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.checked ? 'true' : 'false' }))}
-                    style={{ width: '14px', height: '14px', cursor: 'pointer' }}
-                  />
-                ) : p.type === 'enum' ? (
-                  <select
-                    value={widgetParams[p.name] ?? ''}
-                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value }))}
-                    style={selectStyle}
-                  >
-                    {(p.options ?? []).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                ) : (
-                  <input
-                    type={p.type === 'int' || p.type === 'float' ? 'number' : 'text'}
-                    value={widgetParams[p.name] ?? ''}
-                    min={p.min}
-                    max={p.max}
-                    step={p.step ?? (p.type === 'float' ? 'any' : undefined)}
-                    onChange={(e: any) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value }))}
-                    style={{ ...widgetInputStyle, width: p.type === 'string' ? '7em' : '5.5em' }}
-                  />
-                )}
-              </label>
-            ))
-          )}
-          <span style={widgetPreviewStyle} title={widgetErr ?? widgetPreview}>
-            {widgetErr !== null ? `✗ ${widgetErr}` : widgetPreview !== '' ? widgetPreview : '预览中…'}
-          </span>
-          {widgetProgress !== '' ? (
-            <span style={widgetPreviewStyle} title={widgetProgress}>{widgetProgress}</span>
-          ) : null}
-          <span style={{ flex: '1 1 auto' }} />
-          {activeWidget.repeat ? (
-            <button
-              type="button"
-              disabled={running || !writable || widgetBusy || jobActive}
-              onClick={() => void doWidgetRun(true)}
-              title={`周期发送：每 ${activeWidget.repeat.interval_ms} ms 一轮，${
-                activeWidget.repeat.count > 0 ? `共 ${activeWidget.repeat.count} 轮` : '直到手动停止'
-              }；上一轮超时只记跳过、不补发`}
-              style={{
-                ...chip,
-                opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
-                cursor: running || !writable || widgetBusy || jobActive ? 'not-allowed' : 'pointer',
-              }}
-            >
-              {'↻ 周期'}
-            </button>
-          ) : null}
-          {jobActive ? (
-            <>
-              <button type="button" onClick={() => void doWidgetPause()} style={chip} title="暂停/恢复（节拍照常走，停掉的记跳过）">
-                {widgetJob?.state === 'paused' ? '▶ 继续任务' : '❚❚ 暂停任务'}
-              </button>
-              <button type="button" onClick={() => void doWidgetCancel()} style={chip} title="停止（1s 内退出，不再发后续步骤）">
-                {'■ 停止任务'}
-              </button>
-            </>
-          ) : null}
-          <button
-            type="button"
-            disabled={running || !writable || widgetBusy || jobActive}
-            onClick={() => void doWidgetRun(false)}
-            title={activeWidget.confirm ? '该组件需要确认后执行' : '执行组件（send/delay/wait 序列）'}
-            style={{
-              ...chip,
-              fontWeight: 600,
-              opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
-              cursor: running || !writable || widgetBusy || jobActive ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {'▶ 发送'}
-          </button>
-        </div>
-      ) : null}
-
       {/* ── 发送面板：与监视会话同一个口（写穿，不重开）── */}
       <form
         onSubmit={(e: any) => void doSend(e)}
         style={{
           flex: '0 0 auto',
           display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          gap: '6px',
           padding: '8px 12px',
           borderTop: '1px solid var(--elab-border)',
           background: 'var(--elab-bg-surface)',
-          flexWrap: 'wrap',
         }}
       >
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 16 16"
-          aria-hidden="true"
-          style={{ flex: '0 0 auto', color: 'var(--elab-fg-faint)' }}
-        >
-          <path
-            d="M2 2.5 6.5 8 2 13.5M7.5 13.5H14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+            style={{ flex: '0 0 auto', color: 'var(--elab-fg-faint)' }}
+          >
+            <path
+              d="M2 2.5 6.5 8 2 13.5M7.5 13.5H14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <input
+            value={draft}
+            onChange={(e: any) => {
+              setDraft(e.currentTarget.value)
+              setHistIdx(-1)
+            }}
+            onKeyDown={onDraftKey}
+            disabled={sendDisabled}
+            placeholder={
+              running
+                ? '有 run 在跑：串口与 run 互斥（N5），等它结束'
+                : sendFormat === 'hex'
+                  ? '输入十六进制，如 01 A0 FF'
+                  : sendFormat === 'auto'
+                    ? '输入任意内容：自动识别 HEX/文本（↑/↓ 调取历史）'
+                    : '输入一行并按回车发送到设备'
+            }
+            aria-label="串口发送内容"
+            style={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              padding: '2px 8px',
+              fontSize: 'var(--elab-fs-xs)',
+              fontFamily: 'var(--elab-font-mono)',
+              borderRadius: 'var(--elab-radius-sm)',
+              border: '1px solid var(--elab-border)',
+              background: 'var(--elab-bg-surface)',
+              color: 'var(--elab-fg-primary)',
+            }}
           />
-        </svg>
-        <select
-          value={sendFormat}
-          onChange={(e: any) => setSendFormat(e.currentTarget.value)}
-          aria-label="发送格式"
-          title="发送表示：HEX 模式按十六进制解析，且不追加行尾"
-          style={selectStyle}
-        >
-          {FORMATS.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.label}
-            </option>
-          ))}
-        </select>
-        <select
-          value={eol}
-          onChange={(e: any) => setEol(e.currentTarget.value)}
-          aria-label="行结束符"
-          disabled={sendFormat === 'hex'}
-          title={sendFormat === 'hex' ? 'HEX 模式不追加行尾（二进制帧多一个字节就是错）' : '追加的行结束符'}
-          style={{ ...selectStyle, opacity: sendFormat === 'hex' ? 0.5 : 1 }}
-        >
-          {EOLS.map((x) => (
-            <option key={x.id} value={x.id}>
-              {x.label}
-            </option>
-          ))}
-        </select>
-        <input
-          value={draft}
-          onChange={(e: any) => {
-            setDraft(e.currentTarget.value)
-            setHistIdx(-1)
-          }}
-          onKeyDown={onDraftKey}
-          disabled={sendDisabled}
-          placeholder={
-            running
-              ? '有 run 在跑：串口与 run 互斥（N5），等它结束'
-              : sendFormat === 'hex'
-                ? '输入十六进制，如 01 A0 FF'
-                : '输入一行并按回车发送到设备'
-          }
-          aria-label="串口发送内容"
-          style={{
-            flex: '1 1 120px',
-            minWidth: 0,
-            padding: '2px 8px',
-            fontSize: 'var(--elab-fs-xs)',
-            fontFamily: 'var(--elab-font-mono)',
-            borderRadius: 'var(--elab-radius-sm)',
-            border: '1px solid var(--elab-border)',
-            background: 'var(--elab-bg-surface)',
-            color: 'var(--elab-fg-primary)',
-          }}
-        />
-        <button
-          type="submit"
-          disabled={sendDisabled || draft.trim() === ''}
-          title={writable ? '发送到设备' : '串口写通道不可用'}
-          style={{
-            ...chip,
-            padding: '2px 10px',
-            fontWeight: 600,
-            borderColor: 'var(--elab-btn-primary-border)',
-            background: sendDisabled ? 'transparent' : 'var(--elab-btn-primary-bg)',
-            color: sendDisabled ? 'var(--elab-fg-dimmed)' : 'var(--elab-btn-primary-fg)',
-            cursor: sendDisabled ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {'发送'}
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".txt,.csv,.log,.json,.hex,text/plain"
-          onChange={(e: any) => void doSendFile(e)}
-          style={{ display: 'none' }}
-        />
-        <button
-          type="button"
-          disabled={sendDisabled || fileBusy}
-          onClick={() => fileRef.current?.click()}
-          title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
-          style={{
-            ...chip,
-            opacity: sendDisabled || fileBusy ? 0.5 : 1,
-            cursor: sendDisabled || fileBusy ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {fileBusy ? '发送中…' : '文件'}
-        </button>
+          <button
+            type="submit"
+            disabled={sendDisabled || draft.trim() === ''}
+            title={writable ? '发送到设备' : '串口写通道不可用'}
+            style={{
+              ...chip,
+              flex: '0 0 auto',
+              padding: '2px 10px',
+              fontWeight: 600,
+              borderColor: 'var(--elab-btn-primary-border)',
+              background: sendDisabled ? 'transparent' : 'var(--elab-btn-primary-bg)',
+              color: sendDisabled ? 'var(--elab-fg-dimmed)' : 'var(--elab-btn-primary-fg)',
+              cursor: sendDisabled ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {'发送'}
+          </button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          <select
+            value={sendFormat}
+            onChange={(e: any) => setSendFormat(e.currentTarget.value)}
+            aria-label="发送格式"
+            title="发送表示：「自动」由服务端判定 HEX/文本；HEX 不追加行尾"
+            style={selectStyle}
+          >
+            {FORMATS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={eol}
+            onChange={(e: any) => setEol(e.currentTarget.value)}
+            aria-label="行结束符"
+            disabled={sendFormat === 'hex' || (sendFormat === 'auto' && sendPreview?.format === 'hex')}
+            title={
+              sendFormat === 'hex' || (sendFormat === 'auto' && sendPreview?.format === 'hex')
+                ? 'HEX 模式不追加行尾（二进制帧多一个字节就是错）'
+                : '追加的行结束符'
+            }
+            style={{
+              ...selectStyle,
+              opacity: sendFormat === 'hex' || (sendFormat === 'auto' && sendPreview?.format === 'hex') ? 0.5 : 1,
+            }}
+          >
+            {EOLS.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            value={loopInterval}
+            onChange={(e: any) => setLoopInterval(e.currentTarget.value)}
+            aria-label="定时发送间隔"
+            title="定时发送间隔（毫秒，≥20；由内核校验）"
+            min={20}
+            step={10}
+            disabled={rawLoopActive}
+            style={{
+              width: 58,
+              minWidth: 0,
+              padding: '2px 6px',
+              fontSize: 'var(--elab-fs-xs)',
+              fontFamily: 'var(--elab-font-mono)',
+              borderRadius: 'var(--elab-radius-sm)',
+              border: '1px solid var(--elab-border)',
+              background: 'var(--elab-bg-surface)',
+              color: 'var(--elab-fg-primary)',
+              opacity: rawLoopActive ? 0.5 : 1,
+            }}
+          />
+          <span style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-dimmed)' }}>ms</span>
+          <button
+            type="button"
+            onClick={() => void (rawLoopActive ? cancelJob() : startLoop())}
+            disabled={running || !writable || (!rawLoopActive && draft.trim() === '')}
+            title="按固定间隔重复发送输入框内容（复用内核任务引擎）"
+            style={{
+              ...chip,
+              padding: '2px 10px',
+              opacity: running || !writable || (!rawLoopActive && draft.trim() === '') ? 0.5 : 1,
+              cursor: running || !writable || (!rawLoopActive && draft.trim() === '') ? 'not-allowed' : 'pointer',
+              borderColor: rawLoopActive ? 'var(--elab-btn-danger-border, var(--elab-border))' : undefined,
+              color: rawLoopActive ? 'var(--elab-btn-danger-fg, var(--elab-fg-primary))' : undefined,
+            }}
+          >
+            {rawLoopActive ? '■ 停止定时' : '⏵ 定时'}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".txt,.csv,.log,.json,.hex,text/plain"
+            onChange={(e: any) => void doSendFile(e)}
+            style={{ display: 'none' }}
+          />
+          <button
+            type="button"
+            disabled={sendDisabled || fileBusy}
+            onClick={() => fileRef.current?.click()}
+            title={`选文件按行发送（每行按当前格式与行尾，最多 ${MAX_FILE_LINES} 行）`}
+            style={{
+              ...chip,
+              opacity: sendDisabled || fileBusy ? 0.5 : 1,
+              cursor: sendDisabled || fileBusy ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {fileBusy ? '发送中…' : '文件'}
+          </button>
+        </div>
       </form>
 
+      {sendPreview !== null ? (
+        sendPreview.ok ? (
+          <div style={barInfo}>
+            {`将发送 ${sendPreview.bytes} B · ${sendPreview.preview_hex || '（空）'}` +
+              (sendPreview.format
+                ? ` · 识别为 ${FORMATS.find((f) => f.id === sendPreview.format)?.label ?? sendPreview.format}`
+                : '') +
+              (sendPreview.format !== 'hex' && sendPreview.eol_key ? ` · 行尾 ${sendPreview.eol_key}` : '')}
+          </div>
+        ) : (
+          <div role="status" style={noticeStyle(true)}>
+            {sendPreview.error ?? '预览失败'}
+          </div>
+        )
+      ) : null}
       {notice !== null ? (
         <div role="status" style={noticeStyle(notice.startsWith('✗'))}>
           {notice}

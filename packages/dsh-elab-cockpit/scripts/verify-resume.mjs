@@ -21,7 +21,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const root = process.argv[2] ?? process.cwd()
-const project = process.argv[3] ?? 'at32_test'
+const project = process.argv[3] ?? 'at32f421g8u7'
 
 async function startHost() {
   const child = spawn('python', ['-u', '-m', 'cockpit.server', '--port', '0', '--reload'], {

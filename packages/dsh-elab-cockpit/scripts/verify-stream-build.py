@@ -15,7 +15,7 @@ from elab.config import Config
 from elab import builder, plan as plan_mod
 
 cfg = Config('.')
-plan = plan_mod.plan_for(cfg, 'at32_test')
+plan = plan_mod.plan_for(cfg, 'at32f421g8u7')
 
 t0 = time.time()
 records = []

@@ -2,7 +2,7 @@
 #
 # ★ 这个文件本身就是「L0 可替换」的证明：
 #   同一套 elab 工作流，换一份 L0 → 换一整套主机路径。
-#   用法：  ELAB_HOST=ci/host.ci.yaml ./elab build -p at32_test
+#   用法：  ELAB_HOST=ci/host.ci.yaml ./elab build -p at32f421g8u7
 #   （workflows/elab.yml 里就是先 cp 成本名再跑）
 #
 # ⚠️ 状态：**模板**。下面的路径是按 Ubuntu runner + apt 安装的常规位置填的，

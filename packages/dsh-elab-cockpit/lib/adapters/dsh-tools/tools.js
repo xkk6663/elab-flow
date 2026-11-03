@@ -495,14 +495,20 @@ export function registerElabTools(register, deps) {
     add(makeTool({
         name: 'elab_serial',
         description: '向指定工程的串口写数据（写硬件！需要 allowAgentWrite 开启）。默认 UTF-8 文本 + CRLF；' +
-            'format=hex 时 data 按十六进制字节发送（空格可有可无）。',
+            'format=auto 由服务端自动判定 HEX/文本；format=hex 时 data 按十六进制字节发送。' +
+            '给 interval_ms 即为定时发送（返回工作快照，state=running，用 job_id 轮询/停止）。',
         parameters: {
             project: { type: 'string', required: true, description: '工程名' },
             data: { type: 'string', required: true, description: '要写入的内容（不含换行符；hex 格式时为十六进制串）' },
             baud: { type: 'number', description: '波特率（默认 115200）' },
-            format: { type: 'string', description: 'utf8 / ascii / gbk / hex（默认 utf8）' },
+            format: { type: 'string', description: 'auto / utf8 / ascii / gbk / hex（默认 utf8）' },
             eol: { type: 'string', description: 'none / lf / crlf（默认 crlf；hex 自动 none）' },
             encoding: { type: 'string', description: '文本编码（默认 utf-8）' },
+            interval_ms: {
+                type: 'number',
+                description: '定时发送间隔（毫秒，≥20）。给了就是周期任务，返回 job 快照',
+            },
+            count: { type: 'number', description: '定时发送轮次；0 = 直到手动停止（最长 600s）' },
         },
         output: jsonOutput,
         presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 串口写' }),
@@ -514,7 +520,8 @@ export function registerElabTools(register, deps) {
                     nextAction: '串口写硬件需要用户在设置里开启 allowAgentWrite；或请用户在面板串口通道手动输入',
                 };
             }
-            return cockpit(deps, '/api/serial', {
+            const loop = args.interval_ms !== undefined;
+            return cockpit(deps, loop ? '/api/serial/loop' : '/api/serial', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -524,6 +531,8 @@ export function registerElabTools(register, deps) {
                     ...(args.format !== undefined ? { format: args.format } : {}),
                     ...(args.eol !== undefined ? { eol: args.eol } : {}),
                     ...(args.encoding !== undefined ? { encoding: args.encoding } : {}),
+                    ...(args.interval_ms !== undefined ? { interval_ms: args.interval_ms } : {}),
+                    ...(args.count !== undefined ? { count: args.count } : {}),
                 }),
             });
         },

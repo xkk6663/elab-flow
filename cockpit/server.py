@@ -37,6 +37,7 @@ if str(_ROOT / "services") not in sys.path:
     sys.path.insert(0, str(_ROOT / "services"))
 
 from elab import adapt as adapt_mod                      # noqa: E402
+from elab import project_admin as project_admin_mod      # noqa: E402
 from elab import flash as flash_mod                      # noqa: E402
 from elab import run as run_mod                      # noqa: E402
 from elab import serialcodec as serialcodec_mod      # noqa: E402
@@ -85,21 +86,34 @@ KERNEL_PLANS = [
 #: 工具层与前端**只渲染**这里的清单；新增能力只改内核，别在工具层写死业务名词。
 SERIAL_META = {
     "views": ["lines", "bytes", "terminal", "wave"],
-    "formats": list(serialterm_mod.SEND_FORMATS),
+    # 「自动」不是一个编码，而是「让内核替你选」—— 但它确实能被
+    # resolve_payload 接受，所以作为可选项一起自描述，前端不用写死。
+    "formats": [*serialterm_mod.SEND_FORMATS, serialterm_mod.AUTO_FORMAT],
     "encodings": ["utf-8", "gbk"],
     "eols": list(serialterm_mod.EOLS.keys()),
     "directions": ["all", "rx", "tx"],
     "decoders": list(serialcodec_mod.DECODERS),
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
                  "capture", "capture_export", "waveform",
+                 # 通用发送面板（P1）：自动格式识别 + 服务端字节预览
+                 "auto_format", "send_preview",
                  # 会话级共享解码：agent 选的 decoder 与面板同图（P3.5）
                  "decoder_share", "decoded_frames",
                  # 自定义发送组件（M1）：chips / 参数 / 预览 / 单条发送
                  "send_widgets", "widget_dry_run", "widget_jobs",
                  # 序列 / 周期（M2）：send+delay+wait、固定节拍、暂停/取消
-                 "widget_sequence", "widget_wait", "widget_repeat", "widget_pause"],
+                 "widget_sequence", "widget_wait", "widget_repeat", "widget_pause",
+                 # 发送框的瞬态周期任务（不落盘，与组件同一引擎）
+                 "raw_loop"],
     # 组件词汇与限制（内核自描述；工具层/前端只渲染，不写死）
     "widget": serialwidgets_mod.meta(),
+    # 定时发送的限制（不写死在面板里）：间隔下限、单任务最长时长、count 语义
+    "loop": {
+        "min_interval_ms": serialwidgets_mod.MIN_REPEAT_MS,
+        "max_duration_s": serialwidgets_mod.MAX_REPEAT_S,
+        "count_zero_means": "until_stop",
+        "interleaving": "exclusive",
+    },
 }
 
 COCKPIT_VERSION = "3.0.0"
@@ -1215,6 +1229,38 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 paused = bool(body.get("paused", True))
                 res = serialwidgets_mod.set_paused(job_id, paused)
                 return self._json(res, 200 if res.get("ok") else 404)
+            if u.path == "/api/serial/loop":
+                # 发送框的「定时发送」：自由帧 → 内核瞬态任务（不落盘）。
+                # ★ 与组件周期共用同一个任务引擎/单任务锁：两条发送入口
+                #   不允许出现两套周期语义（固定节拍、skipped、暂停/取消、10min 上限）。
+                body = self._body()
+                project = str(body.get("project") or "")
+                data = body.get("data")
+                if not isinstance(data, str) or not data.strip():
+                    return self._err(400, "缺少 data（要发送的内容）")
+                dry = bool(body.get("dry_run"))
+                if not dry:
+                    busy = _serial_blocker(self.mgr)
+                    if busy:
+                        return self._err(409, (
+                            f"有闭环正在跑（run={busy.get('run')}，"
+                            f"步骤 {'/'.join(busy.get('steps') or [])}）—— "
+                            f"它要用串口/SWD（约束 N5）。等它跑完，或先取消它。"))
+                res = serialwidgets_mod.run_raw(
+                    self.cfg, project, data,
+                    newline=bool(body.get("newline", True)),
+                    hex_=bool(body.get("hex")), format=body.get("format"),
+                    eol=body.get("eol"), encoding=body.get("encoding"),
+                    interval_ms=body.get("interval_ms"),
+                    count=body.get("count") or 0,
+                    actor=str(body.get("actor") or "human"),
+                    journal=serialconsole_mod.journal_for(self.cfg, project=project),
+                    dry_run=dry)
+                if res.get("stage") == "busy":
+                    return self._err(409, res.get("error") or "已有周期任务在跑")
+                if res.get("stage") == "validate":
+                    return self._err(400, res.get("error") or "定时发送请求不合法")
+                return self._json(res, 200)
             if u.path == "/api/serial":
                 # 手写通道（M3-b）：写一条出去、收一小段回显，一次请求内闭环。
                 # ★ 返回 **200 + ok:false**（而不是 5xx）承载"执行了但没成功"：
@@ -1225,37 +1271,48 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 data = body.get("data")
                 if not isinstance(data, str) or not data.strip():
                     return self._err(400, "缺少 data（要发送的内容）")
+                project = body.get("project") or ""
+                fmt = body.get("format")
+                eol = body.get("eol")
+                encoding = body.get("encoding")
+                # ★ 预览与发送共用 resolve_payload：前端只看结果，不在客户端
+                #   自己编码 —— 否则"预览的字节"和"真发出去的字节"会漂移。
+                #   预览必须在 blocker 之前：它不碰串口，闭环跑着也能先编辑。
+                payload, rfmt, reol, perr = serialterm_mod.resolve_payload(
+                    data, newline=bool(body.get("newline", True)),
+                    hex_=bool(body.get("hex")), format=fmt, eol=eol,
+                    encoding=encoding)
+                if body.get("dry_run"):
+                    if perr:
+                        return self._json({"ok": False, "dry_run": True,
+                                           "error": perr, "format": rfmt,
+                                           "bytes": 0, "preview_hex": ""}, 200)
+                    return self._json({
+                        "ok": True, "dry_run": True, "bytes": len(payload),
+                        "preview_hex": payload.hex(" ").upper(),
+                        "format": rfmt, "eol_key": reol,
+                        "eol": serialterm_mod.EOLS.get(reol, b"").decode("ascii"),
+                    }, 200)
                 busy = _serial_blocker(self.mgr)
                 if busy:
                     return self._err(409, (
                         f"有闭环正在跑（run={busy.get('run')}，"
                         f"步骤 {'/'.join(busy.get('steps') or [])}）—— 它要用串口/SWD，"
                         f"手写通道已在让路（约束 N5）。等它跑完，或先取消它。"))
-                project = body.get("project") or ""
-                fmt = body.get("format")
-                eol = body.get("eol")
-                encoding = body.get("encoding")
                 # ★ 监视会话开着 → 写通道路由**进会话**（同一个口直接 write，
                 #   不重开口 —— 不破坏 N5）。回显不再由本请求带回：读线程会把它
                 #   送进实时流。TX 照旧落 console 留档（"我敲过这一行"不因失败消失）。
-                payload, perr = serialterm_mod.build_payload(
-                    data, newline=bool(body.get("newline", True)),
-                    hex_=bool(body.get("hex")), format=fmt, eol=eol,
-                    encoding=encoding)
                 if perr:
                     return self._json({"ok": False, "error": perr, "port": "",
                                        "baud": 0, "written": 0, "echoed": [],
                                        "via": "monitor"}, 200)
                 n = serialmon_mod.write_through(payload)
                 if n is not None:
-                    fmt_key = (fmt or ("hex" if body.get("hex") else "utf8")).lower()
-                    eol_key = "none" if fmt_key == "hex" else \
-                        (eol or ("crlf" if body.get("newline", True) else "none"))
                     via_res = {"ok": n == len(payload), "via": "monitor",
                                "written": n, "payload_bytes": len(payload),
-                               "format": fmt_key,
+                               "format": rfmt,
                                "eol": serialterm_mod.EOLS.get(
-                                   str(eol_key).lower(), b"").decode("ascii"),
+                                   reol, b"").decode("ascii"),
                                "echoed": [], "error": None if n == len(payload)
                                else "只写出部分字节（口可能已失效，试试关闭重开监视）"}
                     st_ok = serialmon_mod.status()
@@ -1266,7 +1323,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         serialconsole_mod.journal_for(self.cfg, project=project)({
                             "dir": "tx", "text": data, "ok": via_res["ok"],
                             "written": n, "payload_bytes": len(payload),
-                            "via": "monitor", "format": fmt_key,
+                            "via": "monitor", "format": rfmt,
                             "port": via_res["port"], "baud": via_res["baud"],
                             "error": via_res["error"]})
                     except Exception as exc:               # noqa: BLE001
@@ -1374,6 +1431,13 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if u.path == "/api/adapt":
                 # 一键适配（M5.6）：probe 只读在前，write 显式第二段。
                 return self._adapt(self._body())
+            if u.path == "/api/pick-folder":
+                # 原生「选择文件夹」对话框：浏览器沙箱拿不到本地绝对路径，
+                # 由同机运行的内核代开系统目录选择框（适配路径的唯一入口）。
+                return self._pick_folder(self._body())
+            if u.path == "/api/project":
+                # 工程接入文件的命名与移除（左侧工程轨的「⋯」菜单）。
+                return self._project_admin(self._body())
             return self._err(404, f"未知 API：{u.path}")
         except ElabError as exc:
             return self._err(400, str(exc))
@@ -1535,6 +1599,79 @@ class CockpitHandler(BaseHTTPRequestHandler):
                      "+ build 出 elf + 零改动守卫 untouched=true"),
         }
         return self._json(out, 200)
+
+    def _pick_folder(self, body: dict):
+        """``POST /api/pick-folder`` —— 打开**系统原生**「选择文件夹」对话框。
+
+        为什么必须由内核代开：浏览器安全沙箱下 ``<input>`` 拿不到本地目录的
+        绝对路径，而 ``/api/adapt`` 硬性要求绝对路径（相对路径会让"适配到哪"
+        取决于服务进程的 cwd）。内核与用户在同一台机器上，是最合适的中介。
+
+        返回 ``{"path": "C:/..."}`` 或 ``{"cancelled": true}``；tkinter 不可用
+        （精简版 Python / 无桌面会话）时抛 ElabError，前端回落到手工输入。
+        """
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as exc:                           # noqa: BLE001
+            raise ElabError(
+                f"当前 Python 环境没有可用的 tkinter，无法打开目录选择框"
+                f"（{exc}）—— 请手工输入工程绝对路径") from exc
+        initial = str(body.get("initial") or "").strip()
+        # Tk 必须在创建窗口的线程里使用；HTTP 处理器线程即可（单次、独占）。
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:                                  # noqa: BLE001
+            pass
+        try:
+            picked = filedialog.askdirectory(
+                parent=root,
+                title="选择工程根目录（含 CMakeLists.txt）",
+                initialdir=initial or None,
+                mustexist=True,
+            )
+        finally:
+            try:
+                root.destroy()
+            except Exception:                              # noqa: BLE001
+                pass
+        if not picked:
+            return self._json({"cancelled": True}, 200)
+        return self._json({"path": Path(picked).as_posix()}, 200)
+
+    # ── 工程管理（重命名 / 移除）──────────────────────────────────
+    def _project_admin(self, body: dict):
+        """``POST /api/project`` —— 左侧工程轨的「⋯」菜单。
+
+            action=rename  {name, new_name}  改 projects/<name>.yaml 的基名与 name 行
+            action=remove  {name}            先留 .bak 再删接入文件
+
+        ★ 只动接入层（`projects/*.yaml`），业务工程零改动（guard 快照不受影响）。
+        ★ 成功后**必须**重载 Config —— 否则工程轨仍显示旧卡片（C29 同一教训）。
+        ★ 有闭环在跑 → 409：改名/删除会让在途 run 的 project 键失效。
+        """
+        action = str(body.get("action") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if action not in ("rename", "remove"):
+            raise ElabError(f"action 必须是 rename / remove：{action!r}")
+        if not name:
+            raise ElabError("缺少 name")
+        active = self.mgr.list_active()
+        if active:
+            raise ElabError(
+                f"有闭环正在跑（run={active[0].get('run')}）—— 等它结束再改名/移除")
+
+        if action == "rename":
+            res = project_admin_mod.rename(self.cfg, name, str(body.get("new_name") or ""))
+        else:
+            res = project_admin_mod.remove(self.cfg, name)
+
+        cfg2 = Config(self.cfg.root)
+        type(self).cfg = cfg2
+        self.mgr.cfg = cfg2
+        return self._json({**res, "action": action})
 
     # ── 静态 ────────────────────────────────────────────────────
     def _static(self, path: str):

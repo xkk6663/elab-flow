@@ -8,8 +8,9 @@ elab-Flow 闭环驾驶舱的 DSH 插件 —— 一块**嵌入式闭环开发**�
 
 > agent 在面板里发起「发现 → 适配 → 编译 → 烧录 → 调试校验 → 串口闭环」，用户在同一块窄栏里实时看到
 > 阶梯进度、日志尾、RAM/FLASH 占用、串口四视图与波形 —— 不是“agent 闷头跑完再报一句结果”。
-> 串口发送组件（参数化命令积木）在 DSH 窄栏与独立 WebUI 右侧栏**是同一组组件**：同一份
-> `projects/<name>.widgets.json`、同一条 loopback ICD、同一套预览 / 执行 / 周期 / 暂停语义。
+> 串口发送面板（**自动格式识别 / 发送历史 / 定时发送**）在 DSH 窄栏与独立 WebUI 右侧栏是同一套：
+> 同一条 loopback ICD、同一份内核编码入口（`serialterm.resolve_payload`）、同一个预览口径。
+> 参数化发送组件仍保留给 **agent**（`elab_serial_widget`，按固定格式发送），面板不再展示组件 UI。
 
 **插件瘦、依赖自动补齐**：插件只含工具层（面板 / 进程托管 / `elab_*` agent 工具），不内置内核源码、
 芯片数据或工具二进制。首次打开面板会**自动下载内核归档并安装工具链**，唯一需要事先准备的是主机 Python 3.10+。
@@ -22,9 +23,9 @@ STM32F411CEU6 + CMSIS-DAP + COM10，工程 `f411`；同一次运行里串口正�
 ### 行视图：设备原始数据 + 真流量统计
 
 `[alive] tick=…` 心跳与 `-0.486,0.486` 正弦逐行滚动；右上角 `72 044 B · 275 批` 是真实 RX 流量；
-底部是工程接入的发送组件行。**跟随**只由「▾ 跟随 / ↺ 恢复」按钮控制，始终贴最新一行。
+底部是通用发送栏（自动格式 / 发送历史 / 定时）。**跟随**只由「▾ 跟随 / ↺ 恢复」按钮控制，始终贴最新一行。
 
-<img src="assets/dsh-serial-lines.png" width="330" alt="DSH 窄栏·串口行视图：正弦数值、心跳与组件行">
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/dsh-serial-lines.png" width="330" alt="DSH 窄栏·串口行视图：正弦数值与心跳">
 
 ### 波形视图：数字变曲线，通道可绑定
 
@@ -32,36 +33,44 @@ FireWater 解码器把 ASCII 行解成 2 通道；「通道绑定」CH0 / CH1 �
 面板级「❚❚ 暂停跟随」冻结时间窗，「− / ＋ / ⤾」控制缩放与平移。总帧数、通道数与
 「帧环挤出」（内核帧环为高流量兜底的滑动窗口）都如实标注。
 
-<img src="assets/dsh-serial-wave.png" width="330" alt="DSH 窄栏·串口波形视图：双通道正弦、通道绑定与缩放">
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/dsh-serial-wave.png" width="330" alt="DSH 窄栏·串口波形视图：双通道正弦、通道绑定与缩放">
 
-### 发送组件：参数 → 服务端预览 → 单条 / 周期
+### 通用发送：自动识别 → 服务端预览 → 历史 → 定时
 
-点 chip 展开参数（窄栏同一时间只展开一个）；预览字节由**服务端渲染**，与真正发送共用同一条路径，
-所以“看到的就是发出去的”。参数类型（`int` / `bool` / `hex`…）先转成 JSON 值，服务端再校验一次。
+输入框默认 `自动` 格式：`0x0A 0xFF`、`0A,FF` 这类明确 HEX 写法按字节发；裸 `1234` 按文本发
+（避免误判）。预览字节由**服务端**渲染，与真正发送共用 `resolve_payload`，所以“看到的就是发出去的”。
+发送过的内容按 `{文本, 格式, 行尾}` 记入历史（最多 50 条），点历史即可重发。
 
-<img src="assets/dsh-serial-widget-params.png" width="330" alt="DSH 窄栏·组件参数与服务端预览字节">
+`⏵ 定时` 按固定间隔重复发送输入框内容（内核瞬态任务，不落盘、不写工程文件）；
+`■ 停止定时` 立即 `cancelled`，1 s 内退出、不再发后续轮次。
 
-`↻ 周期` 按 `repeat.interval_ms` 固定节拍重复整个组件（上一轮没跑完就记 `跳过`，不补发）。
-本轮实测板子回 `PONG:7`，进度行显示 `运行中 · 第 35 轮 · 280 B`：
+### 波形面板功能（独立 WebUI 实机）
 
-<img src="assets/dsh-serial-widget-run.png" width="330" alt="DSH 窄栏·周期任务运行中：轮次、字节、暂停/停止">
+下面三张来自独立 WebUI 的串口波形页，与 DSH 窄栏共用同一套 `WaveChart` 与 ICD
+（只是宽度与主题令牌不同）。**使用绝对地址**，市场页才能把 README 里的图片渲染出来。
 
-暂停只冻结节拍（轮次与字节不再增长），恢复后继续；停止是**人点即 cancelled**，1 s 内退出、不再发后续步骤：
+默认视图：FireWater 双通道正弦，帧环、窗口与挤出计数如实标注。
 
-<img src="assets/dsh-serial-widget-paused.png" width="330" alt="DSH 窄栏·任务已暂停：继续任务">
-<img src="assets/dsh-serial-widget-stopped.png" width="330" alt="DSH 窄栏·任务已停止：终态与累计字节">
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/wave-panel/01-wave-default.png" width="330" alt="波形默认视图：FireWater 双通道正弦">
+
+＋新建面板：每个面板独立缩放 / 平移 / 跟随，互不影响。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/wave-panel/02-new-panel.png" width="330" alt="新建面板：独立缩放与通道">
+
+通道绑定：CH0 / CH1 决定当前面板画哪几条曲线。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/wave-panel/03-bind-ch0.png" width="330" alt="通道绑定 CH0">
 
 ## 与独立 WebUI（右侧栏）的一致性
 
 | 面 | DSH 窄栏 | 独立 WebUI 右侧栏 | 一致性 |
 |---|---|---|---|
 | 数据通道 | loopback HTTP ICD（`/elab/api/serial/*`） | 同一 ICD | 同一份契约，工具层不 import 内核 |
-| 组件来源 | `projects/<name>.widgets.json` | 同一文件 | 同一 `rev` 乐观锁 |
-| 参数 / 预览 / 执行 | 服务端渲染预览 + 异步任务轮询 | 同一路径 | 预览字节 = 发送字节 |
-| 周期 / 暂停 / 停止 | `↻ 周期` / `❚❚ 暂停任务` / `■ 停止任务` | 同一组语义 | 停止即 `cancelled` |
+| 发送编码 | `serialterm.resolve_payload`（`auto/utf8/gbk/hex` + 行尾） | 同一函数 | 预览字节 = 发送字节 |
+| 历史 / 定时 | `{text,format,eol}` × 50；`POST /api/serial/loop` | 同一份 UI 核心纯函数 | 同一去重与轮询语义 |
 | 波形 | 多面板 + 通道绑定 + 面板级跟随 | 同一套 `WaveChart` 行为 | 只是宽度与主题令牌不同 |
 
-窄栏只做两件事上的取舍：**布局更紧凑**（组件行贴在发送栏上方、参数行按类型定宽），以及
+窄栏只做两件事上的取舍：**布局更紧凑**（发送栏与预览行更短），以及
 **跟随口径**——文本视图（行 / 字节 / 终端）跟随最新数据，波形视图不参与文本跟随（它有自己的面板级跟随），
 否则窄栏内容溢出时贴底滚动会把「全部 / ＋新建面板 / 通道绑定」整行滚出可视区。
 
@@ -134,54 +143,49 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 | 导出 / 清空 | 当前视图导出；清空只清面板缓冲，不影响内核任务 |
 | 解码器 | JustFloat（`N×4` 小端 float + 尾 `00 00 80 7F`）与 FireWater（ASCII 每行一个采样）等；可会话级共享（agent 选 / 人选） |
 | 多面板 / 通道绑定 | `＋新建面板` 独立缩放平移；「通道绑定」CH0…CHn 决定该面板画哪几条；面板级「暂停跟随」冻结时间窗 |
+| 自动格式 | 发送框默认 `自动`：明确 HEX 写法（`0x`/`\x` 前缀或分隔符 + 全十六进制 + 偶数字节）按字节发，其余按文本 |
+| 发送历史 | 记住前 50 条 `{文本, 格式, 行尾}`，同内容去重移尾，点历史即回填并可直接重发 |
+| 定时发送 | `⏵ 定时` 按固定间隔重复发送（`POST /api/serial/loop`，内核瞬态任务），`■ 停止定时` 立即取消 |
 
 > 波形页若只看到 `0 帧 · 0 通道` 且「半帧」字节数一直涨，多半是解码器没选对（设备发 ASCII 就别选 JustFloat）。
 
-## 发送组件（M1 / M2 / M3）
+## 通用发送面板
 
-组件是**参数化命令积木**，声明在 `projects/<name>.widgets.json`（UTF-8、原子写、可提交）：
+面板只保留一个入口：**输入内容 → 自动/手动选格式与行尾 → 预览字节 → 单次或定时发送**。
+编码与预览都在服务端完成（`serialterm.resolve_payload`），前端不另立一套规则，
+因此两个检出、两块面板看到的字节永远一致。
 
-```json
-{
-  "version": 1,
-  "rev": 0,
-  "widgets": [
-    {
-      "id": "ping_loop",
-      "label": "PING 周期（100ms）",
-      "format": "utf8",
-      "eol": "crlf",
-      "params": [{ "name": "n", "label": "payload 数字", "type": "int", "default": 7, "min": 0, "max": 65535 }],
-      "steps": [{ "kind": "send", "text": "PING:{{n}}" }],
-      "repeat": { "interval_ms": 100, "count": 0 }
-    }
-  ]
-}
-```
+- 格式：`自动 / ascii / utf8 / gbk / hex`；HEX 不追加行尾，文本按选择追加 `none/LF/CR/CRLF/Tab`。
+- 历史：见上表；升级前保存的纯字符串历史会被自动迁移成 `{text, format, eol}`。
+- 定时：间隔 ≥ 20 ms、总时长 ≤ 600 s，固定节拍，上一轮没跑完记 `跳过`、不补发。
 
-- **步骤**：`send`（模板渲染）/ `delay`（等待）/ `wait`（等一行匹配，`within_s` 内命中，正则可配）。
-- **repeat**：固定节拍重复整个组件；上一轮没跑完就记 `跳过`，不补发；`count: 0` = 直到手动停止。
-- **confirm**：标记为危险/写硬件的组件在面板上多点一次确认。
-- **边界**：文件 ≤ 64 KB、≤ 64 组件、≤ 20 步、≤ 32 参数、label ≤ 24 字；单次运行 ≤ 60 s、
-  周期总时长 ≤ 600 s；写操作带 `rev` 乐观锁，冲突返回 409，客户端重读再存。
+### 参数化组件（仅 agent）
 
-里程碑与验收（均已真机跑通）：
+`projects/<name>.widgets.json` 的组件模型（send/delay/wait 序列、`repeat`、`rev` 乐观锁）仍然保留，
+但**不在面板展示**：它作为 agent 的「固定格式发送夹具」，通过 `elab_serial_widget`
+（list / run / status / cancel / save / delete）使用。`allowAgentWrite=false`（默认）时运行与落盘被拒。
 
-| 里程碑 | 内容 |
-|---|---|
-| **M1** | 数据模型 / 校验 / 服务端渲染 / `dry_run` 预览 / 单条执行 / 任务状态 |
-| **M2** | 参数表单、线性序列、周期发送（固定节拍 + `skipped`）、暂停 / 恢复 / 停止、400 ms 轮询 |
-| **M3** | DSH 窄栏组件 UI、`elab_serial_widget` Agent 工具、`allowAgentWrite` 门禁、`rev` 乐观锁 |
+组件边界不变：文件 ≤ 64 KB、≤ 64 组件、≤ 20 步、≤ 32 参数；单次运行 ≤ 60 s、周期总时长 ≤ 600 s。
 
-**agent 与人共用的同一条路**：agent 侧走 `elab_serial_widget`（read / run / pause / cancel / save / delete）；
-`allowAgentWrite=false`（默认）时运行与落盘被拒，只有人能点。人点「■ 停止任务」立刻 `cancelled`。
+## 实机验证（2026-11-03，STM32F103C8T6 / COM10）
 
-## 实机验证（2026-11-02，STM32F411CEU6 / COM10）
+- 硬件：STM32F103C8T6（64 KB Flash / 20 KB RAM）+ CMSIS-DAP 探针 + COM10，工程 `STM32F103C8T6`
+- 闭环：`doctor` → `build --clean` → `flash`（Verified OK）→ `monitor` 判 **ok**
+- 串口：`auto` 选口 @115200；复位后打印 `[log] HAL init / clock / GPIO / DMA / UART1 / main loop`，
+  主循环每秒 `[alive] test tick=…` 心跳；串口日志能直接看出程序跑到哪一步
+- 收发：`PING` → `[cmd] PING -> PONG`；`STAT` 返回 `stage=main_loop` / tick / cmds / rx 字节；
+  `ECHO hello-elab` 原样回显——TX → 设备 → RX 全链路验证
+- 自动格式：`0x0A 0xFF` 预览 `2 B · 0A FF · 识别为 HEX`，与真发字节一致
+- 定时发送：`STAT` / 200ms 实测运行态连续回显，`■ 停止定时` 后 1s 内退出
+- 历史：`↑` 恢复上一条 `STAT`（含格式与行尾）
+- 截图：见 [串口面板使用教程](../../docs/tutorials/wave-panel-usage.md)
+
+### 既有验证（2026-11-02，STM32F411CEU6 波形）
 
 - 硬件：STM32F411CEU6（512 KB Flash / 128 KB RAM）+ CMSIS-DAP 探针 + COM10，工程 `f411`
 - 串口：`auto` 选口 @115200；FireWater 两通道正弦 + 每秒 `[alive] tick=…` 心跳
 - 波形：`1024 帧（显示）· 共 4773 帧 · 2 通道 · 跳过 58`（「跳过」正是心跳等非数字行）
-- 组件：`PING 周期（100ms）` 实测 `运行中 · 第 35 轮 · 280 B`，板子回 `PONG:7`；
+- 组件（历史，M2 时期的面板 UI）：`PING 周期（100ms）` 实测 `运行中 · 第 35 轮 · 280 B`，板子回 `PONG:7`；
   暂停 → `已暂停 · 第 50 轮 · 400 B`；停止 → `已停止 · 400 B`
 - 跟随：行缓冲封顶 2000 行后仍持续贴最新行；点「↺ 恢复」立即回底，点「▾ 跟随」后上滚保持位置
 
@@ -194,7 +198,8 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 - 环境包清单里的 `sha256` 未核对的条目会按首次下载记录（TOFU）并给出告警。
 - 芯片支持来自适配包（`packs/official/**` 与社区市场），插件不承载芯片知识。
 - 内核版本低于 `2.1.0` 时只提示，不阻断；步骤标签会退回插件内置默认。
-- 串口组件只支持 UTF-8 / HEX 文本模板；二进制大块灌装（OTA 之外的固件下载）不在本组件模型内。
+- 串口组件（仅 agent）只支持 UTF-8 / HEX 文本模板；二进制大块灌装（OTA 之外的固件下载）不在组件模型内。
+- 自动格式是**保守识别**：裸十六进制字符串（如 `1234`）按文本发送，要发字节请写 `0x12 0x34` 或 `12,34`。
 
 ## 故障排查
 
@@ -205,8 +210,8 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 | 面板能开但编译按钮报错 | 看设置页「环境」红灯项；内核 `elab doctor` 给更准确的结论 |
 | 串口打不开 | 装 `pyserial`（`pip install pyserial`），并确认没有被其它进程占用 |
 | 波形 `0 帧 · 0 通道` | 解码器与设备输出协议不匹配（ASCII 行请选 FireWater） |
-| 组件区空白 / `✗` 提示 | 检查 `projects/<name>.widgets.json` 是否存在、JSON 是否合法、是否超上限 |
-| 周期任务不动 | 上一轮未跑完会记「跳过」；`wait` 超时会让整轮失败，检查匹配正则 |
+| 定时发送不动 | 上一轮未发完会记「跳过」；检查间隔 ≥ 20 ms、闭环/组件任务是否占用串口 |
+| 自动识别成了文本 | 裸十六进制按文本处理；改写 `0xNN` 或 `NN,NN` 后看预览行确认 |
 | 面板提示"内核旧" | `git -C <elabRoot> pull --ff-only` 后重开面板 |
 
 ## 安装

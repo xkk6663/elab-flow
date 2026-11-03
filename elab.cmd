@@ -1,6 +1,6 @@
 @echo off
-rem elab —— elab-Flow 命令行入口（Windows cmd / CI .cmd 版）
-rem 用法：  elab.cmd build -p stm32_test
+rem elab.cmd -- elab-Flow CLI entry point (Windows cmd / CI)
+rem usage: elab.cmd build -p STM32F103C8T6
 setlocal
 set HERE=%~dp0
 if "%ELAB_PYTHON%"=="" (set PY=python) else (set PY=%ELAB_PYTHON%)

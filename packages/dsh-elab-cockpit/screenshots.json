@@ -1,8 +1,4 @@
 [
   "assets/dsh-serial-lines.png",
-  "assets/dsh-serial-wave.png",
-  "assets/dsh-serial-widget-params.png",
-  "assets/dsh-serial-widget-run.png",
-  "assets/dsh-serial-widget-paused.png",
-  "assets/dsh-serial-widget-stopped.png"
+  "assets/dsh-serial-wave.png"
 ]

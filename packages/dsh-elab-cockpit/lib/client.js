@@ -370,6 +370,53 @@ function reduce(s, e) {
   }
 }
 
+// ../cockpit-ui-core/src/send-history.ts
+var SEND_FORMATS = ["auto", "ascii", "utf8", "gbk", "hex"];
+var SEND_EOLS = ["none", "lf", "cr", "crlf", "tab"];
+var SEND_HISTORY_MAX = 50;
+function isFormat(x) {
+  return typeof x === "string" && SEND_FORMATS.includes(x);
+}
+function isEol(x) {
+  return typeof x === "string" && SEND_EOLS.includes(x);
+}
+function parseSendHistory(raw) {
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out = [];
+  for (const item of parsed) {
+    if (typeof item === "string") {
+      if (item.trim()) out.push({ text: item, format: "auto", eol: "crlf", at: 0 });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const e = item;
+    if (typeof e.text !== "string" || !e.text.trim()) continue;
+    out.push({
+      text: e.text,
+      format: isFormat(e.format) ? e.format : "auto",
+      eol: isEol(e.eol) ? e.eol : "crlf",
+      at: typeof e.at === "number" ? e.at : 0
+    });
+  }
+  return out.slice(-SEND_HISTORY_MAX);
+}
+function pushSendHistory(prev, entry, max = SEND_HISTORY_MAX) {
+  const rest = prev.filter(
+    (x) => !(x.text === entry.text && x.format === entry.format && x.eol === entry.eol)
+  );
+  return [...rest, entry].slice(-max);
+}
+function serializeSendHistory(items) {
+  return JSON.stringify(items.slice(-SEND_HISTORY_MAX));
+}
+
 // src/domain/envpack.ts
 var DEFAULT_KERNEL_VERSION = "3.0.0";
 
@@ -1082,6 +1129,16 @@ var elabApi = {
   startRunAsAgent: (opts) => post(withSession("/elab/api/run", opts.sessionId), opts, { "x-elab-actor": "agent" }),
   cancel: (run, reason, sessionId) => post(withSession("/elab/api/cancel", sessionId), { run, reason }),
   serial: (opts) => post(withSession("/elab/api/serial", opts.sessionId), opts),
+  /**
+   * 只算字节、不碰串口（`dry_run`）。
+   * ★ 自动识别/预览的唯一事实源在服务端；前端不在本地编码。
+   */
+  serialPreview: (opts) => post(withSession("/elab/api/serial", opts.sessionId), {
+    ...opts,
+    dry_run: true
+  }),
+  /** 发送框定时发送：瞬态任务（不落盘），与组件共用任务引擎。 */
+  serialLoop: (opts) => post(withSession("/elab/api/serial/loop", opts.sessionId), opts),
   serialMonitor: (after = 0, sessionId) => request(withSession(`/elab/api/serial/monitor?after=${after}`, sessionId)),
   /** P1 字节真值：增量拉取原始批次（方向/时间/序号 + base64）。 */
   serialMonitorBytes: (after = 0, opts) => {
@@ -2493,6 +2550,7 @@ var DIRS = [
   { id: "tx", label: "TX" }
 ];
 var FORMATS = [
+  { id: "auto", label: "\u81EA\u52A8" },
   { id: "utf8", label: "\u6587\u672C" },
   { id: "ascii", label: "ASCII" },
   { id: "gbk", label: "GBK" },
@@ -2512,48 +2570,18 @@ function baudOptions(current2) {
 var MAX_BYTE_BLOCKS = 200;
 var MAX_WAVE_BYTES = 64 * 1024;
 var HISTORY_KEY = "elab.serial.send.history";
-var HISTORY_MAX = 50;
 var MAX_FILE_LINES = 2e3;
 function loadHistory() {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (raw === null) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string").slice(-HISTORY_MAX) : [];
+    return parseSendHistory(localStorage.getItem(HISTORY_KEY));
   } catch {
     return [];
   }
 }
 function saveHistory(items) {
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(-HISTORY_MAX)));
+    localStorage.setItem(HISTORY_KEY, serializeSendHistory(items));
   } catch {
-  }
-}
-function coerceWidgetParams(w, raw) {
-  const out = {};
-  for (const p of w.params) {
-    const v = raw[p.name] ?? "";
-    if (p.type === "int") {
-      const n = Number.parseInt(v, 10);
-      out[p.name] = Number.isNaN(n) ? v : n;
-    } else if (p.type === "float") {
-      const n = Number(v);
-      out[p.name] = Number.isNaN(n) ? v : n;
-    } else if (p.type === "bool") {
-      out[p.name] = v === "true" || v === "1";
-    } else {
-      out[p.name] = v;
-    }
-  }
-  return out;
-}
-function widgetHex(b64) {
-  if (b64 === void 0 || b64 === "") return "";
-  try {
-    return Array.from(b64ToBytes(b64)).map((b) => b.toString(16).padStart(2, "0")).join(" ").toUpperCase();
-  } catch {
-    return "";
   }
 }
 var BYTE_COLORS = {
@@ -2653,88 +2681,6 @@ var metaStyle = {
   fontVariantNumeric: "tabular-nums",
   whiteSpace: "nowrap"
 };
-var widgetInputStyle = {
-  flex: "0 0 auto",
-  height: "20px",
-  padding: "0 4px",
-  fontFamily: "var(--elab-font-mono)",
-  fontSize: "var(--elab-fs-xs)",
-  color: "var(--elab-fg-primary)",
-  background: "var(--elab-bg-surface)",
-  border: "1px solid var(--elab-border)",
-  borderRadius: "var(--elab-radius-sm)",
-  width: "6.5em"
-};
-var widgetBarStyle = {
-  flex: "0 0 auto",
-  display: "flex",
-  alignItems: "center",
-  gap: "4px",
-  padding: "4px 12px",
-  borderTop: "1px solid var(--elab-border)",
-  background: "var(--elab-bg-surface)",
-  flexWrap: "wrap",
-  minWidth: 0
-};
-var widgetTitleStyle = {
-  flex: "0 0 auto",
-  fontSize: "var(--elab-fs-xs)",
-  color: "var(--elab-fg-faint)",
-  letterSpacing: "0.04em",
-  marginRight: "2px"
-};
-var widgetChipStyle = {
-  flex: "0 0 auto",
-  padding: "2px 8px",
-  fontFamily: "var(--elab-font-mono)",
-  fontSize: "var(--elab-fs-xs)",
-  lineHeight: 1.4,
-  background: "var(--elab-bg-code)",
-  color: "var(--elab-fg-secondary)",
-  border: "1px solid var(--elab-border)",
-  borderRadius: "var(--elab-radius-sm)",
-  cursor: "pointer",
-  whiteSpace: "nowrap"
-};
-var widgetChipOnStyle = {
-  ...widgetChipStyle,
-  background: "var(--elab-btn-primary-bg)",
-  color: "var(--elab-fg-primary)",
-  borderColor: "var(--elab-accent)",
-  fontWeight: 600
-};
-var widgetErrStyle = {
-  flex: "0 0 auto",
-  fontSize: "var(--elab-fs-xs)",
-  color: "var(--elab-status-fail)",
-  cursor: "help"
-};
-var widgetPanelStyle = {
-  flex: "0 0 auto",
-  display: "flex",
-  alignItems: "center",
-  gap: "6px",
-  flexWrap: "wrap",
-  padding: "5px 12px",
-  borderTop: "1px dashed var(--elab-border)",
-  background: "color-mix(in srgb, var(--elab-btn-primary-bg) 35%, transparent)",
-  minWidth: 0
-};
-var widgetPreviewStyle = {
-  flex: "0 1 auto",
-  minWidth: 0,
-  fontFamily: "var(--elab-font-mono)",
-  fontSize: "var(--elab-fs-xs)",
-  color: "var(--elab-fg-faint)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap"
-};
-var widgetLabelStyle = {
-  fontSize: "var(--elab-fs-xs)",
-  color: "var(--elab-fg-dimmed)",
-  whiteSpace: "nowrap"
-};
 var waveBadge = {
   padding: "1px 6px",
   borderRadius: "999px",
@@ -2824,9 +2770,11 @@ function SerialPane(props) {
   const [query, setQuery] = useState("");
   const [follow, setFollow] = useState(true);
   const [draft, setDraft] = useState("");
-  const [sendFormat, setSendFormat] = useState("utf8");
+  const [sendFormat, setSendFormat] = useState("auto");
   const [eol, setEol] = useState("crlf");
   const [notice, setNotice] = useState(null);
+  const [sendPreview, setSendPreview] = useState(null);
+  const [loopInterval, setLoopInterval] = useState("100");
   const [history, setHistory] = useState(loadHistory);
   const [histIdx, setHistIdx] = useState(-1);
   const [fileBusy, setFileBusy] = useState(false);
@@ -2834,14 +2782,8 @@ function SerialPane(props) {
   const [replay, setReplay] = useState(null);
   const [replayErr, setReplayErr] = useState(null);
   const replayRef = useRef(null);
-  const [widgetDoc, setWidgetDoc] = useState(null);
-  const [widgetId, setWidgetId] = useState("");
-  const [widgetParams, setWidgetParams] = useState({});
-  const [widgetPreview, setWidgetPreview] = useState("");
-  const [widgetErr, setWidgetErr] = useState(null);
-  const [widgetBusy, setWidgetBusy] = useState(false);
-  const [widgetJob, setWidgetJob] = useState(null);
-  const [widgetJobId, setWidgetJobId] = useState("");
+  const [job, setJob] = useState(null);
+  const [jobId, setJobId] = useState("");
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
   const scrollRef = useRef(null);
   const followRef = useRef(true);
@@ -3055,10 +2997,27 @@ function SerialPane(props) {
     a.click();
     window.setTimeout(() => URL.revokeObjectURL(a.href), 4e3);
   }, [filtered, stream.snap, project]);
-  const remember = useCallback((text) => {
+  const previewSend = api.serialPreview;
+  useEffect(() => {
+    if (draft.trim() === "") {
+      setSendPreview(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      previewSend({
+        project: project ?? "",
+        data: draft,
+        port,
+        baud,
+        format: sendFormat,
+        eol
+      }).then(setSendPreview).catch(() => setSendPreview(null));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [draft, sendFormat, eol, project, port, baud, previewSend]);
+  const remember = useCallback((entry) => {
     setHistory((prev) => {
-      if (prev.length > 0 && prev[prev.length - 1] === text) return prev;
-      const next = [...prev, text].slice(-HISTORY_MAX);
+      const next = pushSendHistory(prev, entry);
       saveHistory(next);
       return next;
     });
@@ -3079,9 +3038,9 @@ function SerialPane(props) {
           return;
         }
         setNotice(
-          `\u2713 \u5DF2\u53D1\u9001 ${r.written} B \u2192 ${r.port}@${r.baud}` + (r.via === "monitor" ? "\uFF08\u7ECF\u76D1\u89C6\u4F1A\u8BDD\uFF0C\u56DE\u663E\u89C1\u5B9E\u65F6\u6D41\uFF09" : "")
+          `\u2713 \u5DF2\u53D1\u9001 ${r.written} B \u2192 ${r.port}@${r.baud}` + (r.format ? `\uFF08\u8BC6\u522B\u4E3A ${String(r.format).toUpperCase()}\uFF09` : "") + (r.via === "monitor" ? "\uFF08\u7ECF\u76D1\u89C6\u4F1A\u8BDD\uFF0C\u56DE\u663E\u89C1\u5B9E\u65F6\u6D41\uFF09" : "")
         );
-        remember(draft);
+        remember({ text: draft, format: sendFormat, eol, at: Date.now() });
         setDraft("");
       } catch (err) {
         setNotice(`\u2717 ${err instanceof Error ? err.message : String(err)}`);
@@ -3098,7 +3057,9 @@ function SerialPane(props) {
       if (key === "ArrowUp") {
         const next2 = histIdx === -1 ? history.length - 1 : Math.max(0, histIdx - 1);
         setHistIdx(next2);
-        setDraft(history[next2]);
+        setDraft(history[next2].text);
+        setSendFormat(history[next2].format);
+        setEol(history[next2].eol);
         return;
       }
       if (histIdx === -1) return;
@@ -3108,7 +3069,9 @@ function SerialPane(props) {
         setDraft("");
       } else {
         setHistIdx(next);
-        setDraft(history[next]);
+        setDraft(history[next].text);
+        setSendFormat(history[next].format);
+        setEol(history[next].eol);
       }
     },
     [history, histIdx]
@@ -3166,88 +3129,8 @@ function SerialPane(props) {
     },
     [running, writable, sendFormat, eol, stream]
   );
-  const widgets = useMemo(() => widgetDoc?.widgets ?? [], [widgetDoc]);
-  const activeWidget = useMemo(
-    () => widgets.find((w) => w.id === widgetId) ?? null,
-    [widgets, widgetId]
-  );
-  const jobActive = widgetJob !== null && (widgetJob.state === "running" || widgetJob.state === "paused" || widgetJob.state === "cancelling");
-  const widgetProgress = (() => {
-    if (widgetJob === null) return "";
-    const rounds = widgetJob.rounds ?? 0;
-    const skipped = widgetJob.skipped ?? 0;
-    const bytes = widgetJob.total_bytes ?? 0;
-    const st = widgetJob.state ?? "";
-    if (jobActive) {
-      const skip = skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${skipped} \u62CD` : "";
-      const label = st === "paused" ? "\u5DF2\u6682\u505C" : st === "cancelling" ? "\u505C\u6B62\u4E2D\u2026" : "\u8FD0\u884C\u4E2D";
-      return `${label} \xB7 \u7B2C ${rounds} \u8F6E${skip} \xB7 ${bytes} B`;
-    }
-    if (st === "done") return `\u5B8C\u6210 \xB7 ${rounds} \u8F6E \xB7 ${bytes} B${skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${skipped} \u62CD` : ""}`;
-    if (st === "cancelled") return `\u5DF2\u505C\u6B62 \xB7 ${bytes} B`;
-    if (st === "failed") return `\u5931\u8D25${widgetJob.error ? ` \xB7 ${widgetJob.error}` : ""}`;
-    return "";
-  })();
-  useEffect(() => {
-    if (project === "") {
-      setWidgetDoc(null);
-      setWidgetId("");
-      return;
-    }
-    let alive = true;
-    void api.serialWidgets(project).then((d) => {
-      if (!alive) return;
-      setWidgetDoc(d);
-      setWidgetErr(d.error);
-      setWidgetId((cur) => d.widgets.some((w) => w.id === cur) ? cur : "");
-    }).catch((e) => {
-      if (alive) setWidgetErr(e instanceof Error ? e.message : String(e));
-    });
-    return () => {
-      alive = false;
-    };
-  }, [api, project]);
-  useEffect(() => {
-    if (activeWidget === null) {
-      setWidgetParams({});
-      return;
-    }
-    const next = {};
-    for (const p of activeWidget.params) {
-      next[p.name] = p.type === "bool" ? p.default === true ? "true" : "false" : String(p.default ?? "");
-    }
-    setWidgetParams(next);
-  }, [activeWidget?.id]);
-  useEffect(() => {
-    if (activeWidget === null || project === "") {
-      setWidgetPreview("");
-      return;
-    }
-    let alive = true;
-    const timer = window.setTimeout(() => {
-      void api.serialWidgetRun({
-        project,
-        id: activeWidget.id,
-        params: coerceWidgetParams(activeWidget, widgetParams),
-        dryRun: true
-      }).then((r) => {
-        if (!alive) return;
-        if (!r.ok) {
-          setWidgetPreview("");
-          setWidgetErr(r.error ?? "\u9884\u89C8\u5931\u8D25");
-          return;
-        }
-        setWidgetErr(null);
-        setWidgetPreview(`\u9884\u89C8 ${r.bytes ?? 0} B \xB7 ${widgetHex(r.preview_b64)}`);
-      }).catch((e) => {
-        if (alive) setWidgetErr(e instanceof Error ? e.message : String(e));
-      });
-    }, 150);
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
-  }, [api, project, activeWidget, widgetParams]);
+  const jobActive = job !== null && (job.state === "running" || job.state === "paused" || job.state === "cancelling");
+  const rawLoopActive = jobActive && job?.source === "raw";
   useEffect(() => {
     if (project === "") return;
     let alive = true;
@@ -3255,9 +3138,8 @@ function SerialPane(props) {
       if (!alive) return;
       const active = j.state === "running" || j.state === "paused" || j.state === "cancelling";
       if (!active || j.job_id === void 0 || j.job_id === "") return;
-      setWidgetJob(j);
-      setWidgetJobId(j.job_id);
-      setWidgetBusy(true);
+      setJob(j);
+      setJobId(j.job_id);
     }).catch(() => {
     });
     return () => {
@@ -3265,25 +3147,23 @@ function SerialPane(props) {
     };
   }, [api, project]);
   useEffect(() => {
-    if (widgetJobId === "") return;
+    if (jobId === "") return;
     let alive = true;
     let timer = 0;
     const isActive = (s) => s === "running" || s === "paused" || s === "cancelling";
     const tick = async () => {
       try {
-        const j = await api.serialWidgetJob(widgetJobId);
+        const j = await api.serialWidgetJob(jobId);
         if (!alive) return;
-        setWidgetJob(j);
+        setJob(j);
         if (isActive(j.state)) {
           timer = window.setTimeout(() => void tick(), 400);
-        } else {
-          setWidgetBusy(false);
-          if (!j.ok) setWidgetErr(j.error ?? "\u6267\u884C\u5931\u8D25");
+        } else if (!j.ok) {
+          setNotice(`\u2717 \u4EFB\u52A1\u5931\u8D25\uFF1A${j.error ?? "\u672A\u77E5\u539F\u56E0"}`);
         }
       } catch (e) {
         if (!alive) return;
-        setWidgetBusy(false);
-        setWidgetErr(e instanceof Error ? e.message : String(e));
+        setNotice(`\u2717 ${e instanceof Error ? e.message : String(e)}`);
       }
     };
     void tick();
@@ -3291,53 +3171,53 @@ function SerialPane(props) {
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [api, widgetJobId]);
-  const doWidgetRun = useCallback(async (repeat) => {
-    if (activeWidget === null || running || !writable || widgetBusy || jobActive) return;
-    if (activeWidget.confirm && !window.confirm(`\u7EC4\u4EF6\u300C${activeWidget.label}\u300D\u9700\u8981\u786E\u8BA4\u540E\u6267\u884C\uFF0C\u7EE7\u7EED\uFF1F`)) return;
-    setWidgetErr(null);
-    setWidgetBusy(true);
-    try {
-      const r = await api.serialWidgetRun({
-        project,
-        id: activeWidget.id,
-        params: coerceWidgetParams(activeWidget, widgetParams),
-        repeat,
-        confirm: activeWidget.confirm
-      });
-      setWidgetJob(r);
-      if (r.job_id !== void 0 && r.job_id !== "") setWidgetJobId(r.job_id);
-      const stillActive = r.state === "running" || r.state === "paused" || r.state === "cancelling";
-      if (!stillActive) {
-        setWidgetBusy(false);
-        if (!r.ok) setWidgetErr(r.error ?? "\u6267\u884C\u5931\u8D25");
-      }
-    } catch (e) {
-      setWidgetBusy(false);
-      setWidgetErr(e instanceof Error ? e.message : String(e));
-    }
-  }, [activeWidget, running, writable, widgetBusy, jobActive, api, project, widgetParams]);
-  const doWidgetCancel = useCallback(async () => {
-    const id = widgetJob?.job_id ?? widgetJobId;
+  }, [api, jobId]);
+  const cancelJob = useCallback(async () => {
+    const id = job?.job_id ?? jobId;
     if (id === "") return;
     try {
       await api.serialWidgetCancel(id);
-      setWidgetJob(await api.serialWidgetJob(id));
+      setJob(await api.serialWidgetJob(id));
     } catch (e) {
-      setWidgetErr(e instanceof Error ? e.message : String(e));
+      setNotice(`\u2717 ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [api, widgetJob, widgetJobId]);
-  const doWidgetPause = useCallback(async () => {
-    const id = widgetJob?.job_id ?? widgetJobId;
-    if (id === "") return;
-    const paused = widgetJob?.state !== "paused";
+  }, [api, job, jobId]);
+  const startLoop = useCallback(async () => {
+    if (draft.trim() === "" || running || !writable) return;
+    const ms = Number(loopInterval);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      setNotice("\u2717 \u5B9A\u65F6\u53D1\u9001\u95F4\u9694\u5FC5\u987B\u662F\u6B63\u6570\uFF08\u6BEB\u79D2\uFF09");
+      return;
+    }
+    setNotice(null);
     try {
-      await api.serialWidgetPause(id, paused);
-      setWidgetJob(await api.serialWidgetJob(id));
+      const r = await api.serialLoop({
+        project: project ?? "",
+        data: draft,
+        port,
+        baud,
+        format: sendFormat,
+        eol,
+        interval_ms: Math.round(ms),
+        count: 0
+      });
+      if (r.job_id !== void 0) setJobId(r.job_id);
+      setJob(r);
+      if (!r.ok) {
+        setNotice(`\u2717 ${r.error ?? "\u5B9A\u65F6\u53D1\u9001\u88AB\u62D2\u7EDD"}`);
+        return;
+      }
+      setNotice(`\u23F5 \u5B9A\u65F6\u53D1\u9001\u4E2D\uFF1A\u6BCF ${Math.round(ms)}ms\uFF08\u505C\u6B62\u540E\u624D\u53EF\u624B\u53D1\uFF09`);
+      remember({
+        text: draft,
+        format: sendFormat,
+        eol,
+        at: Date.now()
+      });
     } catch (e) {
-      setWidgetErr(e instanceof Error ? e.message : String(e));
+      setNotice(`\u2717 ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [api, widgetJob, widgetJobId]);
+  }, [api, project, draft, port, baud, sendFormat, eol, loopInterval, running, writable, remember]);
   const doReplay = useCallback(async (e) => {
     const file = e.currentTarget.files?.[0];
     e.currentTarget.value = "";
@@ -3371,7 +3251,7 @@ function SerialPane(props) {
   const cap = stream.snap?.capture;
   const capActive = cap?.active === true;
   const reachable = stream.active || running;
-  const sendDisabled = running || !writable;
+  const sendDisabled = running || !writable || jobActive;
   return /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" } }, /* @__PURE__ */ react_default.createElement(
     "div",
     {
@@ -3778,73 +3658,7 @@ function SerialPane(props) {
         }
       );
     })() : null, sharedActive && sharedState !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${shownFrames.length} \u5E27\uFF08\u663E\u793A\uFF09\xB7 \u5171 ${sharedState.total_frames} \u5E27 \xB7 ${sharedState.channels} \u901A\u9053${sharedState.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${sharedState.skipped}` : ""}${sharedState.pending_bytes > 0 ? ` \xB7 \u534A\u5E27 ${sharedState.pending_bytes} B\uFF08\u4E0B\u4E00\u6279\u7EED\u89E3\uFF09` : ""}${sharedState.covered > 0 ? ` \xB7 \u5E27\u73AF\u6324\u51FA ${sharedState.covered}` : ""}${stream.gapDecoded > 0 ? ` \xB7 \u9762\u677F\u6F0F\u62C9 ${stream.gapDecoded}` : ""}`) : null, sharedActive === false && decodeMeta !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "8px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, `${frames.length} \u5E27 \xB7 ${decodeMeta.channels} \u901A\u9053${decodeMeta.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${decodeMeta.skipped}` : ""}${decodeMeta.pending > 0 ? ` \xB7 \u534A\u5E27 ${decodeMeta.pending} B\uFF08\u4E0B\u4E00\u8F6E\u7EED\u89E3\uFF09` : ""}`) : null) : null
-  ), widgetDoc !== null && project !== "" && (widgets.length > 0 || widgetDoc.warnings.length > 0 || widgetDoc.error !== null) ? /* @__PURE__ */ react_default.createElement("div", { style: widgetBarStyle }, /* @__PURE__ */ react_default.createElement("span", { style: widgetTitleStyle }, "\u7EC4\u4EF6"), widgets.map((w) => /* @__PURE__ */ react_default.createElement(
-    "button",
-    {
-      key: w.id,
-      type: "button",
-      title: `${w.label} \xB7 ${w.steps.length} \u6B65${w.group ? ` \xB7 ${w.group}` : ""}`,
-      onClick: () => setWidgetId(widgetId === w.id ? "" : w.id),
-      style: widgetId === w.id ? widgetChipOnStyle : widgetChipStyle
-    },
-    w.label
-  )), widgetDoc.error !== null ? /* @__PURE__ */ react_default.createElement("span", { style: widgetErrStyle }, `\u2717 ${widgetDoc.error}`) : null, widgetDoc.warnings.length > 0 ? /* @__PURE__ */ react_default.createElement("span", { style: widgetErrStyle, title: widgetDoc.warnings.join("\n") }, `\u26A0 ${widgetDoc.warnings.length} \u5904\u914D\u7F6E\u95EE\u9898`) : null) : null, activeWidget !== null ? /* @__PURE__ */ react_default.createElement("div", { style: widgetPanelStyle }, activeWidget.params.length === 0 ? /* @__PURE__ */ react_default.createElement("span", { style: widgetLabelStyle }, "\u65E0\u53C2\u6570") : activeWidget.params.map((p) => /* @__PURE__ */ react_default.createElement("label", { key: p.name, style: { display: "inline-flex", alignItems: "center", gap: "3px" }, title: p.name }, /* @__PURE__ */ react_default.createElement("span", { style: widgetLabelStyle }, p.label ?? p.name), p.type === "bool" ? /* @__PURE__ */ react_default.createElement(
-    "input",
-    {
-      type: "checkbox",
-      checked: widgetParams[p.name] === "true",
-      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.checked ? "true" : "false" })),
-      style: { width: "14px", height: "14px", cursor: "pointer" }
-    }
-  ) : p.type === "enum" ? /* @__PURE__ */ react_default.createElement(
-    "select",
-    {
-      value: widgetParams[p.name] ?? "",
-      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value })),
-      style: selectStyle
-    },
-    (p.options ?? []).map((o) => /* @__PURE__ */ react_default.createElement("option", { key: o.value, value: o.value }, o.label))
-  ) : /* @__PURE__ */ react_default.createElement(
-    "input",
-    {
-      type: p.type === "int" || p.type === "float" ? "number" : "text",
-      value: widgetParams[p.name] ?? "",
-      min: p.min,
-      max: p.max,
-      step: p.step ?? (p.type === "float" ? "any" : void 0),
-      onChange: (e) => setWidgetParams((cur) => ({ ...cur, [p.name]: e.currentTarget.value })),
-      style: { ...widgetInputStyle, width: p.type === "string" ? "7em" : "5.5em" }
-    }
-  ))), /* @__PURE__ */ react_default.createElement("span", { style: widgetPreviewStyle, title: widgetErr ?? widgetPreview }, widgetErr !== null ? `\u2717 ${widgetErr}` : widgetPreview !== "" ? widgetPreview : "\u9884\u89C8\u4E2D\u2026"), widgetProgress !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: widgetPreviewStyle, title: widgetProgress }, widgetProgress) : null, /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto" } }), activeWidget.repeat ? /* @__PURE__ */ react_default.createElement(
-    "button",
-    {
-      type: "button",
-      disabled: running || !writable || widgetBusy || jobActive,
-      onClick: () => void doWidgetRun(true),
-      title: `\u5468\u671F\u53D1\u9001\uFF1A\u6BCF ${activeWidget.repeat.interval_ms} ms \u4E00\u8F6E\uFF0C${activeWidget.repeat.count > 0 ? `\u5171 ${activeWidget.repeat.count} \u8F6E` : "\u76F4\u5230\u624B\u52A8\u505C\u6B62"}\uFF1B\u4E0A\u4E00\u8F6E\u8D85\u65F6\u53EA\u8BB0\u8DF3\u8FC7\u3001\u4E0D\u8865\u53D1`,
-      style: {
-        ...chip,
-        opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
-        cursor: running || !writable || widgetBusy || jobActive ? "not-allowed" : "pointer"
-      }
-    },
-    "\u21BB \u5468\u671F"
-  ) : null, jobActive ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void doWidgetPause(), style: chip, title: "\u6682\u505C/\u6062\u590D\uFF08\u8282\u62CD\u7167\u5E38\u8D70\uFF0C\u505C\u6389\u7684\u8BB0\u8DF3\u8FC7\uFF09" }, widgetJob?.state === "paused" ? "\u25B6 \u7EE7\u7EED\u4EFB\u52A1" : "\u275A\u275A \u6682\u505C\u4EFB\u52A1"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void doWidgetCancel(), style: chip, title: "\u505C\u6B62\uFF081s \u5185\u9000\u51FA\uFF0C\u4E0D\u518D\u53D1\u540E\u7EED\u6B65\u9AA4\uFF09" }, "\u25A0 \u505C\u6B62\u4EFB\u52A1")) : null, /* @__PURE__ */ react_default.createElement(
-    "button",
-    {
-      type: "button",
-      disabled: running || !writable || widgetBusy || jobActive,
-      onClick: () => void doWidgetRun(false),
-      title: activeWidget.confirm ? "\u8BE5\u7EC4\u4EF6\u9700\u8981\u786E\u8BA4\u540E\u6267\u884C" : "\u6267\u884C\u7EC4\u4EF6\uFF08send/delay/wait \u5E8F\u5217\uFF09",
-      style: {
-        ...chip,
-        fontWeight: 600,
-        opacity: running || !writable || widgetBusy || jobActive ? 0.5 : 1,
-        cursor: running || !writable || widgetBusy || jobActive ? "not-allowed" : "pointer"
-      }
-    },
-    "\u25B6 \u53D1\u9001"
-  )) : null, /* @__PURE__ */ react_default.createElement(
+  ), /* @__PURE__ */ react_default.createElement(
     "form",
     {
       onSubmit: (e) => void doSend(e),
@@ -3886,7 +3700,7 @@ function SerialPane(props) {
         value: sendFormat,
         onChange: (e) => setSendFormat(e.currentTarget.value),
         "aria-label": "\u53D1\u9001\u683C\u5F0F",
-        title: "\u53D1\u9001\u8868\u793A\uFF1AHEX \u6A21\u5F0F\u6309\u5341\u516D\u8FDB\u5236\u89E3\u6790\uFF0C\u4E14\u4E0D\u8FFD\u52A0\u884C\u5C3E",
+        title: "\u53D1\u9001\u8868\u793A\uFF1A\u300C\u81EA\u52A8\u300D\u7531\u670D\u52A1\u7AEF\u5224\u5B9A HEX/\u6587\u672C\uFF1BHEX \u4E0D\u8FFD\u52A0\u884C\u5C3E",
         style: selectStyle
       },
       FORMATS.map((f) => /* @__PURE__ */ react_default.createElement("option", { key: f.id, value: f.id }, f.label))
@@ -3897,9 +3711,12 @@ function SerialPane(props) {
         value: eol,
         onChange: (e) => setEol(e.currentTarget.value),
         "aria-label": "\u884C\u7ED3\u675F\u7B26",
-        disabled: sendFormat === "hex",
-        title: sendFormat === "hex" ? "HEX \u6A21\u5F0F\u4E0D\u8FFD\u52A0\u884C\u5C3E\uFF08\u4E8C\u8FDB\u5236\u5E27\u591A\u4E00\u4E2A\u5B57\u8282\u5C31\u662F\u9519\uFF09" : "\u8FFD\u52A0\u7684\u884C\u7ED3\u675F\u7B26",
-        style: { ...selectStyle, opacity: sendFormat === "hex" ? 0.5 : 1 }
+        disabled: sendFormat === "hex" || sendFormat === "auto" && sendPreview?.format === "hex",
+        title: sendFormat === "hex" || sendFormat === "auto" && sendPreview?.format === "hex" ? "HEX \u6A21\u5F0F\u4E0D\u8FFD\u52A0\u884C\u5C3E\uFF08\u4E8C\u8FDB\u5236\u5E27\u591A\u4E00\u4E2A\u5B57\u8282\u5C31\u662F\u9519\uFF09" : "\u8FFD\u52A0\u7684\u884C\u7ED3\u675F\u7B26",
+        style: {
+          ...selectStyle,
+          opacity: sendFormat === "hex" || sendFormat === "auto" && sendPreview?.format === "hex" ? 0.5 : 1
+        }
       },
       EOLS.map((x) => /* @__PURE__ */ react_default.createElement("option", { key: x.id, value: x.id }, x.label))
     ),
@@ -3913,7 +3730,7 @@ function SerialPane(props) {
         },
         onKeyDown: onDraftKey,
         disabled: sendDisabled,
-        placeholder: running ? "\u6709 run \u5728\u8DD1\uFF1A\u4E32\u53E3\u4E0E run \u4E92\u65A5\uFF08N5\uFF09\uFF0C\u7B49\u5B83\u7ED3\u675F" : sendFormat === "hex" ? "\u8F93\u5165\u5341\u516D\u8FDB\u5236\uFF0C\u5982 01 A0 FF" : "\u8F93\u5165\u4E00\u884C\u5E76\u6309\u56DE\u8F66\u53D1\u9001\u5230\u8BBE\u5907",
+        placeholder: running ? "\u6709 run \u5728\u8DD1\uFF1A\u4E32\u53E3\u4E0E run \u4E92\u65A5\uFF08N5\uFF09\uFF0C\u7B49\u5B83\u7ED3\u675F" : sendFormat === "hex" ? "\u8F93\u5165\u5341\u516D\u8FDB\u5236\uFF0C\u5982 01 A0 FF" : sendFormat === "auto" ? "\u8F93\u5165\u4EFB\u610F\u5185\u5BB9\uFF1A\u81EA\u52A8\u8BC6\u522B HEX/\u6587\u672C\uFF08\u2191/\u2193 \u8C03\u53D6\u5386\u53F2\uFF09" : "\u8F93\u5165\u4E00\u884C\u5E76\u6309\u56DE\u8F66\u53D1\u9001\u5230\u8BBE\u5907",
         "aria-label": "\u4E32\u53E3\u53D1\u9001\u5185\u5BB9",
         style: {
           flex: "1 1 120px",
@@ -3949,6 +3766,50 @@ function SerialPane(props) {
     /* @__PURE__ */ react_default.createElement(
       "input",
       {
+        type: "number",
+        value: loopInterval,
+        onChange: (e) => setLoopInterval(e.currentTarget.value),
+        "aria-label": "\u5B9A\u65F6\u53D1\u9001\u95F4\u9694",
+        title: "\u5B9A\u65F6\u53D1\u9001\u95F4\u9694\uFF08\u6BEB\u79D2\uFF0C\u226520\uFF1B\u7531\u5185\u6838\u6821\u9A8C\uFF09",
+        min: 20,
+        step: 10,
+        disabled: rawLoopActive,
+        style: {
+          width: 58,
+          minWidth: 0,
+          padding: "2px 6px",
+          fontSize: "var(--elab-fs-xs)",
+          fontFamily: "var(--elab-font-mono)",
+          borderRadius: "var(--elab-radius-sm)",
+          border: "1px solid var(--elab-border)",
+          background: "var(--elab-bg-surface)",
+          color: "var(--elab-fg-primary)",
+          opacity: rawLoopActive ? 0.5 : 1
+        }
+      }
+    ),
+    /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-dimmed)" } }, "ms"),
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => void (rawLoopActive ? cancelJob() : startLoop()),
+        disabled: running || !writable || !rawLoopActive && draft.trim() === "",
+        title: "\u6309\u56FA\u5B9A\u95F4\u9694\u91CD\u590D\u53D1\u9001\u8F93\u5165\u6846\u5185\u5BB9\uFF08\u590D\u7528\u5185\u6838\u4EFB\u52A1\u5F15\u64CE\uFF09",
+        style: {
+          ...chip,
+          padding: "2px 10px",
+          opacity: running || !writable || !rawLoopActive && draft.trim() === "" ? 0.5 : 1,
+          cursor: running || !writable || !rawLoopActive && draft.trim() === "" ? "not-allowed" : "pointer",
+          borderColor: rawLoopActive ? "var(--elab-btn-danger-border, var(--elab-border))" : void 0,
+          color: rawLoopActive ? "var(--elab-btn-danger-fg, var(--elab-fg-primary))" : void 0
+        }
+      },
+      rawLoopActive ? "\u25A0 \u505C\u6B62\u5B9A\u65F6" : "\u23F5 \u5B9A\u65F6"
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
         ref: fileRef,
         type: "file",
         accept: ".txt,.csv,.log,.json,.hex,text/plain",
@@ -3971,7 +3832,7 @@ function SerialPane(props) {
       },
       fileBusy ? "\u53D1\u9001\u4E2D\u2026" : "\u6587\u4EF6"
     )
-  ), notice !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: noticeStyle(notice.startsWith("\u2717")) }, notice) : null, project === "" ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u672A\u9009\u62E9\u5DE5\u7A0B\uFF1A\u7AEF\u53E3/\u6CE2\u7279\u7387\u65E0\u6CD5\u89E3\u6790\uFF08\u5148\u5728\u9876\u90E8\u9009\u4E00\u4E2A\u5DE5\u7A0B\uFF09\u3002") : null, stream.active !== true && running !== true && !replayMode ? /* @__PURE__ */ react_default.createElement(
+  ), sendPreview !== null ? sendPreview.ok ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u5C06\u53D1\u9001 ${sendPreview.bytes} B \xB7 ${sendPreview.preview_hex || "\uFF08\u7A7A\uFF09"}` + (sendPreview.format ? ` \xB7 \u8BC6\u522B\u4E3A ${FORMATS.find((f) => f.id === sendPreview.format)?.label ?? sendPreview.format}` : "") + (sendPreview.format !== "hex" && sendPreview.eol_key ? ` \xB7 \u884C\u5C3E ${sendPreview.eol_key}` : "")) : /* @__PURE__ */ react_default.createElement("div", { role: "status", style: noticeStyle(true) }, sendPreview.error ?? "\u9884\u89C8\u5931\u8D25") : null, notice !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: noticeStyle(notice.startsWith("\u2717")) }, notice) : null, project === "" ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u672A\u9009\u62E9\u5DE5\u7A0B\uFF1A\u7AEF\u53E3/\u6CE2\u7279\u7387\u65E0\u6CD5\u89E3\u6790\uFF08\u5148\u5728\u9876\u90E8\u9009\u4E00\u4E2A\u5DE5\u7A0B\uFF09\u3002") : null, stream.active !== true && running !== true && !replayMode ? /* @__PURE__ */ react_default.createElement(
     "div",
     {
       style: {

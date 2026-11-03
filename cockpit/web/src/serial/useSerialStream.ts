@@ -21,6 +21,7 @@ import type {
   SerialFormat,
   SerialMonitorLine,
   SerialMonitorSnapshot,
+  SerialPreviewResult,
   SerialWriteResult,
 } from "../api/types";
 
@@ -51,6 +52,8 @@ export interface SerialStream {
   clear(): Promise<void>;
   setPaused(next: boolean): Promise<void>;
   send(data: string, opts: SerialSendOpts): Promise<SerialWriteResult>;
+  /** 只算字节、不碰串口（dry_run）：预览与发送共用服务端解析 */
+  preview(data: string, opts: SerialSendOpts): Promise<SerialPreviewResult>;
 }
 
 export interface UseSerialStreamArgs {
@@ -281,6 +284,20 @@ export function useSerialStream({
     [project, port, baud],
   );
 
+  const preview = useCallback(
+    (data: string, opts: SerialSendOpts) =>
+      api.serialPreview({
+        project,
+        data,
+        port,
+        baud,
+        format: opts.format,
+        eol: opts.eol,
+        encoding: opts.encoding,
+      }),
+    [project, port, baud],
+  );
+
   // initial 变化（别的标签页在 caps 刷新后体现）时同步一次
   useEffect(() => {
     if (initial && initial.active && !snapRef.current?.active) {
@@ -302,5 +319,6 @@ export function useSerialStream({
     clear,
     setPaused,
     send,
+    preview,
   };
 }

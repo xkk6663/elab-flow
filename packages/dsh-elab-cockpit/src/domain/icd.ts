@@ -325,11 +325,28 @@ export interface SerialWriteResult {
   elapsed_s: number;
   /** 实际附加的行结束符（`\r\n`；hex 模式为空串） */
   eol: string;
-  /** 实际使用的发送格式（utf8/ascii/gbk/hex） */
+  /** 实际使用的发送格式（utf8/ascii/gbk/hex；auto 会落成具体值） */
   format?: string;
   error: string | null;
   /** "monitor" = 写通道被路由进了常驻监视会话（不重开口；回显走实时流） */
   via?: "monitor";
+}
+
+/**
+ * `POST /api/serial` 的 `dry_run` 结果：只算字节，不碰串口。
+ * ★ 自动格式识别与字节预览的唯一事实源在服务端（`serialterm.resolve_payload`）。
+ */
+export interface SerialPreviewResult {
+  ok: boolean;
+  dry_run: true;
+  bytes: number;
+  /** 待发字节的 HEX（大写、空格分隔） */
+  preview_hex: string;
+  /** 服务端解析后的实际格式 */
+  format?: string;
+  eol_key?: string;
+  eol?: string;
+  error?: string | null;
 }
 
 // ── 串口发送组件（send widgets, M1/M2）──────────────────────────
@@ -439,8 +456,12 @@ export interface SerialWidgetRunResult {
   ok: boolean
   /** true = 已受理，任务仍在后台跑（看 job_id 轮询） */
   accepted?: boolean
-  /** 组件 id */
+  /** 组件 id；raw 定时任务为 `raw.<ts>` */
   id: string
+  /** 任务来源：组件 / 发送框定时（不落盘） */
+  source?: 'widget' | 'raw'
+  /** 展示名（raw 为「发送框」） */
+  label?: string
   job_id?: string
   state?: SerialWidgetJobState
   actor?: string
@@ -601,6 +622,10 @@ export interface SerialMonitorWriteResult {
   via: "monitor";
   written: number;
   payload_bytes: number;
+  /** 实际使用的发送格式（auto 会落成具体值） */
+  format?: string;
+  /** 实际附加的行尾（HEX 为空串） */
+  eol?: string;
   echoed: string[];
   port: string;
   baud: number;
