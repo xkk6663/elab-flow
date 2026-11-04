@@ -37,6 +37,7 @@ import threading
 import time
 
 from . import serialport as sp
+from . import serialtransport as tp
 from .config import Config
 
 #: 写完之后收回显的默认窗口（ms）。理由见模块 docstring。
@@ -54,26 +55,23 @@ _LOCK_WAIT_S = 2.0
 
 
 def resolve_target(cfg: Config, name: str, *, port: str = "",
-                   baud: int = 0) -> dict:
+                   baud: int = 0, line=None) -> dict:
     """解析出「这条命令发给谁」。
 
-    返回 ``{spec, port, baud, reason, backend, ports}``；``port`` 为空表示选不出来
+    返回 ``{spec, port, baud, reason, backend, ports}`` 的**旧键不变**，另追加
+    ``kind / line / line_text / net / errors``；``port`` 为空表示选不出来
     （理由在 ``reason`` 里，**不猜**）。
+
+    ★ 实现已收口到 ``serialtransport.resolve`` —— 本函数只做「旧形状」的投影，
+      避免与本模块的其它调用点再各写一套优先级。
     """
-    proj = cfg.resolved_project(name) if name else {}
-    ser = (proj.get("serial") or {}) if isinstance(proj, dict) else {}
-    host_ser = (cfg.host or {}).get("serial") or {}
-
-    spec = port or ser.get("port") or host_ser.get("default") or "auto"
-    try:
-        b = int(baud or ser.get("baud") or host_ser.get("baud") or 115200)
-    except (TypeError, ValueError):
-        b = 115200
-
-    ports, backend = sp.list_ports()
-    chosen, why, _cands = sp.select_port(spec, ports)
-    return {"spec": spec, "port": chosen, "baud": b, "reason": why,
-            "backend": backend, "ports": ports}
+    t = tp.resolve(cfg, name, port=port, baud=baud, line=line)
+    return {"spec": t.port_spec, "port": t.label, "baud": t.baud,
+            "reason": t.reason, "backend": t.backend,
+            "ports": list(t.ports), "kind": t.kind,
+            "line": t.line.as_dict(), "line_text": t.line.text,
+            "net": dict(t.net), "errors": list(t.errors),
+            "error": "；".join(t.errors)}
 
 
 #: 发送表示（P1 起）：旧参数 ``hex_``/``newline`` 是这里的别名。
@@ -185,6 +183,7 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
                read_ms: int = DEFAULT_READ_MS, newline: bool = True,
                hex_: bool = False, format: str | None = None,
                eol: str | None = None, encoding: str | None = None,
+               line=None, transport: str = "", net: dict | None = None,
                log=print) -> dict:
     """写一条出去、读一小段回显、关掉。返回值可直接 JSON 化。
 
@@ -201,6 +200,7 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
         encoding=encoding)
     res: dict = {
         "ok": False, "port": "", "baud": 0, "backend": "", "layer": "",
+        "line": "", "line_text": "",
         "written": 0, "payload_bytes": 0, "echoed": [], "bytes_read": 0,
         "read_ms": read_ms, "elapsed_s": 0.0,
         "eol": EOLS.get(str(eol_key).lower(), b"").decode("ascii"),
@@ -218,14 +218,21 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
 
     caps = sp.capabilities()
     res["layer"] = caps["layer"]
-    if not caps["available"]:
+
+    t = tp.resolve(cfg, name, port=port, baud=baud, line=line,
+                   transport=transport, net=net)
+    # ★ 串口后端不可用只挡**串口传输**：网络传输（M4）不走 pyserial，
+    #   在没有串口后端的机器上照样能用（例如 CI 里跑 TCP 回环）。
+    if t.kind == "serial" and not caps["available"]:
         res["error"] = f"串口后端不可用（layer={caps['layer']}）：{caps.get('hint')}"
         return res
-
-    t = resolve_target(cfg, name, port=port, baud=baud)
-    res["port"], res["baud"], res["backend"] = t["port"], t["baud"], t["backend"]
-    if not t["port"]:
-        res["error"] = t["reason"]
+    res["port"], res["baud"], res["backend"] = t.label, t.baud, t.backend
+    res["line"], res["line_text"] = t.line.as_dict(), t.line.text
+    if t.errors:
+        res["error"] = "传输配置不合法：" + "；".join(t.errors)
+        return res
+    if not t.label:
+        res["error"] = t.reason
         return res
 
     if not _LOCK.acquire(timeout=_LOCK_WAIT_S):
@@ -234,7 +241,7 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
         return res
     t0 = time.time()
     try:
-        with sp.SerialIO(t["port"], t["baud"], for_write=True) as s:
+        with tp.open(t, for_write=True) as s:
             res["backend"] = s.backend
             n = s.write(payload)
             res["written"] = n
@@ -243,7 +250,7 @@ def _roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int =
                 res["error"] = (f"只写出 {n}/{len(payload)} 字节"
                                 f"（写超时或流控阻塞）")
                 return res
-            log(f"[serialterm] → {t['port']}@{t['baud']} 写出 {n} B，"
+            log(f"[serialterm] → {t.label}@{t.baud} {t.line.text} 写出 {n} B，"
                 f"收 {read_ms}ms 回显…")
             lines, total, buf = _drain(s, read_ms)
             if buf.strip():
@@ -283,6 +290,7 @@ def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 
               read_ms: int = DEFAULT_READ_MS, newline: bool = True,
               hex_: bool = False, format: str | None = None,
               eol: str | None = None, encoding: str | None = None,
+              line=None, transport: str = "", net: dict | None = None,
               journal=None, log=print) -> dict:
     """`_roundtrip` + **可选落盘**（M3-b2）。
 
@@ -292,7 +300,8 @@ def roundtrip(cfg: Config, name: str, *, data: str, port: str = "", baud: int = 
     """
     res = _roundtrip(cfg, name, data=data, port=port, baud=baud, read_ms=read_ms,
                      newline=newline, hex_=hex_, format=format, eol=eol,
-                     encoding=encoding, log=log)
+                     encoding=encoding, line=line, transport=transport, net=net,
+                     log=log)
     _journal(journal, res, data=data,
              hex_=(res.get("format") or "").lower() == "hex",
              newline=newline, log=log)

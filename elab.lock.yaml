@@ -1,0 +1,10 @@
+# elab.lock.yaml —— 由 `elab lock` 回填，请勿手改
+schema_version: 1
+packs:
+  artery/at32: 0.1.0
+  espressif/esp32: 0.1.0
+  st/stm32: 0.1.0
+providers:
+  espressif/idf: 1.0.0
+host:
+  idf_version: "6.1"

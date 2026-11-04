@@ -97,6 +97,15 @@ class Plan:
           ``project.yaml`` + ``chip.yaml`` + ``host.yaml`` 派生，用户不用写配置。
         """
         dbg = self.chip.get("debug") or {}
+        backend = str(dbg.get("backend") or "openocd")
+        # ESP-IDF 的 OpenOCD / GDB 与 ARM 那套是两套独立安装，不能混用
+        esp_idf = backend in ("esp-idf", "idf")
+        gdb = (self.host.gdb_riscv or self.host.gdb) if esp_idf else self.host.gdb
+        openocd = (self.host.openocd_esp32 or self.host.openocd) if esp_idf else self.host.openocd
+        openocd_scripts = (
+            (self.host.openocd_esp32_scripts or self.host.openocd_scripts)
+            if esp_idf else self.host.openocd_scripts
+        )
         probe = self.host.probe(self.probe) if self.probe else {}
         interface = probe.get("interface_cfg") or dbg.get("openocd_interface") or ""
         if not interface and probe.get("backend"):
@@ -105,10 +114,11 @@ class Plan:
             "project": self.name,
             "chip": str(self.chip.get("id") or ""),
             "part": str(self.chip.get("part") or ""),
+            "backend": backend,
             "elf": to_fwd(self.elf),
-            "gdb": to_fwd(self.host.gdb),
-            "openocd": to_fwd(self.host.openocd),
-            "openocd_scripts": to_fwd(self.host.openocd_scripts),
+            "gdb": to_fwd(gdb),
+            "openocd": to_fwd(openocd),
+            "openocd_scripts": to_fwd(openocd_scripts),
             "probe": self.probe,
             "interface": interface,
             "target": str(dbg.get("openocd_target") or ""),
@@ -116,8 +126,9 @@ class Plan:
             "speed": probe.get("speed"),
             "svd": self.host.resolve_svd(dbg.get("svd")) or "",
             "svd_name": str(dbg.get("svd") or ""),
-            # C33e 判据：声明了 flash.images = 只调试已烧录镜像，不 load
-            "load": not bool(self.flash_images),
+            # C33e 判据：声明了 flash.images = 只调试已烧录镜像，不 load。
+            # ESP-IDF 的调试镜像已由 idf.py flash 烧进 flash，GDB 不做 load。
+            "load": (False if esp_idf else not bool(self.flash_images)),
             "flash_images": list(self.flash_images),
             "gdb_script": to_fwd(self.gdb_script),
             "work_dir": self.work_dir,
@@ -211,7 +222,9 @@ def plan_for(cfg: Config, proj_name: str) -> Plan:
     chip = cfg.chip_of(proj)
     build = proj.get("build") or {}
 
-    if build.get("kind", "cmake") != "cmake":
+    # 构建委托给 tools 时，内核不执行 cmake —— build.kind 只是描述（如 esp-idf）。
+    _build_step = str((proj.get("steps") or {}).get("build") or "")
+    if not _build_step.startswith("tool:") and build.get("kind", "cmake") != "cmake":
         raise ElabError(f"暂不支持的构建类型：{build.get('kind')}（目前仅 cmake）")
 
     p = Plan(cfg=cfg, host=host, proj=proj, chip=chip, name=proj_name)

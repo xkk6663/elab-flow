@@ -211,7 +211,10 @@ def check_chip(rep: Report, cfg: Config, host: Host, chip: dict):
 
     # target cfg 属于【芯片】；interface cfg 属于【探针】（见 check_host）
     tgt = dbg.get("openocd_target")
-    scripts = host.openocd_scripts
+    # ESP-IDF 芯片用 IDF 自带 OpenOCD 的脚本目录（与 ARM 那份不通）
+    backend = str(dbg.get("backend") or "")
+    scripts = (host.openocd_esp32_scripts if backend in ("esp-idf", "idf")
+               else host.openocd_scripts)
     if scripts and Path(scripts).is_dir():
         if not tgt:
             rep.warn(f"chip.{cid}.target", "未声明（flash/debug 不可用）")
@@ -236,6 +239,32 @@ def check_project(rep: Report, cfg: Config, host: Host, plan: Plan):
     proj = plan.proj
     rep.info(f"proj.{name}", f"archetype={proj.get('archetype', '?')}  chip={proj.get('chip')}")
 
+    def _delegated(step: str) -> str:
+        """``steps.<step> == tool:<name>`` → 返回工具名；否则空串。"""
+        spec = (proj.get("steps") or {}).get(step)
+        if isinstance(spec, str) and spec.startswith("tool:"):
+            return spec[len("tool:"):].strip()
+        return ""
+
+    # 外部步骤（provider 或内联 tool:）都算"编译/烧录由项目工具链接管"：
+    # 内核不再检查 ARM toolchain/链接脚本/探针（provider 的 host 前提由 check_toolchains 负责）。
+    try:
+        from . import provider as provider_mod
+        tc = provider_mod.resolve(cfg, name)
+    except ElabError:
+        tc = None
+
+    def _external(step: str) -> bool:
+        decl = tc.steps.get(step) if tc else None
+        return bool(decl and decl.kind == "external")
+
+    def _external_source(step: str) -> str:
+        decl = tc.steps.get(step) if tc else None
+        if not decl or decl.kind != "external":
+            return ""
+        return (f"tools.{decl.tool_name}" if decl.provider == "project"
+                else f"provider {tc.provider.name}@{tc.provider.version}")
+
     if Path(plan.source_dir).is_dir():
         rep.ok(f"proj.{name}.root", plan.source_dir)
     else:
@@ -247,20 +276,34 @@ def check_project(rep: Report, cfg: Config, host: Host, plan: Plan):
     else:
         rep.warn(f"proj.{name}.source", f"构建入口不存在：{src!r}")
 
-    for label, path in (("toolchain_file", plan.toolchain_file),
-                        ("project_include", plan.project_include)):
-        if path and Path(path).exists():
-            rep.ok(f"proj.{name}.{label}", Path(path).name)
-        else:
-            rep.fail(f"proj.{name}.{label}", f"文件不存在：{path!r}")
-
-    if plan.linker_script and Path(plan.linker_script).exists():
-        rep.ok(f"proj.{name}.ld", Path(plan.linker_script).name)
+    build_tool = _delegated("build")
+    build_ext = _external("build")
+    if build_tool or build_ext:
+        # ★ 委托/provider 模式：编译由项目工具链执行，内核不检查 ARM toolchain/ld。
+        src_s = f"tools.{build_tool}" if build_tool else _external_source("build")
+        rep.info(f"proj.{name}.build_tool",
+                 f"编译委托给 {src_s}（内核不接管工具链/链接脚本）")
     else:
-        rep.fail(f"proj.{name}.ld", f"链接脚本不存在：{plan.linker_script!r}")
+        for label, path in (("toolchain_file", plan.toolchain_file),
+                            ("project_include", plan.project_include)):
+            if path and Path(path).exists():
+                rep.ok(f"proj.{name}.{label}", Path(path).name)
+            else:
+                rep.fail(f"proj.{name}.{label}", f"文件不存在：{path!r}")
 
-    # 探针
-    if plan.probe:
+        if plan.linker_script and Path(plan.linker_script).exists():
+            rep.ok(f"proj.{name}.ld", Path(plan.linker_script).name)
+        else:
+            rep.fail(f"proj.{name}.ld", f"链接脚本不存在：{plan.linker_script!r}")
+
+    # 探针：烧录/校验已委托给项目工具时不需要（如 esptool 走 USB 串口）
+    probe_tool = _delegated("flash") or _delegated("debug_verify")
+    flash_ext = _external("flash") or _external("debug_verify")
+    if probe_tool or flash_ext:
+        src_s = f"tools.{probe_tool}" if probe_tool else _external_source("flash")
+        rep.info(f"proj.{name}.probe",
+                 f"烧录/校验委托给 {src_s}（不需要探针）")
+    elif plan.probe:
         if host.probe(plan.probe):
             rep.ok(f"proj.{name}.probe", plan.probe)
         else:
@@ -575,8 +618,46 @@ def deep_check(rep: Report, plan: Plan) -> dict:
     return {"configure_ok": True, "entry": src_name}
 
 
+# ── 工具链 provider（P1/P2）───────────────────────────────────────
+def check_toolchains(cfg: Config, rep: Report, names) -> None:
+    """项目声明的 provider：是否安装、版本是否满足、host/probe/serial 是否就绪。"""
+    from . import provider as provider_mod      # 延迟导入（避免循环）
+    try:
+        reg = provider_mod.ProviderRegistry(cfg)
+    except ElabError as exc:
+        rep.fail("provider.registry", str(exc))
+        return
+    for name in names:
+        proj = cfg.resolved_project(name)
+        ref = str(proj.get("provider") or "").strip()
+        if not ref:
+            continue
+        try:
+            prov = reg.resolve_ref(ref)
+        except ElabError as exc:
+            rep.fail(f"provider.{name}", str(exc))
+            continue
+        if getattr(prov.ref, "source", "") == "builtin":
+            continue
+        tc = prov.resolve(cfg, proj)
+        state = provider_mod.evaluate(cfg, name, tc)
+        ref_s = f"{prov.ref.name}@{prov.ref.version}"
+        if state.get("available"):
+            rep.info(f"provider.{name}", f"provider {ref_s} 可用（"
+                     f"steps={','.join(sorted((prov.man.get('steps') or {})))}）")
+            continue
+        for reason in state.get("reasons") or []:
+            code = str(reason.get("code") or "")
+            msg = f"provider {ref_s}：{reason.get('message')}"
+            if code in ("host.missing", "host.invalid", "probe.missing"):
+                rep.fail(f"provider.{name}.{code}", msg)
+            else:
+                rep.warn(f"provider.{name}.{code}", msg)
+
+
 # ── 对外入口 ──────────────────────────────────────────────────────
-def run(cfg: Config, only: str | None = None, deep: bool = False) -> Report:
+def run(cfg: Config, only: str | None = None, deep: bool = False,
+        strict_lock: bool = False) -> Report:
     rep = Report()
     host = Host(cfg)
     check_host(cfg, rep, host)
@@ -593,4 +674,8 @@ def run(cfg: Config, only: str | None = None, deep: bool = False) -> Report:
         check_drift(rep, plan)
         if deep:
             deep_check(rep, plan)
+    check_toolchains(cfg, rep, names)
+
+    from . import lock as lock_mod
+    lock_mod.check_into(rep, cfg, strict=strict_lock)
     return rep

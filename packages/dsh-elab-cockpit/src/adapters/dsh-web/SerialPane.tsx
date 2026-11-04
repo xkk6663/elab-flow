@@ -17,20 +17,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SerialPort } from '../../app/ports.ts'
 import type {
   SerialChunk,
+  SerialFrameProfile,
   SerialPreviewResult,
   SerialWidgetRunResult,
 } from '../../domain/icd.ts'
 import {
+  autoRange,
   b64ToBytes,
   bytesToB64,
   captureText,
+  fmtDuration,
+  fmtValue,
   hexDump,
   hexDumpRows,
+  measure,
+  nearestFrameIndex,
   parseAnsi,
   parseSendHistory,
   pushSendHistory,
   serializeSendHistory,
+  snapshotJson,
   textOf,
+  valueToY,
 } from '@elab/cockpit-ui-core'
 import type { HexRow, SendHistoryEntry, SerialRepr } from '@elab/cockpit-ui-core'
 import { AnsiTerminal, StreamTextDecoder } from './serial/ansiTerminal.ts'
@@ -408,6 +416,33 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
 
+  // ── 帧协议（M5）：只读镜像（编辑器只在驾驶舱，避免两套前端漂移）──
+  const [frameProfiles, setFrameProfiles] = useState<SerialFrameProfile[]>([])
+  useEffect(() => {
+    let dead = false
+    if (!project) {
+      setFrameProfiles([])
+      return undefined
+    }
+    void api
+      .serialFrames(project, props.sessionId)
+      .then((r) => { if (!dead) setFrameProfiles(r.profiles ?? []) })
+      .catch(() => { if (!dead) setFrameProfiles([]) })
+    return () => { dead = true }
+  }, [api, project, props.sessionId])
+
+  const decoderOptions = useMemo(() => {
+    const base = decoders.filter((d) => d.id !== 'profile')
+    return [
+      ...base,
+      ...frameProfiles.map((p) => ({
+        id: `profile:${p.id}`,
+        label: `帧 · ${p.label || p.id}`,
+        desc: '按工程帧协议（frames.json）解码；配置在驾驶舱「帧协议」抽屉里编辑',
+      })),
+    ]
+  }, [decoders, frameProfiles])
+
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const followRef = useRef(true)
   followRef.current = follow
@@ -498,7 +533,12 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
 
   // ── 波形：对最近一段字节调用内核解码，Canvas 画多通道 ──────────
   const [frames, setFrames] = useState<number[][]>([])
-  const [decodeMeta, setDecodeMeta] = useState<{ channels: number; skipped: number; pending: number } | null>(null)
+  const [decodeMeta, setDecodeMeta] = useState<{
+    channels: number
+    skipped: number
+    pending: number
+    fields: { name: string; unit: string; type: string; plot: boolean }[]
+  } | null>(null)
   const [waveErr, setWaveErr] = useState<string | null>(null)
 
   // ── 会话级共享解码（P3.5）：decoder 非空 = 内核在 RX 入环时增量解码 ──
@@ -511,6 +551,13 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const shownChannels = sharedActive
     ? (stream.decodedSnap?.channels ?? (sharedFrames[0]?.length ?? 0))
     : (decodeMeta?.channels ?? (frames[0]?.length ?? 0))
+  /** M7：共享帧带 t_us（游标 Δt 的真实时间源）；离线解码没有时间 */
+  const shownTimes = sharedActive
+    ? stream.decoded.map((f) => f.t_us)
+    : null
+  const shownFields = sharedActive
+    ? (stream.decodedSnap?.fields ?? [])
+    : (decodeMeta?.fields ?? [])
 
   useEffect(() => {
     if (view !== 'wave' || sharedActive) return
@@ -544,6 +591,9 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       .serialDecode({
         decoder,
         dataB64: bytesToB64(bytes),
+        ...(decoder.startsWith('profile:')
+          ? { project, profile: decoder.slice('profile:'.length) }
+          : {}),
         ...(replayMode ? {} : { sessionId: props.sessionId }),
       })
       .then((r) => {
@@ -555,7 +605,12 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         }
         setWaveErr(null)
         setFrames(r.frames)
-        setDecodeMeta({ channels: r.channels, skipped: r.skipped, pending: r.pending_bytes })
+        setDecodeMeta({
+          channels: r.channels,
+          skipped: r.skipped,
+          pending: r.pending_bytes,
+          fields: r.fields ?? [],
+        })
       })
       .catch((e: unknown) => {
         if (cancelled) return
@@ -1035,6 +1090,14 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             </option>
           ))}
         </select>
+        {/* 线参数：只读 —— 编辑面只在 cockpit（避免两套前端漂移）；这里展示会话实际值 */}
+        <span
+          aria-label="串口线参数（只读）"
+          title="线参数（只读）：在 cockpit「串口」工作区编辑；改后需重开监视才生效"
+          style={{ ...chip, cursor: 'default', fontFamily: 'var(--elab-font-mono)' }}
+        >
+          {stream.snap?.line_text ?? '8N1'}
+        </span>
         <select
           value={dir}
           onChange={(e: any) => setDir(e.currentTarget.value === 'rx' ? 'rx' : e.currentTarget.value === 'tx' ? 'tx' : 'all')}
@@ -1077,11 +1140,11 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             title={
               sharedActive
                 ? `共享解码（${stream.snap?.decode?.decoder_by === 'agent' ? 'agent 选定' : '人选定'}）：面板与 agent 读同一份帧`
-                : (decoders.find((d) => d.id === decoder)?.desc ?? '协议解码器')
+                : (decoderOptions.find((d) => d.id === decoder)?.desc ?? '协议解码器')
             }
             style={selectStyle}
           >
-            {decoders.map((d) => (
+            {decoderOptions.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.label}
               </option>
@@ -1205,6 +1268,14 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
         <span style={metaStyle} title={replayMode ? '回放文件：批次数 / 原始字节数' : '当前缓冲：未清空、未被环形挤出的字节 / 批次'}>
           {`${bytesShown} B · ${chunksShown} 批`}
         </span>
+        {stream.snap?.stats ? (
+          <span
+            style={metaStyle}
+            title={`最近 1s：RX ${stream.snap.stats.rx_bps.toFixed(0)} B/s、TX ${stream.snap.stats.tx_bps.toFixed(0)} B/s（服务端统计${stream.snap.stats.warmup ? '，窗口不足 1s' : ''}）`}
+          >
+            {`\u2193${(stream.snap.stats.rx_bps / 1024).toFixed(1)}K \u2191${(stream.snap.stats.tx_bps / 1024).toFixed(1)}K B/s`}
+          </span>
+        ) : null}
         {stream.active && openedBy !== undefined ? (
           <span
             style={{
@@ -1229,6 +1300,17 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           {`回放中：${replay.name} —— ${replay.chunks.length} 批 / ${replay.bytes} B · ${replay.lines.length} 行` +
             `（本地只读，不占串口）` +
             `${replay.skipped > 0 ? ` · 跳过 ${replay.skipped} 行` : ''}`}
+        </div>
+      ) : null}
+      {stream.snap?.state === 'reconnecting' ? (
+        <div role="status" style={barWarn}>
+          {`串口已掉线，正在自动重连${stream.snap.down_s ? `（已断开 ${stream.snap.down_s}s）` : ''}` +
+            `${stream.snap.last_error ? `：${stream.snap.last_error}` : ''} —— 恢复后日志自动续上。`}
+        </div>
+      ) : null}
+      {stream.snap?.state === 'suspended' ? (
+        <div role="status" style={barInfo}>
+          {`监视已为闭环让出串口${stream.snap.suspend_reason ? `（${stream.snap.suspend_reason}）` : ''} —— run 结束自动恢复。`}
         </div>
       ) : null}
       {stream.error !== null ? (
@@ -1417,7 +1499,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                   {stream.snap?.decode?.decoder_by === 'agent' ? 'agent 选定' : '人选定'}
                 </span>
                 <span style={{ color: 'var(--elab-fg-faint)' }}>
-                  {`${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} · 内核只解 RX（设备输出）`}
+                  {`${decoderOptions.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} · 内核只解 RX（设备输出）`}
                 </span>
               </div>
             ) : null}
@@ -1425,10 +1507,10 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             {waveErr === null && shownFrames.length === 0 ? (
               <div style={emptyStyle}>
                 {replayMode
-                  ? `回放文件里没有解出完整帧：按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 解码 ${replay?.chunks.length ?? 0} 批 —— 录制里可能混有不属于该协议的字节，可切方向只看 RX 或换解码器。`
+                  ? `回放文件里没有解出完整帧：按 ${decoderOptions.find((d) => d.id === decoder)?.label ?? decoder} 解码 ${replay?.chunks.length ?? 0} 批 —— 录制里可能混有不属于该协议的字节，可切方向只看 RX 或换解码器。`
                   : sharedActive
-                  ? `尚未解出帧：${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} 解码器已在会话启用，设备开始输出符合该协议的字节后会在这里出现折线（agent 读到的也是这份帧）。`
-                  : `尚无波形。设备按 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} 输出（JustFloat：N×4 小端 float + 尾 00 00 80 7F）时，这里按通道画折线。`}
+                  ? `尚未解出帧：${decoderOptions.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} 解码器已在会话启用，设备开始输出符合该协议的字节后会在这里出现折线（agent 读到的也是这份帧）。`
+                  : `尚无波形。设备按 ${decoderOptions.find((d) => d.id === decoder)?.label ?? decoder} 输出（JustFloat：N×4 小端 float + 尾 00 00 80 7F）时，这里按通道画折线。`}
                 {sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? (
                   <>
                     <br />
@@ -1515,6 +1597,8 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
                 return (
                   <WaveChart
                     frames={shownFrames}
+                    times={shownTimes}
+                    fields={shownFields}
                     channels={vp.channels}
                     scaleX={vp.scaleX}
                     offsetX={vp.offsetX}
@@ -1773,6 +1857,10 @@ function resolvedChannelsDsh(ch: number[] | number, frameChannels: number): numb
 
 function WaveChart(props: {
   frames: number[][]
+  /** M7：每帧批次时间戳（微秒）；null = 无时间源（Δt 显示 —） */
+  times?: number[] | null
+  /** M7：通道名/单位（工程帧协议的字段表；缺省 CHn） */
+  fields?: { name: string; unit: string; type: string; plot: boolean }[]
   channels: number[] | number
   /** X 轴缩放（1 = 全部可见；>1 = 放大） */
   scaleX: number
@@ -1783,25 +1871,36 @@ function WaveChart(props: {
   follow: boolean
   onFollowChange: (v: boolean) => void
 }): ReactNode {
-  const { frames, channels, scaleX, offsetX, onView, follow, onFollowChange } = props
+  const { frames, times, fields, channels, scaleX, offsetX, onView, follow, onFollowChange } = props
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const dragRef = useRef<{ startClientX: number; startOffset: number } | null>(null)
+  const downRef = useRef<{ x: number; y: number; shift: boolean } | null>(null)
   const dragActive = useRef(false)
 
   // ── 取消跟随 = 定格画面 ──────────────────────────────────────
   // 波形是"最近 N 字节"的滚动解码窗口：只钉住 offsetX 没用 —— 窗口本身
   // 在滑，同一个 index 已经对应到新数据，曲线看起来就一直在走。
-  // 所以 follow=false 时留下**这一刻的帧快照**，恢复跟随才换回实时帧。
-  const [frozen, setFrozen] = useState<number[][] | null>(null)
+  // 所以 follow=false 时留下**这一刻的帧 + 时间戳快照**，恢复跟随才换回实时帧。
+  const [frozen, setFrozen] = useState<{ frames: number[][]; times: number[] | null } | null>(null)
   useEffect(() => {
     if (frames.length === 0) { setFrozen(null); return }
     if (follow) { setFrozen(null); return }
-    setFrozen((cur) => cur ?? frames)
-  }, [follow, frames])
-  const shown = follow ? frames : (frozen ?? frames)
+    setFrozen((cur) => cur ?? { frames, times: times ?? null })
+  }, [follow, frames, times])
+  const shown = follow ? frames : (frozen?.frames ?? frames)
+  const shownTimes = follow ? (times ?? null) : (frozen?.times ?? null)
+
+  // ── 每通道坐标（增益/偏移）与游标（M7，与 cockpit 同一套纯函数）──
+  const [axis, setAxis] = useState<Record<number, { gain: number; offset: number }>>({})
+  const axisOf = (ch: number): { gain: number; offset: number } => axis[ch] ?? { gain: 1, offset: 0 }
+  const [axesOpen, setAxesOpen] = useState(false)
+  const [cursor, setCursor] = useState<{ a: number | null; b: number | null }>({ a: null, b: null })
+  const [snapNotice, setSnapNotice] = useState<string | null>(null)
 
   const frameChannels = shown[0]?.length ?? 0
   const shownCh = resolvedChannelsDsh(channels, frameChannels)
+  const labelOf = (ch: number): string => fields?.[ch]?.name || `CH${ch}`
+  const unitOf = (ch: number): string => fields?.[ch]?.unit || ''
 
   // follow → 跳尾
   const lastFramesLen = useRef(0)
@@ -1877,28 +1976,56 @@ function WaveChart(props: {
       ctx.fillText(label, lx, plotBottom + 3)
     }
 
+    const chRange: Record<number, { lo: number; hi: number }> = {}
     for (const ch of shownCh) {
       const values = slice.map((f) => (ch < f.length ? f[ch] : NaN))
-      let lo = Infinity, hi = -Infinity
-      for (const v of values) { if (!Number.isFinite(v)) continue; if (v < lo) lo = v; if (v > hi) hi = v }
-      if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue
-      if (hi === lo) { hi = lo + 1; lo -= 1 }
+      const range = autoRange(values)
+      if (!range) continue
+      chRange[ch] = range
+      const { gain, offset } = axisOf(ch)
       ctx.strokeStyle = palette[ch % palette.length]; ctx.lineWidth = 1.4
       ctx.beginPath()
       let started = false
       for (let i = 0; i < values.length; i++) {
         if (!Number.isFinite(values[i])) { started = false; continue }
         const x = xOf(i)
-        const y = plotBottom - ((values[i] - lo) / (hi - lo)) * plotH
+        const y = valueToY(values[i], range.lo, range.hi, plotH, gain, offset) + plotTop
         if (!started) { ctx.moveTo(x, y); started = true } else ctx.lineTo(x, y)
       }
       ctx.stroke()
     }
 
+    // 游标 A/B：竖线 + 通道交点（测量值在画布下方卡片里）
+    const drawCursor = (idx: number | null, tag: string): void => {
+      if (idx === null || idx < startIdx || idx >= endIdx) return
+      const x = xOf(idx - startIdx)
+      ctx.save()
+      ctx.strokeStyle = tag === 'A' ? palette[0] : palette[2]
+      ctx.setLineDash([4, 3]); ctx.lineWidth = 1
+      ctx.beginPath(); ctx.moveTo(x, plotTop); ctx.lineTo(x, plotBottom); ctx.stroke()
+      ctx.setLineDash([])
+      const f = shown[idx]
+      for (const ch of shownCh) {
+        const v = f[ch]
+        const r = chRange[ch]
+        if (!r || !Number.isFinite(v)) continue
+        const { gain, offset } = axisOf(ch)
+        const y = valueToY(v, r.lo, r.hi, plotH, gain, offset) + plotTop
+        ctx.fillStyle = palette[ch % palette.length]
+        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill()
+      }
+      ctx.fillStyle = tag === 'A' ? palette[0] : palette[2]
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top'
+      ctx.fillText(tag, Math.max(padL, Math.min(w - padR - 8, x + 4)), plotTop + 2)
+      ctx.restore()
+    }
+    drawCursor(cursor.a, 'A')
+    drawCursor(cursor.b, 'B')
+
     ctx.fillStyle = axisLabel; ctx.textBaseline = 'top'
     ctx.textAlign = 'left'; ctx.fillText(`帧 ${startIdx} → ${endIdx - 1}`, padL, 2)
     ctx.textAlign = 'right'; ctx.fillText(`共 ${shown.length} 帧 · 窗口 ${endIdx - startIdx} · ×${scaleX.toFixed(1)}`, w - padR, 2)
-  }, [shown, scaleX, offsetX, shownCh])
+  }, [shown, scaleX, offsetX, shownCh, axis, cursor])
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
@@ -1918,6 +2045,7 @@ function WaveChart(props: {
   }
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     dragRef.current = { startClientX: e.clientX, startOffset: offsetX }
+    downRef.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey }
     dragActive.current = true; e.preventDefault()
   }
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1926,14 +2054,69 @@ function WaveChart(props: {
     const rect = canvas.getBoundingClientRect()
     const plotW = rect.width - 44 - 8
     const dx = e.clientX - dragRef.current.startClientX
-    const offsetDelta = Math.round(-dx / scaleX)
+    // 与绘制同源：帧数少于视口槽位时，一屏实际帧跨度是 min(槽位, 剩余帧)。
     const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    const startOffset = dragRef.current.startOffset
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(startOffset, shown.length - 1)))
+    const offsetDelta = Math.round(-dx * span / plotW)
     let newOffset = dragRef.current.startOffset + offsetDelta
     newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)))
     if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset)
     if (follow) onFollowChange(false)
   }
-  const endDrag = () => { dragActive.current = false; dragRef.current = null }
+  /**
+   * 松开鼠标：位移 ≤4px 视为「点选游标」（拖拽是平移，不落游标）。
+   * 普通点击 = A（清空 B）；Shift+点击 = B。
+   */
+  const endDrag = (e?: React.MouseEvent<HTMLCanvasElement>): void => {
+    const down = downRef.current
+    dragActive.current = false
+    dragRef.current = null
+    downRef.current = null
+    const canvas = canvasRef.current
+    if (!e || !down || !canvas || !shown.length) return
+    if (Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) > 4) return
+    const rect = canvas.getBoundingClientRect()
+    const padL = 8
+    const plotW = rect.width - padL - 8
+    if (plotW <= 4) return
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    // 与绘制同源：slice 铺满整宽时，一屏的真实帧数是 min(槽位, 剩余帧)。
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(offsetX, shown.length - 1)))
+    const within = nearestFrameIndex((e.clientX - rect.left - padL) / plotW, span)
+    const idx = Math.max(0, Math.min(shown.length - 1, offsetX + within))
+    setCursor((prev) => (down.shift ? { a: prev.a ?? idx, b: idx } : { a: idx, b: null }))
+  }
+
+  // ── 测量（M7）：A/B 的 Δ帧、Δt、每通道 ΔY ──────────────────
+  const probe = (i: number | null): { index: number; t_us?: number; values: number[] } | null =>
+    (i === null || !shown[i]) ? null : { index: i, t_us: shownTimes?.[i], values: shown[i] }
+  const pa = probe(cursor.a)
+  const pb = probe(cursor.b)
+  const delta = pa && pb
+    ? measure(pa, pb, shownCh.map((ch) => axisOf(ch).gain), shownCh.map((ch) => axisOf(ch).offset))
+    : null
+  const frozenAt = !follow && frozen ? frozen.frames.length - 1 : null
+  const frozenTime = frozenAt !== null && shownTimes?.[frozenAt] !== undefined
+    ? new Date(shownTimes[frozenAt] / 1000).toISOString().slice(11, 23)
+    : null
+  const copySnapshot = (): void => {
+    const text = snapshotJson({
+      frozen: !follow,
+      scaleX,
+      offsetX,
+      frameCount: shown.length,
+      cursors: { a: pa, b: pb },
+      channels: shownCh.map((ch) => ({
+        index: ch, label: labelOf(ch), unit: unitOf(ch),
+        gain: axisOf(ch).gain, offset: axisOf(ch).offset,
+      })),
+    })
+    void navigator.clipboard?.writeText(text).then(
+      () => setSnapNotice('快照已复制到剪贴板'),
+      () => setSnapNotice('剪贴板不可用（快照未复制）'),
+    )
+  }
 
   const canvasReady = shown.length > 0
   const chip: React.CSSProperties = { padding: '2px 8px', fontSize: 12, lineHeight: 1, border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', background: 'var(--elab-bg-surface)', color: 'var(--elab-fg-secondary)', cursor: 'pointer', fontFamily: 'inherit' }
@@ -1943,9 +2126,10 @@ function WaveChart(props: {
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)', flex: '1 1 auto' }}>
           {shownCh.map((ch) => (
-            <span key={ch} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+            <span key={ch} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+              title={`${labelOf(ch)}${unitOf(ch) ? ` (${unitOf(ch)})` : ''} · gain ${axisOf(ch).gain} · offset ${axisOf(ch).offset}`}>
               <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` }} />
-              {`CH${ch}`}
+              {labelOf(ch)}{unitOf(ch) ? ` (${unitOf(ch)})` : ''}
             </span>
           ))}
         </div>
@@ -1953,20 +2137,112 @@ function WaveChart(props: {
           <button type="button" onClick={() => onView(Math.max(1, scaleX / 1.2), offsetX)} style={chip} disabled={!canvasReady} title="缩小（向后看更多帧）">−</button>
           <button type="button" onClick={() => onView(Math.min(20, scaleX * 1.2), offsetX)} style={chip} disabled={!canvasReady} title="放大（看更精细的局部）">+</button>
           <button type="button" onClick={() => onView(1, 0)} style={chip} disabled={!canvasReady} title="重置（全部可见、回到开头）">⤾</button>
+          <button type="button" onClick={() => setAxesOpen((v) => !v)} style={{ ...chip, ...(axesOpen ? { color: 'var(--elab-accent)', borderColor: 'var(--elab-accent)' } : {}) }} disabled={!canvasReady} title="每通道坐标：增益（压扁/放大曲线）与偏移（整条上移/下移）">通道</button>
+          <button type="button" onClick={() => setCursor({ a: null, b: null })} style={chip} disabled={cursor.a === null} title="清空游标 A/B（点击画布放 A，Shift+点击放 B）">清游标</button>
+          <button type="button" onClick={copySnapshot} style={chip} disabled={!canvasReady} title="把视口 + 游标 + 通道坐标复制成 JSON">快照</button>
           <button type="button" onClick={() => onFollowChange(!follow)} style={{ ...chip, ...(follow ? { color: 'var(--elab-accent)', borderColor: 'var(--elab-accent)' } : {}) }} disabled={!canvasReady} title={follow ? '正在跟随最新帧，点击暂停（画面定格在当前窗口，数据仍继续接收）' : '画面已定格，点击恢复跟随最新帧'}>
             {follow ? '❚❚ 暂停跟随' : '▶ 恢复跟随'}
           </button>
         </div>
       </div>
+      {frozenAt !== null ? (
+        <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)' }}>
+          ❚❚ 已冻结 @ #{frozenAt}{frozenTime ? ` · ${frozenTime}` : ''}　（数据仍在接收；点「恢复跟随」回到实时）
+        </div>
+      ) : null}
+      {snapNotice ? (
+        <div style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)' }}>{snapNotice}</div>
+      ) : null}
+      {axesOpen ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 12px', fontSize: 'var(--elab-fs-xs)' }}>
+          {shownCh.map((ch) => {
+            const a = axisOf(ch)
+            const inputStyle: React.CSSProperties = { width: '58px', padding: '1px 4px', fontFamily: 'var(--elab-font-mono)', fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-primary)', background: 'var(--elab-bg-code)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)' }
+            return (
+              <span key={ch} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <span style={{ width: '10px', height: '10px', borderRadius: '2px', background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` }} />
+                <span style={{ fontFamily: 'var(--elab-font-mono)', color: 'var(--elab-fg-secondary)' }}>
+                  {labelOf(ch)}{unitOf(ch) ? ` (${unitOf(ch)})` : ''}
+                </span>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', color: 'var(--elab-fg-faint)' }}>
+                  增益
+                  <input type="number" step="0.1" value={a.gain} style={inputStyle}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                      const v = Number(e.currentTarget.value)
+                      setAxis((prev) => ({ ...prev, [ch]: { gain: Number.isFinite(v) ? v : 1, offset: a.offset } }))
+                    }} />
+                </label>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', color: 'var(--elab-fg-faint)' }}>
+                  偏移
+                  <input type="number" step="1" value={a.offset} style={inputStyle}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                      const v = Number(e.currentTarget.value)
+                      setAxis((prev) => ({ ...prev, [ch]: { gain: a.gain, offset: Number.isFinite(v) ? v : 0 } }))
+                    }} />
+                </label>
+                <button type="button" style={{ ...chip, padding: '1px 6px' }} title="该通道恢复默认坐标（gain=1, offset=0）"
+                  onClick={() => setAxis((prev) => ({ ...prev, [ch]: { gain: 1, offset: 0 } }))}>↺</button>
+              </span>
+            )
+          })}
+          <span style={{ flexBasis: '100%', color: 'var(--elab-fg-faint)' }}>
+            量程按原始值自动计算：改增益会压扁/放大曲线，改偏移会整体上下移动（不改原始数据）。
+          </span>
+        </div>
+      ) : null}
       <canvas
         ref={canvasRef}
-        style={{ width: '100%', height: '220px', display: 'block', background: 'var(--elab-bg-surface)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', cursor: canvasReady ? (dragActive.current ? 'grabbing' : 'grab') : 'default' }}
+        style={{ width: '100%', height: '220px', display: 'block', background: 'var(--elab-bg-surface)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', cursor: canvasReady ? (dragActive.current ? 'grabbing' : 'crosshair') : 'default' }}
         onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={endDrag}
-        onMouseLeave={endDrag}
+        onMouseLeave={() => endDrag()}
       />
+      {pa ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', paddingTop: '4px', borderTop: '1px dashed var(--elab-border)', fontSize: 'var(--elab-fs-xs)', fontFamily: 'var(--elab-font-mono)' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', color: 'var(--elab-fg-secondary)' }}>
+            <span>A #{pa.index}{pa.t_us !== undefined ? ` · ${new Date(pa.t_us / 1000).toISOString().slice(11, 23)}` : ''}</span>
+            {pb ? (
+              <>
+                <span>B #{pb.index}{pb.t_us !== undefined ? ` · ${new Date(pb.t_us / 1000).toISOString().slice(11, 23)}` : ''}</span>
+                <span style={{ color: 'var(--elab-fg-primary)', fontWeight: 600 }}>
+                  Δ帧 {delta?.d_frames ?? '—'}　Δt {fmtDuration(delta?.dt_us ?? null)}
+                </span>
+              </>
+            ) : (
+              <span style={{ color: 'var(--elab-fg-faint)' }}>Shift+点击设置 B（当前只有 A）</span>
+            )}
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--elab-fs-xs)', fontFamily: 'var(--elab-font-mono)' }}>
+            <thead>
+              <tr style={{ color: 'var(--elab-fg-secondary)' }}>
+                <th style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--elab-border)' }}>通道</th>
+                <th style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--elab-border)' }}>A</th>
+                {pb ? <th style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--elab-border)' }}>B</th> : null}
+                {pb ? <th style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--elab-border)' }}>Δ原始</th> : null}
+                <th style={{ textAlign: 'left', padding: '2px 6px', borderBottom: '1px solid var(--elab-border)' }}>{pb ? 'Δ缩放' : '单位'}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownCh.map((ch, i) => (
+                <tr key={ch}>
+                  <td style={{ padding: '2px 6px' }}>{labelOf(ch)}</td>
+                  <td style={{ padding: '2px 6px' }}>{fmtValue(pa.values[ch])}</td>
+                  {pb ? <td style={{ padding: '2px 6px' }}>{fmtValue(pb.values[ch])}</td> : null}
+                  {pb ? <td style={{ padding: '2px 6px' }}>{fmtValue(delta?.dy[i] ?? NaN)}</td> : null}
+                  <td style={{ padding: '2px 6px' }}>{pb ? fmtValue(delta?.dy_scaled[i] ?? NaN) : (unitOf(ch) || '—')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ color: 'var(--elab-fg-faint)' }}>
+            {shownTimes === null
+              ? '当前窗口没有时间源（会话未开或未启用共享解码）→ Δt 显示 —。'
+              : 'Δt 用 RX 批次时间戳（同批多帧时间相同），精度受批大小限制。'}
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -85,6 +85,10 @@ class Probe:
     usart: str = ""
     tx_pin: str = ""
     rx_pin: str = ""
+    is_idf: bool = False           # ESP-IDF 工程：构建/烧录由工程 tools 委托，内核不接管 ARM 工具链
+    idf_target: str = ""           # sdkconfig: CONFIG_IDF_TARGET
+    provider_ref: str = ""         # 工具链 provider 软提示（如 espressif/idf@>=1 <2）
+    use_provider: bool = True      # --no-provider 时为 False（生成内联 tools 兜底）
     uses_freertos: bool = False
     can_print: bool = False        # 固件是否真有串口输出能力（有 __io_putchar 定义 + printf 调用）
     tier: str = "T1"
@@ -150,6 +154,13 @@ def _detect_vendor(root: Path, cmake_text: str, gen_dirs: list[str],
         d = str(fp.get("gen_dir") or "")
         if not vendor:
             continue
+        if str(fp.get("kind") or "") == "idf":
+            inc = str(fp.get("cmake_include") or "tools/cmake/project.cmake")
+            name = Path(inc).name
+            if re.search(rf"include\s*\(\s*[^)]*{re.escape(name)}", cmake_text, re.I):
+                hits.setdefault(vendor, []).append(
+                    (E4_STRUCT, f"CMakeLists.txt: include(.../{name})"))
+            continue
         if d and re.search(rf"add_subdirectory\(\s*(?:cmake/)?{re.escape(d)}\b", cmake_text):
             hits.setdefault(vendor, []).append(
                 (E4_STRUCT, f"CMakeLists.txt: add_subdirectory(cmake/{d})"))
@@ -192,6 +203,77 @@ def _detect_vendor(root: Path, cmake_text: str, gen_dirs: list[str],
                         for fp in fps if str(fp.get("vendor")) == vendor), "") or "")
     best = sorted(hits[vendor], key=lambda x: _LEVEL_RANK[x[0]])[0]
     return vendor, gen, best[1], notes
+
+
+# ── 探测：ESP-IDF（kind: idf；指纹仍来自适配包）──────────────────────
+def _idf_fingerprint(fps: list[dict], cmake_text: str) -> dict | None:
+    """匹配 ``kind: idf`` 指纹：根 CMakeLists 是否 include(.../tools/cmake/project.cmake)。
+
+    ★ 内核只知道「有一种 CMake 工程把工具链托管给外部 SDK」，具体匹配串
+      （``tools/cmake/project.cmake``）与 sdkconfig 约定来自 ``pack.yaml``。
+    """
+    for fp in fps:
+        if str(fp.get("kind") or "") != "idf":
+            continue
+        inc = str(fp.get("cmake_include") or "tools/cmake/project.cmake")
+        name = Path(inc).name
+        if re.search(rf"include\s*\(\s*[^)]*{re.escape(name)}", cmake_text, re.I):
+            return fp
+    return None
+
+
+def _detect_idf_target(root: Path, fp: dict) -> tuple[str, str]:
+    """从 sdkconfig / sdkconfig.defaults 读 CONFIG_IDF_TARGET（sdkconfig 优先）。"""
+    key = str(fp.get("target_key") or "CONFIG_IDF_TARGET")
+    files = [str(x) for x in (fp.get("sdkconfig_files") or ["sdkconfig", "sdkconfig.defaults"])]
+    for name in files:
+        p = root / name
+        t = _read(p)
+        if not t:
+            continue
+        m = re.search(rf"^{re.escape(key)}\s*=\s*\"?([A-Za-z0-9\-]+)\"?\s*$", t, re.M)
+        if m:
+            return m.group(1).strip().lower(), f"{name}: {key}={m.group(1).strip()}"
+        # sdkconfig 里也可能只出现 CONFIG_IDF_TARGET_ESP32S31=y
+        m = re.search(rf"^CONFIG_IDF_TARGET_([A-Za-z0-9]+)=y\s*$", t, re.M)
+        if m:
+            return m.group(1).strip().lower(), f"{name}: CONFIG_IDF_TARGET_{m.group(1)}=y"
+    return "", ""
+
+
+def _norm_chip(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _match_chip_target(cfg: Config, target: str) -> tuple[str, str, str]:
+    """按 IDF target 匹配芯片（chip.yaml: idf_target / id / part 归一化后相等）。"""
+    if not target:
+        return "", "", "未能从 sdkconfig 解析 CONFIG_IDF_TARGET —— 无法匹配芯片"
+    want = _norm_chip(target)
+    for ref, chip in cfg.all_chips.items():
+        if "/" not in ref:
+            continue
+        cands = [chip.get("idf_target"), chip.get("id"), chip.get("part")]
+        if any(c and _norm_chip(str(c)) == want for c in cands):
+            return ref, f"sdkconfig target {target} == 适配包芯片 {ref}", ""
+    if not cfg.packs:
+        return "", "", f"尚未安装任何适配包，无法匹配 IDF target {target}"
+    return "", "", f"已安装适配包中没有 target={target} 的芯片 —— 需安装对应芯片包"
+
+
+def _detect_idf_stdout(root: Path) -> tuple[bool, str]:
+    """ESP-IDF 的 printf 直通 UART（VFS），只要源码里有 printf 调用即视为有输出能力。"""
+    cands: list[Path] = []
+    for d in (root / "main", root / "src", root / "components"):
+        if d.is_dir():
+            cands += sorted(d.rglob("*.c"))
+    skip = {"build", ".work", "managed_components"}
+    for p in cands:
+        if skip & set(p.parts):
+            continue
+        if re.search(r"\bprintf\s*\(", _read(p)):
+            return True, f"{_rel(root, p)}: 调用了 printf（IDF VFS → UART）"
+    return False, ""
 
 
 # ── 探测：archetype（E4；第二指纹见 linker_variable）─────────────────
@@ -485,18 +567,18 @@ def _match_chip(cfg: Config, macro: str, defines: list[str]) -> tuple[str, str, 
     if not macro:
         return "", "", "未能解析出型号编译宏 —— 无法匹配芯片"
 
-    for ref, chip in cfg.chips.items():
+    for ref, chip in cfg.all_chips.items():
         if "/" not in ref:
             continue
         if (chip.get("part") or "") == macro:
             return ref, f"编译宏 {macro} == 适配包芯片 {ref}:part", ""
-    for ref, chip in cfg.chips.items():
+    for ref, chip in cfg.all_chips.items():
         if "/" not in ref:
             continue
         if macro in (chip.get("compiler_defines") or []):
             return ref, f"编译宏 {macro} ∈ 适配包芯片 {ref}:compiler_defines", ""
 
-    for ref, chip in cfg.chips.items():
+    for ref, chip in cfg.all_chips.items():
         if "/" not in ref:
             continue
         part = chip.get("part") or ""
@@ -511,7 +593,27 @@ def _match_chip(cfg: Config, macro: str, defines: list[str]) -> tuple[str, str, 
 
 
 # ── 主探测 ────────────────────────────────────────────────────────
-def probe_project(cfg: Config, path) -> Probe:
+def _provider_ref(cfg: Config, hint: str) -> str:
+    """指纹软提示 → ``name@>=X <X+1``（版本范围取自已安装版本；未装默认 1.x）。"""
+    hint = str(hint or "").strip()
+    if not hint:
+        return ""
+    name, spec = hint.partition("@")[0::2] if "@" in hint else (hint, "")
+    if spec:
+        return hint
+    try:
+        from . import provider as provider_mod
+        reg = provider_mod.ProviderRegistry(cfg)
+        prov = reg.get(name)
+        if prov:
+            major = provider_mod._ver_tuple(prov.ref.version)[0]
+            return f"{name}@>={major} <{major + 1}"
+    except ElabError:
+        pass
+    return f"{name}@>=1 <2"
+
+
+def probe_project(cfg: Config, path, *, use_provider: bool = True) -> Probe:
     root = Path(path).resolve()
     if not root.is_dir():
         raise ElabError(f"目录不存在：{root}")
@@ -545,6 +647,61 @@ def probe_project(cfg: Config, path) -> Probe:
     if v_ev:
         p.facts.append(Fact("vendor", f"{vendor}（{generator}）", E4_STRUCT, v_ev))
     p.ambiguities += v_notes
+
+    # ①' ESP-IDF：工具链由 SDK 托管，不适用 ARM 的 archetype/ld/flags 探测
+    idf_fp = _idf_fingerprint(fps, cmake_text) if vendor else None
+    if idf_fp:
+        p.is_idf = True
+        p.archetype = "idf"
+        p.use_provider = bool(use_provider)
+        p.provider_ref = (_provider_ref(
+            cfg, str(idf_fp.get("provider_hint") or idf_fp.get("provider") or ""))
+            if use_provider else "")
+        if p.provider_ref:
+            p.facts.append(Fact("provider", p.provider_ref, E4_STRUCT,
+                                f"{Path(str(idf_fp.get('cmake_include') or 'project.cmake')).name} 指纹 provider_hint"))
+        p.facts.append(Fact("archetype", "idf", E4_STRUCT,
+                            f"CMakeLists.txt: include(.../{Path(str(idf_fp.get('cmake_include') or 'project.cmake')).name})"))
+        pname, pn_ev = _detect_project_name(cmake_text)
+        p.project_name = pname
+        if pn_ev:
+            p.facts.append(Fact("project_name", pname, E1_COMPILE, pn_ev))
+        else:
+            p.ambiguities.append("未能解析工程名（CMAKE_PROJECT_NAME / project()）—— 产物名将不确定")
+
+        p.idf_target, t_ev = _detect_idf_target(root, idf_fp)
+        if t_ev:
+            p.facts.append(Fact("idf_target", p.idf_target, E4_STRUCT, t_ev))
+        ref, c_ev, c_amb = _match_chip_target(cfg, p.idf_target)
+        p.chip_ref, p.chip_evidence = ref, c_ev
+        if c_ev:
+            p.facts.append(Fact("chip", ref, E4_STRUCT, c_ev))
+        if c_amb:
+            p.ambiguities.append(c_amb)
+
+        # 串口波特率（IDF 的 console baud，缺省 115200）
+        for name in ("sdkconfig", "sdkconfig.defaults"):
+            t = _read(root / name)
+            m = re.search(r"^CONFIG_ESP_CONSOLE_UART_BAUDRATE=(\d+)", t, re.M)
+            if m:
+                p.baud = _nearest_baud(int(m.group(1)))
+                p.facts.append(Fact("baud", str(p.baud), E4_STRUCT,
+                                    f"{name}: CONFIG_ESP_CONSOLE_UART_BAUDRATE={m.group(1)}"))
+                break
+
+        p.can_print, so_ev = _detect_idf_stdout(root)
+        if so_ev:
+            p.facts.append(Fact("stdout", "有输出能力", E4_STRUCT, so_ev))
+
+        host = Host(cfg)
+        if not host.idf_python or not host.idf_root:
+            p.ambiguities.append(
+                "elab.host.yaml 未声明 tools.idf.python / tools.idf.idf_path —— "
+                "生成的 tools 无法执行 idf.py（请在 L0 声明，或用 --force 生成后手改 env）")
+        p.notes.append(
+            "ESP-IDF 工程：构建/烧录/烧录校验委托给工程 tools（idf.py / esptool），"
+            "内核不接管 ARM 工具链、链接脚本与内存布局")
+        return p
 
     # ② archetype
     arch, arch_ev, arch_notes = _detect_archetype(root, cmake_text)
@@ -668,7 +825,171 @@ def _root_expr(cfg: Config, p: Probe) -> str:
         return to_fwd(rp)
 
 
+def _append_provenance(A, p: Probe) -> None:
+    A("# ── 证据链 ───────────────────────────────────────────────────────")
+    A("provenance:")
+    for f in p.facts:
+        A(f"  {f.key}:")
+        A(f"    value: \"{f.value}\"")
+        A(f"    level: {f.level}          # {_LEVEL_DESC.get(f.level, '')}")
+        A(f"    evidence: \"{f.evidence}\"")
+    A(f"  confidence: \"{p.confidence}\"")
+    if p.conflicts:
+        A("  conflicts:")
+        for c in p.conflicts:
+            A(f"    - \"{c}\"")
+    if p.ambiguities:
+        A("  ambiguities:")
+        for a in p.ambiguities:
+            A(f"    - \"{a}\"")
+    if p.notes:
+        A("  notes:")
+        for n in p.notes:
+            A(f"    - \"{n}\"")
+    if p.tx_pin or p.rx_pin:
+        A("  serial_pins: \"%s TX=%s RX=%s\"" % (p.usart or "?", p.tx_pin or "?", p.rx_pin or "?"))
+
+
+def _idf_env_lines(host: Host) -> list[str]:
+    """工具共用的 ESP-IDF 环境 —— 全部引用 L0，项目 YAML 不写死绝对路径。"""
+    out = ['      IDF_PATH: "${host:tools.idf.idf_path}"']
+    if host.idf_tools_path:
+        out.append('      IDF_TOOLS_PATH: "${host:tools.idf.tools_path}"')
+    if host.idf_venv:
+        out.append('      IDF_PYTHON_ENV_PATH: "${host:tools.idf.venv}"')
+    out.append('      IDF_PY: "${host:tools.idf.python}"')
+    if host.idf_version:
+        out.append('      ESP_IDF_VERSION: "${host:tools.idf.version}"')
+    return out
+
+
+def _idf_env_from_cmd() -> list[str]:
+    return [
+        "    env_from_cmd:",
+        '      cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf_tools.py", "export", "--format", "key-value"]',
+        "      format: key-value",
+        "      path_key: PATH",
+    ]
+
+
+def _render_idf(cfg: Config, p: Probe, name: str) -> str:
+    """ESP-IDF 工程（archetype=idf）：构建/烧录/校验全部委托，monitor 仍走内核。"""
+    pn = p.project_name or name
+    chip = cfg.all_chips.get(p.chip_ref) or {}
+    pack = f"{chip.get('vendor')}/{chip.get('platform')}" \
+        if chip.get("vendor") and chip.get("platform") else "TODO/待确认"
+    host = Host(cfg)
+    target = p.idf_target or str(chip.get("idf_target") or "")
+    verify = chip.get("verify") or {}
+    flash_chip = verify.get("flash_chip") or target or "esp32s31"
+
+    L: list[str] = []
+    A = L.append
+
+    A(f"# projects/{name}.yaml —— 由 `elab adapt` 确定性生成，请勿手改")
+    A("# generated-by: elab adapt   ← 机器生成标记；删掉此行即视为人工接管，elab 将不再覆盖")
+    A("#")
+    A("# 生成依据见文末 provenance 段（逐条记「结论 ← 哪个文件的什么内容」）。")
+    A("# ESP-IDF 工程：内核不接管工具链/链接脚本，构建/烧录/校验走 tools 委托。")
+    A("")
+    A(f"name: {name}")
+    A(f"root: {_root_expr(cfg, p)}")
+    A(f"pack: {pack}          # 项目固定包：不受 active.json 影响")
+    A(f"chip: {p.chip_ref or 'TODO/待确认'}")
+    A("archetype: idf")
+    if p.provider_ref:
+        A(f"provider: {p.provider_ref}   # 显式绑定；未安装/缺步骤直接报错，不回退原生链")
+    A("")
+    A("build:")
+    A("  kind: idf")
+    A("  source: ${root}/CMakeLists.txt")
+    A("  work_dir: ${root}/build")
+    A(f"  project_name: {pn}")
+    A("")
+    A("artifacts:")
+    A(f"  elf: ${{root}}/build/{pn}.elf")
+    A(f"  bin: ${{root}}/build/{pn}.bin")
+    A(f"  map: ${{root}}/build/{pn}.map")
+    A("")
+    A("serial:")
+    if p.baud:
+        A(f"  baud: {p.baud}          # 来源：sdkconfig CONFIG_ESP_CONSOLE_UART_BAUDRATE")
+    else:
+        A("  baud: 115200")
+    A("  port: auto")
+    A("")
+    if not p.provider_ref:
+        A("steps:                          # 规范步骤 → 项目工具（事件仍用规范步骤名）")
+        A("  doctor:        tool:idf_env_check")
+        A("  build:         tool:idf_build")
+        A("  flash:         tool:idf_flash")
+        A("  debug_verify:  tool:idf_verify")
+        A("")
+    A("step_labels:                    # 项目级文案覆盖（只改显示，不改语义）")
+    A("  debug_verify: 烧录校验")
+    A("")
+    if p.can_print:
+        A("monitor:")
+        A("  close_on:")
+        A('    - { kind: regex, pattern: "^\\\\[(boot|alive)\\\\]", within_s: 10 }')
+        A("  fail_on:")
+        A('    - { kind: regex, pattern: "Guru Meditation|panic|assert failed|abort" }')
+        A("  idle_timeout_s: 30")
+    else:
+        A("# 未在 main/ 源码里找到 printf 调用 —— 不生成必然不命中的 monitor 判据。")
+        A("# monitor:")
+        A("#   close_on:")
+        A('#     - { kind: regex, pattern: "^\\\\[(boot|alive)\\\\]", within_s: 10 }')
+    A("")
+    if not p.provider_ref:
+        A("tools:")
+        A("  idf_env_check:")
+        A("    label: ESP-IDF 环境")
+        A("    cwd: ${root}")
+        A('    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "--version"]')
+        A("    env:")
+        L += _idf_env_lines(host)
+        L += _idf_env_from_cmd()
+        A("")
+        A("  idf_build:")
+        A("    label: ESP-IDF 编译")
+        A("    cwd: ${root}")
+        A(f'    cmd: ["${{env:IDF_PY}}", "${{env:IDF_PATH}}/tools/idf.py", "-B", "build", '
+          f'"-DIDF_TARGET={target}", "build"]')
+        A("    env:")
+        L += _idf_env_lines(host)
+        L += _idf_env_from_cmd()
+        A("    timeout_s: 1800")
+        A("")
+        A("  idf_flash:")
+        A("    label: ESP-IDF 烧录")
+        A("    cwd: ${root}")
+        A('    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "-B", "build", '
+          '"-p", "${serial_port}", "flash"]')
+        A("    env:")
+        L += _idf_env_lines(host)
+        L += _idf_env_from_cmd()
+        A("    timeout_s: 600")
+        A("")
+        A("  idf_verify:")
+        A("    label: 烧录校验（esptool）")
+        A("    cwd: ${root}")
+        A("    cmd:")
+        A(f'      ["${{env:IDF_PY}}", "-m", "esptool", "--chip", "{flash_chip}", '
+          f'"--port", "${{serial_port}}", "--baud", "460800", "verify-flash", '
+          f'"${{json_args:${{root}}/build/flasher_args.json#flash_files}}"]')
+        A("    env:")
+        L += _idf_env_lines(host)
+        L += _idf_env_from_cmd()
+        A("    timeout_s: 300")
+        A("")
+    _append_provenance(A, p)
+    return "\n".join(L) + "\n"
+
+
 def render(cfg: Config, p: Probe, name: str) -> str:
+    if p.is_idf:
+        return _render_idf(cfg, p, name)
     proj_name = p.project_name or name
     pn = proj_name
     L: list[str] = []
@@ -750,28 +1071,7 @@ def render(cfg: Config, p: Probe, name: str) -> str:
         A('#     - { kind: regex, pattern: "HardFault|Hard Fault|assert|PANIC" }')
         A("#   idle_timeout_s: 30")
     A("")
-    A("# ── 证据链 ───────────────────────────────────────────────────────")
-    A("provenance:")
-    for f in p.facts:
-        A(f"  {f.key}:")
-        A(f"    value: \"{f.value}\"")
-        A(f"    level: {f.level}          # {_LEVEL_DESC.get(f.level, '')}")
-        A(f"    evidence: \"{f.evidence}\"")
-    A(f"  confidence: \"{p.confidence}\"")
-    if p.conflicts:
-        A("  conflicts:")
-        for c in p.conflicts:
-            A(f"    - \"{c}\"")
-    if p.ambiguities:
-        A("  ambiguities:")
-        for a in p.ambiguities:
-            A(f"    - \"{a}\"")
-    if p.notes:
-        A("  notes:")
-        for n in p.notes:
-            A(f"    - \"{n}\"")
-    if p.tx_pin or p.rx_pin:
-        A("  serial_pins: \"%s TX=%s RX=%s\"" % (p.usart or "?", p.tx_pin or "?", p.rx_pin or "?"))
+    _append_provenance(A, p)
     return "\n".join(L) + "\n"
 
 
@@ -838,8 +1138,9 @@ def write(cfg: Config, p: Probe, *, name: str = "", force: bool = False,
 
 # ── 顶层入口（CLI 用）─────────────────────────────────────────────
 def run(cfg: Config, *, path, name: str = "", write_it: bool = False,
-        check: bool = False, force: bool = False, log=print) -> dict:
-    p = probe_project(cfg, path)
+        check: bool = False, force: bool = False, use_provider: bool = True,
+        log=print) -> dict:
+    p = probe_project(cfg, path, use_provider=use_provider)
     out = {"probe": p.to_dict(), "tier": p.tier,
            "confidence": p.confidence, "name": name or default_name(p)}
 

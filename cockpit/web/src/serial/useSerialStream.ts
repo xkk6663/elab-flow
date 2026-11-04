@@ -18,7 +18,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type {
   SerialChunk,
+  SerialDecodedFrame,
+  SerialDecodedTail,
   SerialFormat,
+  SerialIssue,
   SerialMonitorLine,
   SerialMonitorSnapshot,
   SerialPreviewResult,
@@ -30,6 +33,8 @@ export const SERIAL_POLL_MS = 500;
 const MAX_LOCAL_LINES = 2000;
 const MAX_LOCAL_CHUNKS = 4096;
 const MAX_LOCAL_BYTES = 1 << 20;
+/** 共享解码帧的本地镜像上限（波形只画最近一段；与服务端帧环同量级）。 */
+const MAX_LOCAL_DECODED = 2048;
 
 export interface SerialSendOpts {
   format: SerialFormat;
@@ -43,14 +48,26 @@ export interface SerialStream {
   paused: boolean;
   lines: SerialMonitorLine[];
   chunks: SerialChunk[];
+  /** 结构化异常（M6）：panic / assert / hardfault / reset */
+  issues: SerialIssue[];
+  issueTotal: number;
+  /** 会话级共享解码帧（M7 波形 Δt 的时间源；空 = 未启用/离线） */
+  decoded: SerialDecodedFrame[];
+  decodedSnap: SerialDecodedTail | null;
   /** 行/批次被环形缓冲挤掉的累计数（只增不减；clear 不重置） */
   gapLines: number;
   gapChunks: number;
   error: string | null;
-  open(): Promise<{ ok: boolean; error?: string }>;
+  open(logProfile?: string): Promise<{ ok: boolean; error?: string }>;
+  /** 切换会话级日志 profile（'' = 关闭诊断） */
+  setLogProfile(profile: string): Promise<void>;
+  /** 切换会话级解码器（'' = 关闭共享解码）；波形随共享帧同图 */
+  setDecoder(decoder: string): Promise<void>;
   close(): Promise<void>;
   clear(): Promise<void>;
   setPaused(next: boolean): Promise<void>;
+  /** M2：闭环让位后立即恢复（不必等 run 结束） */
+  restore(): Promise<void>;
   send(data: string, opts: SerialSendOpts): Promise<SerialWriteResult>;
   /** 只算字节、不碰串口（dry_run）：预览与发送共用服务端解析 */
   preview(data: string, opts: SerialSendOpts): Promise<SerialPreviewResult>;
@@ -62,6 +79,12 @@ export interface UseSerialStreamArgs {
   project: string;
   port: string;
   baud: number;
+  /** 线参数覆盖（M1）：如 `7E1`；空 = 跟随工程/宿主配置 */
+  line?: string;
+  /** 连接方式（M4）：serial / tcp-client / tcp-server / udp；空 = 跟随工程/宿主 */
+  transport?: string;
+  /** 网络配置（M4）：host/port 或 bind/port + allow_remote；仅 transport 非 serial 时用 */
+  net?: Record<string, unknown>;
   /** 只有串口工作区可见时才轮询（离开页面就别占带宽） */
   enabled: boolean;
 }
@@ -71,17 +94,28 @@ export function useSerialStream({
   project,
   port,
   baud,
+  line = "",
+  transport = "",
+  net,
   enabled,
 }: UseSerialStreamArgs): SerialStream {
   const [snap, setSnap] = useState<SerialMonitorSnapshot | null>(initial);
   const [lines, setLines] = useState<SerialMonitorLine[]>([]);
   const [chunks, setChunks] = useState<SerialChunk[]>([]);
+  const [issues, setIssues] = useState<SerialIssue[]>([]);
+  const [issueTotal, setIssueTotal] = useState(0);
+  const [decoded, setDecoded] = useState<SerialDecodedFrame[]>([]);
+  const [decodedSnap, setDecodedSnap] = useState<SerialDecodedTail | null>(null);
   const [gaps, setGaps] = useState({ lines: 0, chunks: 0 });
   const [error, setError] = useState<string | null>(null);
 
   const snapRef = useRef<SerialMonitorSnapshot | null>(initial);
   const lineCursor = useRef(0);
   const chunkCursor = useRef(0);
+  const issueCursor = useRef(0);
+  /** 共享解码帧游标 + 上次解码器（换解码器 ⇒ 本地镜像与游标一起重置） */
+  const decCursor = useRef(0);
+  const decDecoder = useRef("");
   const epochRef = useRef<number>(-1);
   const bytesRef = useRef(0);
   /** 请求代际：clear / 重开之后，忽略在途的旧响应 */
@@ -100,7 +134,14 @@ export function useSerialStream({
   const resetLocal = useCallback(() => {
     lineCursor.current = 0;
     chunkCursor.current = 0;
+    issueCursor.current = 0;
+    decCursor.current = 0;
+    decDecoder.current = "";
     bytesRef.current = 0;
+    setIssues([]);
+    setIssueTotal(0);
+    setDecoded([]);
+    setDecodedSnap(null);
     setLines([]);
     setChunks([]);
     setGaps({ lines: 0, chunks: 0 });
@@ -186,7 +227,46 @@ export function useSerialStream({
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }));
         }
 
-        // ④ 读线程异常自愈 / 别的标签页关了 → 如实收尾
+        // ④ 结构化异常（M6）：profile 开着才拉，增量按 issue_total 走
+        if (lt.issues?.profile) {
+          const it = await api.serialIssues(issueCursor.current);
+          if (disposed || gen !== genRef.current) return;
+          if (it.issues?.length) {
+            setIssues((prev) => prev.concat(it.issues).slice(-200));
+          }
+          issueCursor.current = it.issue_total ?? issueCursor.current;
+          setIssueTotal(issueCursor.current);
+        }
+
+        // ⑤ 会话级共享解码帧（M7）：波形的时间源（t_us）。
+        //    换解码器必须重拉（旧帧不属于新协议），清空后再从 0 追。
+        const laneDecoder = lt.decode?.decoder ?? "";
+        if (laneDecoder) {
+          if (decDecoder.current !== laneDecoder) {
+            decDecoder.current = laneDecoder;
+            decCursor.current = 0;
+            setDecoded([]);
+          }
+          const dt = await api.serialDecoded(decCursor.current);
+          if (disposed || gen !== genRef.current) return;
+          if (dt.frames?.length) {
+            setDecoded((prev) => {
+              const next = prev.concat(dt.frames);
+              return next.length > MAX_LOCAL_DECODED
+                ? next.slice(next.length - MAX_LOCAL_DECODED)
+                : next;
+            });
+          }
+          decCursor.current = dt.next_after ?? decCursor.current;
+          setDecodedSnap(dt);
+        } else if (decDecoder.current) {
+          decDecoder.current = "";
+          decCursor.current = 0;
+          setDecoded([]);
+          setDecodedSnap(null);
+        }
+
+        // ⑥ 读线程异常自愈 / 别的标签页关了 → 如实收尾
         if (!lt.active) {
           if (lt.error) setError(lt.error);
           remember({ ...lt, active: false });
@@ -208,11 +288,15 @@ export function useSerialStream({
   }, [enabled, active, resetLocal, remember]);
 
   // ── 会话操作 ────────────────────────────────────────────────
-  const open = useCallback(async () => {
+  const open = useCallback(async (logProfile = "") => {
     genRef.current += 1;
     setError(null);
     try {
-      const r = await api.serialMonitorToggle("open", { project, baud, port });
+      const r = await api.serialMonitorToggle("open", {
+        project, baud, port, line, transport,
+        ...(net ? { net } : {}),
+        ...(logProfile ? { log_profile: logProfile } : {}),
+      });
       if (!r.active) {
         const msg = r.error ?? "未知原因";
         setError(msg);
@@ -227,7 +311,7 @@ export function useSerialStream({
       setError(msg);
       return { ok: false, error: msg };
     }
-  }, [project, baud, port, resetLocal, remember]);
+  }, [project, baud, port, line, transport, net, resetLocal, remember]);
 
   const close = useCallback(async () => {
     genRef.current += 1;
@@ -270,6 +354,39 @@ export function useSerialStream({
     [remember],
   );
 
+  const setLogProfile = useCallback(async (profile: string) => {
+    if (!active) return;
+    try {
+      const r = await api.serialMonitorToggle("log_profile",
+        { log_profile: profile });
+      remember(r);
+      if (!r.ok) setError(r.error ?? "切换日志 profile 失败");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [active, remember]);
+
+  const setDecoder = useCallback(async (decoder: string) => {
+    if (!active) return;
+    try {
+      const r = await api.serialMonitorToggle("decoder", { decoder });
+      remember(r);
+      if (!r.ok) setError(r.error ?? "切换解码器失败");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [active, remember]);
+
+  const restore = useCallback(async () => {
+    try {
+      const r = await api.serialMonitorToggle("restore");
+      remember(r);
+      if (!r.ok) setError(r.error ?? "恢复失败");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [remember]);
+
   const send = useCallback(
     (data: string, opts: SerialSendOpts) =>
       api.serial({
@@ -277,11 +394,12 @@ export function useSerialStream({
         data,
         port,
         baud,
+        line,
         format: opts.format,
         eol: opts.eol,
         encoding: opts.encoding,
       }),
-    [project, port, baud],
+    [project, port, baud, line],
   );
 
   const preview = useCallback(
@@ -291,11 +409,12 @@ export function useSerialStream({
         data,
         port,
         baud,
+        line,
         format: opts.format,
         eol: opts.eol,
         encoding: opts.encoding,
       }),
-    [project, port, baud],
+    [project, port, baud, line],
   );
 
   // initial 变化（别的标签页在 caps 刷新后体现）时同步一次
@@ -311,13 +430,20 @@ export function useSerialStream({
     paused,
     lines,
     chunks,
+    issues,
+    issueTotal,
+    decoded,
+    decodedSnap,
     gapLines: gaps.lines,
     gapChunks: gaps.chunks,
     error,
     open,
+    setLogProfile,
+    setDecoder,
     close,
     clear,
     setPaused,
+    restore,
     send,
     preview,
   };

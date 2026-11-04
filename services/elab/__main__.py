@@ -25,6 +25,8 @@ from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, f
 from . import market as market_mod
 from . import monitor as monitor_mod
 from . import pkg as pkg_mod
+from . import lock as lock_mod
+from . import provider as provider_mod
 from . import run as run_mod
 from . import serialconsole as serialconsole_mod
 from . import serialport as serialport_mod
@@ -36,6 +38,11 @@ from .plan import plan_for
 def _add_common(p):
     p.add_argument("--root", help="覆盖 ELAB_ROOT（默认本文件所在目录）")
     p.add_argument("--json", action="store_true", help="机器可读输出")
+
+
+def silent(args):
+    """``--json`` 时不向 stdout 打人类日志（避免污染 JSON）。"""
+    return (lambda *a, **k: None) if getattr(args, "json", False) else print
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -53,6 +60,8 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("-p", "--project", help="只检查某个项目")
     p.add_argument("--deep", action="store_true", help="真跑 configure 取实际编译命令作证据")
+    p.add_argument("--strict-lock", action="store_true", dest="strict_lock",
+                   help="elab.lock.yaml 版本漂移升级为失败（默认只 warn）")
 
     p = sub.add_parser("build", help="构建项目")
     _add_common(p)
@@ -96,6 +105,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("-p", "--project", required=True, help="项目名")
     p.add_argument("--port", help="覆盖 serial.port（默认取 projects/*.yaml 的 auto）")
+    p.add_argument("--line", help="覆盖线参数（如 8N1 / 7E1 / 5N1.5；默认取工程/宿主）")
     p.add_argument("--seconds", type=float, default=0.0,
                    help="观察窗口秒数（默认取 close_on.within_s）")
     p.add_argument("-q", "--quiet", action="store_true", help="不回显收到的每一行")
@@ -111,6 +121,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="要发送的内容（默认按 UTF-8 文本发，见 --hex）")
     p.add_argument("--port", help="覆盖 serial.port（默认取 projects/*.yaml）")
     p.add_argument("--baud", type=int, help="覆盖 serial.baud")
+    p.add_argument("--line", help="覆盖线参数（如 8N1 / 7E1 / 5N1.5；默认取工程/宿主）")
     p.add_argument("--read-ms", type=int, default=serialterm_mod.DEFAULT_READ_MS,
                    help=f"写完之后收多久回显（默认 {serialterm_mod.DEFAULT_READ_MS}ms）")
     p.add_argument("--no-newline", action="store_true",
@@ -218,6 +229,34 @@ def _parser() -> argparse.ArgumentParser:
     sp.add_argument("--block", help="封禁清单 JSON（市场仓 blocklist.json，紧急下架用）")
     sp.add_argument("--report", help="把发现/拒绝报告写到该路径")
 
+    p = sub.add_parser("provider",
+                       help="工具链 provider：列表 / 搜索 / 安装 / 卸载（声明式数据包）")
+    prov_sub = p.add_subparsers(dest="provider_cmd", required=True)
+
+    def _prov_sub(name, help_):
+        sp = prov_sub.add_parser(name, help=help_)
+        _add_common(sp)
+        return sp
+
+    sp = _prov_sub("list", "列出已安装 provider 与发现根")
+    sp = _prov_sub("search", "搜索市场中的 provider")
+    sp.add_argument("query", nargs="?", default="", help="关键词")
+    sp = _prov_sub("install", "安装 provider（市场名 / 本地目录 / git）")
+    sp.add_argument("name", nargs="?", default="", help="provider 名（如 espressif/idf）")
+    sp.add_argument("--from", dest="from_path", help="本地 provider 目录")
+    sp.add_argument("--git", help="git 仓库 URL")
+    sp.add_argument("--ref", help="git 分支 / tag")
+    sp.add_argument("--sha256", help="期望的内容哈希（强校验）")
+    sp.add_argument("--force", action="store_true", help="覆盖已安装的同名 provider")
+    sp = _prov_sub("remove", "卸载 provider（只删安装目录）")
+    sp.add_argument("name", help="provider 名")
+    sp.add_argument("--force", action="store_true", help="跳过目录范围保护（谨慎）")
+
+    p = sub.add_parser("lock", help="按当前安装回填 / 校验 elab.lock.yaml")
+    _add_common(p)
+    p.add_argument("--check", action="store_true", help="只校验漂移（不写文件）")
+    p.add_argument("--strict", action="store_true", help="漂移时退出码 1")
+
     p = sub.add_parser("adapt",
                        help="一键适配图形配置器导出的工程（确定性探测 → 生成 projects/*.yaml）")
     _add_common(p)
@@ -233,6 +272,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="存在未决项 / 人工改动时仍写入（覆盖前自动 .bak）")
     p.add_argument("--clean", action="store_true", help="--verify 时先清空工作目录")
+    p.add_argument("--no-provider", action="store_true",
+                   help="ESP-IDF 工程不写 provider 绑定，改生成内联 tools 兜底")
     p.add_argument("-v", "--verbose", action="store_true", help="--verify 时透传子进程输出")
 
     return ap
@@ -272,6 +313,10 @@ def _dispatch(args) -> int:
         return cmd_run(cfg, args)
     if args.cmd == "pkg":
         return cmd_pkg(cfg, args)
+    if args.cmd == "provider":
+        return cmd_provider(cfg, args)
+    if args.cmd == "lock":
+        return cmd_lock(cfg, args)
     if args.cmd == "skill":
         return cmd_skill(cfg, args)
     if args.cmd == "adapt":
@@ -352,7 +397,8 @@ def _uniq_chips(cfg: Config):
 
 # ── doctor ────────────────────────────────────────────────────────
 def cmd_doctor(cfg: Config, args) -> int:
-    rep = doctor_mod.run(cfg, only=args.project, deep=args.deep)
+    rep = doctor_mod.run(cfg, only=args.project, deep=args.deep,
+                         strict_lock=getattr(args, "strict_lock", False))
     if args.json:
         print(json.dumps(
             {"passed": rep.passed,
@@ -471,7 +517,7 @@ def cmd_monitor(cfg: Config, args) -> int:
     silent = (lambda *a, **k: None) if args.json else print
     v = monitor_mod.run(cfg, args.project, port=args.port or "",
                         seconds=args.seconds, echo=not args.quiet,
-                        reset_port=args.reset_port, log=silent)
+                        reset_port=args.reset_port, line=args.line, log=silent)
     if args.json:
         print(json.dumps(v.to_dict(), ensure_ascii=False, indent=2))
     else:
@@ -489,7 +535,7 @@ def cmd_serial(cfg: Config, args) -> int:
     """
     res = serialterm_mod.roundtrip(
         cfg, args.project, data=args.data, port=args.port or "",
-        baud=args.baud or 0, read_ms=args.read_ms,
+        baud=args.baud or 0, read_ms=args.read_ms, line=args.line,
         newline=not args.no_newline, hex_=args.hex,
         journal=serialconsole_mod.journal_for(cfg, project=args.project),
         log=(lambda *a, **k: None) if args.json else print)
@@ -531,6 +577,27 @@ def cmd_loop(cfg: Config, args) -> int:
             verbose=args.verbose, actor="agent", emit_events=False,
             run_id=None, quiet=False, events_dir=None, keep_going=False,
             json=getattr(args, "json", False), dry_run=True))
+
+    # ★ Provider 工程：闭环走统一执行器（run.py），与 `--dry-run` 预览同源。
+    #   否则会落到原生 ARM builder —— 预览说 IDF、实跑却拼 cmake（违反 R2）。
+    try:
+        _tc = provider_mod.resolve(cfg, name)
+    except ElabError:
+        _tc = None
+    if _tc and any((_tc.steps.get(s) and _tc.steps[s].kind == "external")
+                   for s in ("build", "flash", "debug_verify")):
+        st = ["doctor", "build"]
+        if not args.no_flash:
+            st.append("flash")
+        if not args.no_debug:
+            st.append("debug_verify")
+        if not args.no_monitor:
+            st.append("monitor")
+        return cmd_run(cfg, argparse.Namespace(
+            project=name, steps=",".join(st), clean=args.clean, jobs=None,
+            verbose=args.verbose, actor="agent", emit_events=False,
+            run_id=None, quiet=False, events_dir=None, keep_going=False,
+            json=getattr(args, "json", False), dry_run=False))
 
     steps = []
     # 步骤总数随 --no-* 开关变化；**别再手写编号**（旧版写死 [3/5]/[4/5]，
@@ -859,6 +926,7 @@ def cmd_pkg(cfg: Config, args) -> int:
             return 0
         if args.check:
             probs = pkg_mod.index_problems(root, base, out)
+            probs += provider_mod.index_problems(cfg, out)
             if args.json:
                 print(json.dumps({"ok": not probs, "problems": probs},
                                  ensure_ascii=False, indent=2))
@@ -869,23 +937,119 @@ def cmd_pkg(cfg: Config, args) -> int:
                       else f"[elab] ✗ 索引漂移 {len(probs)} 项")
             return 0 if not probs else 1
         keep = []
+        keep_prov: list[dict] = []
         if out.exists():
             try:
-                keep = (json.loads(out.read_text(encoding="utf-8"))
-                        .get("packs") or [])
+                old = json.loads(out.read_text(encoding="utf-8"))
+                keep = old.get("packs") or []
+                # 外置（git）provider 条目不由本仓源码生成，索引里保留
+                keep_prov = [e for e in (old.get("providers") or [])
+                             if str((e.get("source") or {}).get("type") or "local") != "local"]
             except ValueError:
                 keep = []
         data = pkg_mod.build_index(root, base, keep=keep)
+        data["providers"] = provider_mod.index_entries(cfg) + keep_prov
+        data["providers"].sort(key=lambda e: str(e.get("name")))
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                            encoding="utf-8")
-            print(f"[elab] ✓ 已生成市场索引：{out}（{len(data['packs'])} 个包）")
+            print(f"[elab] ✓ 已生成市场索引：{out}"
+                  f"（{len(data['packs'])} 个包 / {len(data['providers'])} 个 provider）")
         return 0
 
     return 2
+
+
+# ── provider：列表 / 搜索 / 安装 / 卸载 ───────────────────────────
+def cmd_provider(cfg: Config, args) -> int:
+    cmd = args.provider_cmd
+    if cmd == "list":
+        st = provider_mod.status(cfg, include_market=False)
+        if args.json:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+            return 0
+        print(f"[elab] provider 发现根：{', '.join(st['roots'])}")
+        if not st["installed"]:
+            print("  (未安装任何 provider；用 elab provider search / install)")
+        for p in st["installed"]:
+            flag = "installed" if p["installed"] else "source"
+            print(f"  {p['name']}@{p['version']}  [{flag}]  "
+                  f"steps={','.join(p['steps'])}  {p['dir']}")
+        return 0
+    if cmd == "search":
+        entries = provider_mod.status(cfg)["market"]
+        if args.json:
+            print(json.dumps(entries, ensure_ascii=False, indent=2))
+            return 0
+        if not entries:
+            print("[elab] 市场索引中没有 provider 条目")
+            return 0
+        for e in entries:
+            mark = "✓" if e.get("installed") else " "
+            print(f"  {mark} {e.get('name')}@{e.get('version')}  "
+                  f"[{e.get('kind')}]  {e.get('description', '')}")
+        return 0
+    if cmd == "install":
+        entry = provider_mod.market_entry(cfg, args.name) if args.name else None
+        source = {}
+        if args.from_path:
+            source = {"local": args.from_path}
+        elif args.git:
+            source = {"git": args.git, "ref": args.ref}
+        elif entry:
+            source = provider_mod.entry_source(entry, entry.get("_base") or str(cfg.root))
+        elif args.name and (provider_mod.official_root(cfg)
+                            / provider_mod.split_ref(args.name)[0]
+                            / provider_mod.PROVIDER_FILE).exists():
+            # 官方源兜底：市场索引未发布/不可达时，从 providers/official 安装
+            source = {"local": str(provider_mod.official_root(cfg)
+                                   / provider_mod.split_ref(args.name)[0])}
+        else:
+            print(f"[elab] ✗ 未知 provider：{args.name or '(空)'}；"
+                  f"用 --from/--git 指定来源，或先 elab pkg index", file=sys.stderr)
+            return 2
+        want = args.sha256 or (entry or {}).get("sha256")
+        res = provider_mod.install(cfg, args.name, sha256=want,
+                                   force=args.force, log=silent(args),
+                                   **source)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    if cmd == "remove":
+        try:
+            res = provider_mod.remove(cfg, args.name, force=args.force,
+                                      log=silent(args))
+        except ElabError as exc:
+            print(f"[elab] ✗ {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    return 2
+
+
+# ── lock：回填 / 漂移校验 ─────────────────────────────────────────
+def cmd_lock(cfg: Config, args) -> int:
+    items = lock_mod.drift(cfg)
+    if args.check:
+        bad = [i for i in items if not i.get("ok")]
+        if args.json:
+            print(json.dumps({"ok": not bad, "items": items},
+                             ensure_ascii=False, indent=2))
+        else:
+            for it in bad:
+                print(f"  ✗ {it.get('section', '')}.{it['key']}: "
+                      f"lock={it['expected']} 实际={it['actual'] or '(未安装)'}")
+            print("[elab] ✓ elab.lock.yaml 与已安装版本一致" if not bad
+                  else f"[elab] ✗ lock 漂移 {len(bad)} 项")
+        return 1 if (bad and args.strict) else 0
+    res = lock_mod.write(cfg, log=silent(args))
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
 
 
 # ── skill：生成 per-chip AI skill ─────────────────────────────────
@@ -925,7 +1089,8 @@ def cmd_adapt(cfg: Config, args) -> int:
 
     res = adapt_mod.run(cfg, path=args.path, name=args.name or "",
                         write_it=args.write, check=args.check,
-                        force=args.force, log=silent)
+                        force=args.force, use_provider=not args.no_provider,
+                        log=silent)
 
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
@@ -947,7 +1112,8 @@ def _adapt_verify(cfg: Config, args, log) -> int:
     这是「适配成功」的可证伪判据：不只看文件写没写出来，
     还要证明①接入声明与环境自洽、②真能编译出 elf、③业务工程一个字节没动。
     """
-    probe = adapt_mod.probe_project(cfg, args.path)
+    probe = adapt_mod.probe_project(cfg, args.path,
+                                    use_provider=not getattr(args, "no_provider", False))
     name = args.name or adapt_mod.default_name(probe)
 
     log(f"{'=' * 62}\n[adapt 1/5] 确定性探测\n{'=' * 62}")

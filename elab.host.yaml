@@ -32,9 +32,11 @@ toolchains:
     #   （CMake 会忽略它，但子进程/工具仍可能按 PATH 解析），前置 PATH 才能保证版本可复现。
     prepend_path: true
 
-  riscv32-esp-elf:            # ESP32-S3 备用（本项目暂未接入）
-    root: C:/Users/xiao1/.espressif/tools/riscv32-esp-elf
-    found: false              # 待确认具体版本子目录，暂标未就绪
+  riscv32-esp-elf:            # ESP32-S31（RISC-V）编译/调试
+    # 实测（2026-11-04）：IDF 6.1 的 RISC-V 工具链由 ESP-IDF tools 安装器管理，
+    # 下面三处是入口路径；版本由 idf.py 自己按 Python env 解析，elab 不猜版本目录。
+    root: C:/Espressif/tools/riscv32-esp-elf/esp-6.1_20260402/riscv32-esp-elf
+    found: true
 
 # ── 主机侧工具 ────────────────────────────────────────────────────
 tools:
@@ -53,6 +55,24 @@ tools:
   openocd:
     path:    C:/Users/xiao1/AppData/Local/at32-tools/OpenOCD/V2.0.9/bin/openocd.exe
     scripts: C:/Users/xiao1/AppData/Local/at32-tools/OpenOCD/V2.0.9/scripts
+  # ★ ESP-IDF 自带的 OpenOCD / GDB 是另一套安装（脚本含 esp32s31 target、
+  #   esp_usb_jtag interface），与上面的 ARM 版不能混用。
+  gdb_riscv:
+    path: C:/Espressif/tools/riscv32-esp-elf-gdb/17.1_20260402/riscv32-esp-elf-gdb/bin/riscv32-esp-elf-gdb.exe
+  # 串口 panic 回溯符号化（M6）：与编译器同一套 RISC-V 工具链；实测可用。
+  addr2line_esp32:
+    path: C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20260121/riscv32-esp-elf/bin/riscv32-esp-elf-addr2line.exe
+  openocd_esp32:
+    path:    C:/Espressif/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/bin/openocd.exe
+    scripts: C:/Espressif/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/share/openocd/scripts
+  # ★ ESP-IDF 工程工具入口（L0 只声明“装在哪”，芯片/工程细节仍在 pack/项目 YAML）
+  idf:
+    python:     C:/Espressif/tools/python/v6.1/venv/Scripts/python.exe
+    idf_path:   C:/esp/v6.1/esp-idf
+    tools_path: C:/Espressif
+    # IDF_PYTHON_ENV_PATH 必须是宿主原生分隔符（idf.py 逐字符比较 sys.prefix）
+    venv:       C:\Espressif\tools\python\v6.1\venv
+    version:    "6.1"
   pyocd:
     path: null                # 未安装
 
@@ -115,4 +135,11 @@ packs:
     - ${ELAB_ROOT}/packs/installed
   # 社区市场：零服务器 GitHub 索引；不可达时自动回退到本仓 market/index.json
   market: https://raw.githubusercontent.com/xkk6663/elab-pack-market/main/index.json
+
+# ── 工具链 provider（L0.5：声明式数据包，不塞进芯片包）─────────────────
+# roots   : provider 搜索根（第一个也是安装目标）；可用 ELAB_PROVIDER_ROOTS 覆盖
+# 源码 providers/official/** 不在发现根：未安装 = 不可用（D3，不回退）
+providers:
+  roots:
+    - ${ELAB_ROOT}/providers/installed
 

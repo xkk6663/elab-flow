@@ -24,8 +24,8 @@ const STEP_LABEL: Record<string, string> = {
   monitor: "串口闭环",
 };
 
-export const stepLabel = (id: string): string =>
-  STEP_LABEL[id] ?? (id.startsWith("tool:") ? `工具·${id.slice(5)}` : id);
+export const stepLabel = (id: string, card?: ProjectCard | null): string =>
+  card?.step_labels?.[id] ?? STEP_LABEL[id] ?? (id.startsWith("tool:") ? `工具·${id.slice(5)}` : id);
 
 /**
  * 「跑全闭环」的步序（C30）。
@@ -229,7 +229,7 @@ export function StageRail({
               />
             ) : null}
             <span className={s.bandNode}>
-              <StateDot state={v.state} title={`${stepLabel(v.id)} · ${v.state}`} />
+              <StateDot state={v.state} title={`${stepLabel(v.id, card)} · ${v.state}`} />
               <TextShimmer active={v.state === "running"}>
                 <span
                   className={[
@@ -241,7 +241,7 @@ export function StageRail({
                     v.state === "skipped" || v.state === "pending" ? s.bandIdle : "",
                   ].join(" ")}
                 >
-                  {stepLabel(v.id)}
+                  {stepLabel(v.id, card)}
                 </span>
               </TextShimmer>
               {v.duration_s > 0 ? (
@@ -320,7 +320,7 @@ export function StageRail({
             const onhw = (caps?.steps.onhw ?? []).includes(id);
             const tip = !ok
               ? st?.reason || "不可用"
-              : `只跑这一步：${stepLabel(id)}${onhw ? "（需探针在位）" : ""}`;
+              : `只跑这一步：${stepLabel(id, card)}${onhw ? "（需探针在位）" : ""}`;
             return (
               <Tooltip key={id} tip={tip}>
                 <Button
@@ -328,7 +328,7 @@ export function StageRail({
                   disabled={running || !ok}
                   onClick={() => onRunSteps([id as StepId])}
                 >
-                  {stepLabel(id)}
+                  {stepLabel(id, card)}
                 </Button>
               </Tooltip>
             );
@@ -409,7 +409,7 @@ export function StageRail({
             {pv.plan.map((e) => (
               <div className={s.pvStep} key={e.step}>
                 <div className={s.pvStepHead}>
-                  {stepLabel(e.step)}
+                  {stepLabel(e.step, card)}
                   {e.blocked ? <Tag dense tone="amber">需前置产物</Tag> : null}
                   {!e.spawns ? <Tag dense tone="neutral">不派生子进程</Tag> : null}
                 </div>
@@ -561,7 +561,7 @@ export function StageRail({
                 header={
                   <>
                     <StateDot state={v.state} size={8} />
-                    <span className={s.ledStep}>{stepLabel(v.id)}</span>
+                    <span className={s.ledStep}>{stepLabel(v.id, card)}</span>
                     <span className={s.ledDetail}>{v.detail}</span>
                     <span className={s.ledDur}>{fmtDur(v.duration_s)}</span>
                   </>

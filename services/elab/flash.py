@@ -32,10 +32,18 @@ def _openocd_argv(plan: Plan, commands, *,
     dbg = chip.get("debug") or {}
     host = plan.host
 
-    if not host.openocd:
-        raise ElabError("elab.host.yaml 未声明 tools.openocd.path")
-    if not host.openocd_scripts:
-        raise ElabError("elab.host.yaml 未声明 tools.openocd.scripts")
+    backend = str(dbg.get("backend") or "")
+    esp_idf = backend in ("esp-idf", "idf")
+    openocd_bin = (host.openocd_esp32 or host.openocd) if esp_idf else host.openocd
+    scripts_dir = (
+        (host.openocd_esp32_scripts or host.openocd_scripts) if esp_idf
+        else host.openocd_scripts
+    )
+    if not openocd_bin:
+        raise ElabError("elab.host.yaml 未声明 tools.openocd.path / tools.openocd_esp32.path")
+    if not scripts_dir:
+        raise ElabError(
+            "elab.host.yaml 未声明 tools.openocd.scripts / tools.openocd_esp32.scripts")
 
     # ★ interface cfg 属于【探针】（L0），target cfg 属于【芯片】（L1）—— 两者正交。
     #   SWD 就是 SWD：同一个 DAP-Link 换 target cfg 就能连不同厂家的芯片。
@@ -48,12 +56,12 @@ def _openocd_argv(plan: Plan, commands, *,
         interface = f"interface/{probe['backend']}.cfg"
 
     target = dbg.get("openocd_target")
-    if not interface or not Path(host.openocd_scripts, interface).exists():
-        raise ElabError(f"openocd interface cfg 不可用：{interface!r}")
-    if not target or not Path(host.openocd_scripts, target).exists():
-        raise ElabError(f"openocd target cfg 不可用：{target!r}")
+    if not interface or not Path(scripts_dir, interface).exists():
+        raise ElabError(f"openocd interface cfg 不可用：{interface!r}（脚本目录 {scripts_dir}）")
+    if not target or not Path(scripts_dir, target).exists():
+        raise ElabError(f"openocd target cfg 不可用：{target!r}（脚本目录 {scripts_dir}）")
 
-    argv = [to_fwd(host.openocd), "-s", to_fwd(host.openocd_scripts)]
+    argv = [to_fwd(openocd_bin), "-s", to_fwd(scripts_dir)]
     # ★ 端口等"服务器级"命令必须前置（见 docstring）
     for c in (pre_commands or []):
         argv += ["-c", c]
@@ -370,12 +378,13 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
         raise ElabError(f"项目未声明产物 artifacts.elf：{plan.name}")
 
     server = _openocd_argv(plan, "")
-    gdb_bin = plan.host.gdb or "arm-none-eabi-gdb"
-    # ★ C33 镜像模式（flash.images 已声明）跳过 gdb `load`：
-    #   load 按 APP elf 的段擦写 Flash，与 program app.ef 有同样的向下擦除风险
-    #   （M2：从 0x08004000 起擦，覆盖 Bootloader 尾部）。闭环顺序里 flash 在
-    #   debug 之前，固件已在位，这里只 reset halt 断点即可，不重写 Flash。
-    load_cmds = [] if plan.flash_images else ["-ex", "load"]
+    # ★ 调试器/load 策略一律走 plan.debug_profile()（与驾驶舱 DebugSession 同源）：
+    #   ARM = arm-none-eabi + load；ESP-IDF = riscv32-esp-elf-gdb + 不 load。
+    prof = plan.debug_profile()
+    gdb_bin = prof["gdb"] or plan.host.gdb or "arm-none-eabi-gdb"
+    #   C33 镜像模式 / ESP-IDF：跳过 gdb `load` —— 固件已由 flash 在位，
+    #   load 会按 elf 段擦写 Flash（向下擦除风险），这里只 reset halt 断点。
+    load_cmds = ["-ex", "load"] if prof.get("load") else []
     gdb_cmd = [
         gdb_bin, to_fwd(elf),
         "-ex", "target extended-remote localhost:3333",

@@ -181,7 +181,17 @@ export interface ProjectCard {
   linker_script: string;
   artifacts: Record<string, string>;
   probe: string;
-  serial: { baud?: number; port?: string };
+  /** 芯片声明的调试后端（`esp-idf` = 探针可板载或外接）；空 = 无后端 */
+  debug_backend?: string;
+  /** 项目级调试页签白名单（按芯片收敛；会话打开后再按 snapshot.features 收敛） */
+  debug_features?: string[];
+  serial: {
+    baud?: number; port?: string; line?: string | SerialLineConfig;
+    /** 连接方式（M4）：serial / tcp-client / tcp-server / udp（工程 yaml 声明） */
+    transport?: string;
+    /** 网络传输配置（M4）：host/port 或 bind/port + allow_remote */
+    net?: Record<string, unknown>;
+  };
   monitor: { close_on: number; fail_on: number; idle_timeout_s?: number };
   provenance: Record<string, { value: string; level: string; evidence: string }>;
   /** 派生状态位（不是新元数据，只是"文件在不在"） */
@@ -189,6 +199,10 @@ export interface ProjectCard {
   steps: Record<StepId, { ok: boolean; reason: string }>;
   /** 项目声明工具（projects/*.yaml 的 tools: 节）；通用机制，见 run.py TOOL_PREFIX */
   tools: Array<{ name: string; label: string }>;
+  /** 步骤委托（派生）：steps.<step> == tool:<name> 时为 true */
+  delegated?: Record<string, boolean>;
+  /** 项目级步骤文案覆盖（只改显示，不改语义） */
+  step_labels?: Record<string, string>;
   /** OTA 投影（C1/C3）：芯片声明了 ota_layout 才有；boot_stamp=冻结台账（未烧录为 null） */
   ota?: {
     boot_project: string;
@@ -233,6 +247,26 @@ export interface SerialMeta {
   directions?: string[];
   decoders?: SerialDecoderMeta[];
   features?: string[];
+  /** 传输种类（M4）：面板按此渲染「连接方式」，不写死业务名词 */
+  transports?: {
+    kinds: string[];
+    default?: string;
+    net?: {
+      defaults?: Record<string, Record<string, string | number>>;
+      loopback_only?: boolean;
+      note?: string;
+    };
+  };
+  /** 线参数词汇（M1）：面板据此渲染选择器，不写死业务名词 */
+  line?: {
+    data_bits: number[];
+    parity: string[];
+    stop_bits: number[];
+    flow: string[];
+    default: SerialLineConfig;
+    text_forms: string[];
+    note?: string;
+  };
 }
 
 /**
@@ -323,6 +357,8 @@ export interface Capabilities {
     ports: SerialPort[];
     host_default: string;
     host_baud: number;
+    /** 宿主/工程未声明 line 时的默认线参数（M1）。 */
+    host_line?: SerialLineConfig;
     /** 能否往串口**写**（M3-b）。与 `available` 同源，但单列以免前端去猜。 */
     write_available: boolean;
     /**
@@ -492,12 +528,126 @@ export interface SerialConsoleResponse {
 }
 
 // ── /api/serial/monitor（常驻串口监视会话）────────────────────────
+/** 线参数（M1）：数据位 / 校验 / 停止位 / 流控。文本形态如 `7E1`、`5N1.5`。 */
+export interface SerialLineConfig {
+  data_bits: number;
+  /** none | even | odd | mark | space */
+  parity: string;
+  stop_bits: number;
+  /** none | rtscts | xonxoff | dsrdtr */
+  flow: string;
+  /** 组合文本，会话快照与 UI 显示都应以它为准 */
+  text: string;
+}
+
+/** DTR/RTS 的已知状态。`null` = 没动过/未知（不等于"线是低电平"）。 */
+export interface SerialControlState {
+  dtr: boolean | null;
+  rts: boolean | null;
+  /** pyserial 回读过实际值；false = 只是请求值（ctypes 无回读） */
+  verified: boolean;
+  preset: string;
+  by: string;
+  at: number;
+}
+
+/** 重连策略（M2）：默认开、200ms→5s 无限退避（0 = 不限次数）。 */
+export interface SerialReconnectConfig {
+  enabled: boolean;
+  min_ms: number;
+  max_ms: number;
+  max_attempts: number;
+}
+
+/** 速率/帧率/缓冲占用（M2 §4.6）：服务端算，面板只渲染。 */
+export interface SerialStats {
+  rx_bps: number;
+  tx_bps: number;
+  rx_bytes_total: number;
+  tx_bytes_total: number;
+  frames_per_s: number | null;
+  frames_total: number;
+  /** 窗口不足 1s（刚开会话）—— 速率是折算值，不是满窗值 */
+  warmup: boolean;
+  buffer: { lines: number; chunks: number; bytes: number; frames: number };
+  covered: { lines: number; chunks: number; frames: number };
+}
+
+/** 结构化异常（M6）：panic / assert / hardfault / reset。 */
+export interface SerialIssue {
+  seq: number;
+  kind: "panic" | "assert" | "hardfault" | "reset";
+  core: string | null;
+  reason: string | null;
+  line: string;
+  t: string;
+  t_us: number;
+  backtrace: string[];
+  /** 复位后的第一条 panic（区分"上电就炸"与"跑着炸"） */
+  after_reset: boolean;
+}
+
+export interface SerialSymbol {
+  addr: string;
+  func: string | null;
+  file: string | null;
+  line: number | null;
+  /** ROM 地址等无法符号化时的说明（不编造函数名） */
+  note?: string;
+}
+
+export interface SerialIssueSummary {
+  profile: string;
+  total: number;
+  covered: number;
+  last_seq: number;
+}
+
+/** 日志 profile（M6）：面板只读 id/label，规则在包/工程数据里。 */
+export interface SerialLogProfile {
+  id: string;
+  label: string;
+  panic_lines?: string[];
+  hardfault_lines?: string[];
+  reset_lines?: string[];
+  core_pattern?: string;
+  reason_pattern?: string;
+  backtrace_line?: string;
+  addr_pattern?: string;
+  rom_prefixes?: string[];
+  symbolize?: { tool_key?: string; args?: string[] };
+}
+
 export interface SerialMonitorSnapshot {
   active: boolean;
+  /** 连接态（M2）：live / reconnecting / suspended（闭环让位）/ closed */
+  state?: "live" | "reconnecting" | "suspended" | "closed";
+  conn?: number;
+  reconnects?: number;
+  /** 最近一次掉线持续时间（秒；重连成功或放弃后才定格） */
+  down_s?: number;
+  /** auto 选口在重连时换了口（仅记录，不静默改口） */
+  port_changed?: { from: string; to: string } | null;
+  last_error?: string | null;
+  suspended_by_run?: boolean;
+  suspend_reason?: string;
+  resume_error?: string | null;
+  reconnect?: SerialReconnectConfig;
+  stats?: SerialStats;
+  /** 结构化异常计数（M6）：profile 非空才统计 */
+  issues?: SerialIssueSummary;
   project?: string;
   port?: string;
   baud?: number;
   backend?: string;
+  /** 本次会话的线参数（打开时属性；改后需重开才生效） */
+  line?: SerialLineConfig;
+  line_text?: string;
+  kind?: string;
+  port_spec?: string;
+  /** 网络传输（M4）的绑定/目标：tcp-client {host,port}；tcp-server/udp {bind,port} */
+  net?: Record<string, unknown>;
+  control?: SerialControlState;
   /** 会话内已累计的行数（= 最后一条的 seq） */
   seq?: number;
   /** 环形缓冲挤掉的总行数（>0 说明有行没活过缓冲期） */
@@ -564,6 +714,8 @@ export interface SerialDecodeState {
   updated_at: number;
   /** 解码异常（未知解码器/内部错误）；null = 正常 */
   error: string | null;
+  /** 帧协议（M5）：字段元数据（波形通道名/单位；非 profile 解码为空） */
+  fields?: Array<{ name: string; unit: string; type: string; plot: boolean }>;
 }
 
 export interface SerialMonitorLine {
@@ -572,6 +724,74 @@ export interface SerialMonitorLine {
   /** 服务端已格式化的 HH:MM:SS */
   t: string;
   t_us?: number;
+}
+
+/** [Omitted] 会话级共享解码的一帧（GET /api/serial/monitor/decoded）。 */
+export interface SerialDecodedFrame {
+  /** 会话内单调的帧序号（换解码器/clear 也不回退） */
+  seq: number;
+  /** 服务端已格式化的 HH:MM:SS.mmm */
+  t: string;
+  /** 所属 RX 批次的采集时刻（微秒）—— 同批多帧时间相同（Δ 精度受批大小限制） */
+  t_us: number;
+  /** 每通道的浮点值（长度 = channels） */
+  values: number[];
+}
+
+/** GET /api/serial/monitor/decoded 的响应（增量帧 + 解码状态）。 */
+export interface SerialDecodedTail extends SerialDecodeState {
+  active: boolean;
+  epoch?: number;
+  /** 下一游标：把 next_after 当 after 再拉即可 */
+  next_after: number;
+  frames: SerialDecodedFrame[];
+  /** 客户端错过的帧数下限（帧环挤掉；只报告不抹平） */
+  gap: number;
+}
+
+/** pack.yaml 里的一个复位/下载预设（M1）：内核只按 steps 逐条动线。 */
+export interface SerialControlPreset {
+  name: string;
+  label: string;
+  description?: string;
+  steps: { dtr?: boolean; rts?: boolean; hold_ms: number }[];
+}
+
+/** GET /api/serial/control（预设清单 + 已知线状态 + 序列进度）。 */
+export interface SerialControlStateResponse {
+  presets: SerialControlPreset[];
+  pack: string;
+  errors: string[];
+  hint: string | null;
+  session: { active: boolean; port: string; line_text: string };
+  control: SerialControlState;
+  sequence: {
+    state: "idle" | "running" | "done" | "cancelled" | "error" | string;
+    preset: string;
+    error: string;
+    steps: number;
+    started: number;
+    finished: number;
+  };
+}
+
+/** POST /api/serial/control 的结果（apply 与 preset/cancel 的公共面）。 */
+export interface SerialControlResult {
+  ok: boolean;
+  error?: string;
+  port?: string;
+  line_text?: string;
+  /** true = 没开监视，临时开户（open 本身可能拉 DTR） */
+  transient?: boolean;
+  note?: string;
+  /** apply：本次实际生效的线态 */
+  applied?: { dtr?: boolean; rts?: boolean };
+  verified?: boolean;
+  backend?: string;
+  preset?: string;
+  async?: boolean;
+  cancelled?: boolean;
+  sequence?: SerialControlStateResponse["sequence"];
 }
 
 export interface SerialMonitorTail extends SerialMonitorSnapshot {
@@ -621,6 +841,56 @@ export interface SerialDecodeResult {
   pending_bytes: number;
   pending_b64: string;
   input_bytes: number;
+  error?: string;
+  /** 帧协议（M5）：每帧的字段值（name → 数值/文本/hex） */
+  records?: Array<{ fields: Record<string, number | string | null>; values: number[] }>;
+  /** 帧协议（M5）：字段元数据（波形通道名/单位来自这里） */
+  fields?: Array<{ name: string; unit: string; type: string; plot: boolean }>;
+  /** 帧协议（M5）：校验失败帧数（失败帧计入 skipped，不静默丢） */
+  checksum_fail?: number;
+  /** 最近若干条解码错误（字段越界/校验失败原因） */
+  errors?: string[];
+}
+
+// ── 帧协议 profile（M5）──────────────────────────────────────────
+/** 一个字段：offset 从帧起始字节算（含 head）；scale/bias 只对数值字段生效。 */
+export interface SerialFrameField {
+  name: string;
+  unit: string;
+  offset: number;
+  type: string;
+  endian: "le" | "be";
+  length: number;
+  scale: number;
+  bias: number;
+  enum?: Record<string, string> | null;
+  /** 是否作为波形通道（enum/ascii/bytes 恒为 false） */
+  plot: boolean;
+}
+
+/** 工程帧协议（`projects/<name>.frames.json` 的一份 profile）。 */
+export interface SerialFrameProfile {
+  id: string;
+  label: string;
+  kind: "binary";
+  frame: {
+    head_hex: string;
+    tail_hex: string;
+    length: number | null;
+    max_bytes: number;
+  };
+  checksum: { kind: "none" | "sum8" | "xor8" | "crc16modbus"; at: "tail" | "head" };
+  fields: SerialFrameField[];
+}
+
+/** GET/POST `/api/serial/frames` 的结果（rev 乐观锁）。 */
+export interface SerialFramesResponse {
+  ok: boolean;
+  rev: number;
+  profiles: SerialFrameProfile[];
+  warnings?: string[];
+  path?: string;
+  conflict?: boolean;
   error?: string;
 }
 

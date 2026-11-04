@@ -30,6 +30,7 @@ import type {
   SerialBytesTail,
   SerialDecodeResult,
   SerialDecodedTail,
+  SerialFramesResponse,
   SerialMonitorTail,
   SerialPreviewResult,
   SerialWidget,
@@ -251,12 +252,14 @@ export const elabApi = {
       withSession('/elab/api/serial/monitor', opts?.sessionId),
       { ...(opts ?? {}), action },
     ),
-  /** P3 无状态协议解码（JustFloat / FireWater）。 */
+  /** P3 无状态协议解码（JustFloat / FireWater / 工程帧协议）。 */
   serialDecode: (opts: {
     decoder: string
     dataB64?: string
     hex?: string
     channels?: number
+    project?: string
+    profile?: string
     sessionId?: string
   }) =>
     post<SerialDecodeResult>(withSession('/elab/api/serial/decode', opts.sessionId), {
@@ -264,7 +267,14 @@ export const elabApi = {
       ...(opts.dataB64 !== undefined ? { data_b64: opts.dataB64 } : {}),
       ...(opts.hex !== undefined ? { hex: opts.hex } : {}),
       ...(opts.channels !== undefined ? { channels: opts.channels } : {}),
+      ...(opts.project !== undefined ? { project: opts.project } : {}),
+      ...(opts.profile !== undefined ? { profile: opts.profile } : {}),
     }),
+  /** 工程帧协议只读投影（M5）：插件侧只选/只读，编辑在驾驶舱。 */
+  serialFrames: (project: string, sessionId?: string) =>
+    request<SerialFramesResponse>(
+      withSession(`/elab/api/serial/frames?project=${encodeURIComponent(project)}`, sessionId),
+    ),
   /** K5 显式录制：字节写成有界 JSONL（证据，可回放）。 */
   serialCapture: (opts: {
     action: 'start' | 'stop' | 'status'

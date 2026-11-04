@@ -21,9 +21,16 @@ import type {
   RunsResponse,
   SerialBytesTail,
   SerialConsoleResponse,
+  SerialControlResult,
+  SerialControlStateResponse,
   SerialDecodeResult,
+  SerialDecodedTail,
   SerialFormat,
+  SerialFramesResponse,
+  SerialIssue,
+  SerialLogProfile,
   SerialMonitorSnapshot,
+  SerialSymbol,
   SerialMonitorTail,
   SerialPreviewResult,
   SerialWriteResult,
@@ -130,6 +137,8 @@ export const api = {
     data: string;
     port?: string;
     baud?: number;
+    /** 线参数覆盖（M1）：如 `8N1` / `7E1`；缺省取工程/宿主配置 */
+    line?: string;
     readMs?: number;
     newline?: boolean;
     hex?: boolean;
@@ -148,6 +157,7 @@ export const api = {
         data: opts.data,
         port: opts.port,
         baud: opts.baud,
+        line: opts.line,
         read_ms: opts.readMs,
         newline: opts.newline,
         hex: opts.hex,
@@ -186,6 +196,8 @@ export const api = {
     data: string;
     port?: string;
     baud?: number;
+    /** 线参数覆盖（M1）：预览把"将要用哪条线"一并显示出来 */
+    line?: string;
     format?: SerialFormat;
     eol?: string;
     encoding?: string;
@@ -219,6 +231,13 @@ export const api = {
     req<SerialMonitorTail>(`/api/serial/monitor?after=${encodeURIComponent(after)}`),
 
   /**
+   * 会话级共享解码帧（P3.5/M7）：agent 与面板读**同一份**（帧带 t_us）。
+   * ★ 波形 Δt 的时间源 —— 没有它时 Δt 显示 `—`，不编造。
+   */
+  serialDecoded: (after: number) =>
+    req<SerialDecodedTail>(`/api/serial/monitor/decoded?after=${encodeURIComponent(after)}`),
+
+  /**
    * 字节面增量拉取（P1）—— **原文为真**，行只是投影。
    *
    * ★ 默认 `dir=all`（含 TX/RX）；`limit` 截断时调用方按最后一条的 `seq` 继续拉。
@@ -232,14 +251,23 @@ export const api = {
 
   /** 打开/关闭/清空/暂停/继续监视会话。POST = 明确的副作用（占住/释放独占资源）。 */
   serialMonitorToggle: (
-    action: "open" | "close" | "clear" | "pause" | "resume",
+    action: "open" | "close" | "clear" | "pause" | "resume" | "restore"
+      | "log_profile" | "decoder",
     opts?: {
       project?: string;
       baud?: number;
       port?: string;
+      /** 线参数覆盖（M1）：仅 open 有意义（打开时属性） */
+      line?: string;
       actor?: "human" | "agent";
       lease_s?: number;
       allow_agent_write?: boolean;
+      decoder?: string;
+      log_profile?: string;
+      /** 连接方式（M4）：serial / tcp-client / tcp-server / udp */
+      transport?: string;
+      /** 网络配置（M4）：host/port 或 bind/port + allow_remote */
+      net?: Record<string, unknown>;
     },
   ) =>
     req<SerialMonitorSnapshot & {
@@ -257,10 +285,81 @@ export const api = {
         project: opts?.project,
         baud: opts?.baud,
         port: opts?.port,
+        line: opts?.line,
         actor: opts?.actor,
         lease_s: opts?.lease_s,
         allow_agent_write: opts?.allow_agent_write,
+        decoder: opts?.decoder,
+        log_profile: opts?.log_profile,
+        transport: opts?.transport,
+        net: opts?.net,
       }),
+    }),
+
+  // ── 线参数 / DTR-RTS（M1）─────────────────────────────────────
+  /**
+   * 复位预设清单 + 当前已知线态 + 序列进度。GET = 纯读。
+   *
+   * ★ 预设来自 `pack.yaml: serial.reset_presets`（芯片差异不写进内核）；
+   *   包里没有预设时只返回原始 DTR/RTS 开关所需的空清单。
+   */
+  serialControlState: (project: string) =>
+    req<SerialControlStateResponse>(
+      `/api/serial/control?project=${encodeURIComponent(project)}`,
+    ),
+
+  // ── 日志诊断（M6）──────────────────────────────────────────────
+  /** 可用日志 profile（包 + 工程覆盖）；只读，规则不写死在前端。 */
+  serialLogProfiles: (project: string) =>
+    req<{ profiles: SerialLogProfile[] }>(
+      `/api/serial/log-profiles?project=${encodeURIComponent(project)}`,
+    ),
+
+  /** 结构化异常增量读回（panic / hardfault / reset）。 */
+  serialIssues: (after: number) =>
+    req<SerialMonitorSnapshot & {
+      issues: SerialIssue[];
+      issue_total: number;
+      issue_covered: number;
+      gap: number;
+      profile: string;
+    }>(`/api/serial/monitor/issues?after=${after}`),
+
+  /** 地址 → 函数/文件:行；失败如实返回（ROM 地址标 note，不编造）。 */
+  serialSymbolize: (project: string, addrs: string[], profile = "") =>
+    req<{
+      ok: boolean;
+      error: string | null;
+      elf?: string;
+      tool?: string;
+      symbols: SerialSymbol[];
+    }>("/api/serial/symbolize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project, addrs, profile }),
+    }),
+
+  /**
+   * 动 DTR/RTS 或跑/取消复位序列。POST = 明确副作用（物理线路动作）。
+   *
+   * ★ 这是**线路动作**，不是数据：不进字节环、不算 TX、不写 console 日志。
+   *   有监视会话时复用同一句柄；没有时会临时开户（open 本身可能拉 DTR）。
+   */
+  serialControl: (opts: {
+    project?: string;
+    port?: string;
+    line?: string;
+    dtr?: boolean;
+    rts?: boolean;
+    /** 预设名（跑 pack.yaml 里的 steps；异步执行） */
+    preset?: string;
+    /** true = 取消正在跑的预设序列 */
+    cancel?: boolean;
+  }) =>
+    req<SerialControlResult>("/api/serial/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
     }),
 
   // ── 自定义发送组件（M1）───────────────────────────────────────
@@ -345,6 +444,9 @@ export const api = {
     dataB64?: string;
     hex?: string;
     channels?: number;
+    /** 帧协议解码（M5）：工程名 + profile 由服务端装载（前端不缓存配置） */
+    project?: string;
+    profile?: string;
   }) =>
     req<SerialDecodeResult>("/api/serial/decode", {
       method: "POST",
@@ -354,6 +456,52 @@ export const api = {
         data_b64: opts.dataB64,
         hex: opts.hex,
         channels: opts.channels,
+        project: opts.project,
+        profile: opts.profile,
+      }),
+    }),
+
+  // ── 帧协议（M5）───────────────────────────────────────────────
+  /** 工程帧协议只读投影（rev / profiles / warnings）；文件不存在 = rev 0。 */
+  serialFrames: (project: string) =>
+    req<SerialFramesResponse>(
+      `/api/serial/frames?project=${encodeURIComponent(project)}`,
+    ),
+
+  /**
+   * 保存/删除帧 profile。**必须带 rev**（乐观锁）；冲突返回 conflict=true + 最新内容。
+   * 保存成功后建议重设一次 decoder —— 会话里缓存的是旧 profile 快照。
+   */
+  serialFramesSave: (opts: {
+    project: string;
+    action: "save" | "delete";
+    rev: number;
+    profile?: unknown;
+    id?: string;
+  }) =>
+    post<SerialFramesResponse>("/api/serial/frames", {
+      project: opts.project,
+      action: opts.action,
+      rev: opts.rev,
+      profile: opts.profile,
+      id: opts.id,
+    }),
+
+  /** 无硬件预览：把一段样本字节按指定 profile 解码（与实际会话同一引擎）。 */
+  serialFramesPreview: (opts: {
+    project: string;
+    id: string;
+    hex?: string;
+    dataB64?: string;
+  }) =>
+    req<SerialDecodeResult>("/api/serial/frames/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project: opts.project,
+        id: opts.id,
+        hex: opts.hex,
+        data_b64: opts.dataB64,
       }),
     }),
 

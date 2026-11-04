@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Capabilities, ProjectCard, StepId } from "../api/types";
 import { api } from "../api/client";
 import { logs } from "../store/logs";
@@ -42,9 +42,16 @@ function baudOptions(current: number): number[] {
     : [...COMMON_BAUDS, current].sort((a, b) => a - b);
 }
 
-/** 端口/波特率偏好：用户级 UI 选择，跨刷新保留（localStorage 不可写时只在本次会话生效） */
+/** 端口/波特率/线参数偏好：用户级 UI 选择，跨刷新保留（localStorage 不可写时只在本次会话生效） */
 const PORT_PREF_KEY = "elab.serial.port";
 const BAUD_PREF_KEY = "elab.serial.baud";
+const LINE_PREF_KEY = "elab.serial.line";
+/** 连接方式偏好（M4）：serial / tcp-client / tcp-server / udp */
+const TRANSPORT_PREF_KEY = "elab.serial.transport";
+/** 网络配置偏好（M4）：{host, port, allow_remote} */
+const NET_PREF_KEY = "elab.serial.net";
+/** 「非回环警告已确认」标记：只弹一次，之后尊重用户的选择 */
+const REMOTE_WARN_KEY = "elab.serial.allow_remote_warned";
 
 function loadPortPref(): string | null {
   try {
@@ -64,6 +71,60 @@ function loadBaudPref(): number | null {
   }
 }
 
+function loadLinePref(): string | null {
+  try {
+    const v = window.localStorage.getItem(LINE_PREF_KEY);
+    return v !== null && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadTransportPref(): string | null {
+  try {
+    const v = window.localStorage.getItem(TRANSPORT_PREF_KEY);
+    return v !== null && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface NetPref {
+  host: string;
+  port: number;
+  allow_remote: boolean;
+}
+
+function loadNetPref(): NetPref | null {
+  try {
+    const raw = window.localStorage.getItem(NET_PREF_KEY);
+    if (!raw) return null;
+    const j = JSON.parse(raw) as Partial<NetPref>;
+    const port = Number(j.port);
+    if (!Number.isFinite(port) || port <= 0) return null;
+    return { host: String(j.host ?? "127.0.0.1"), port,
+      allow_remote: Boolean(j.allow_remote) };
+  } catch {
+    return null;
+  }
+}
+
+/** 线参数文本（`7E1` / `7E1:rtscts`）→ 可编辑部件。非法文本回退 8N1。 */
+function parseLine(text: string): {
+  bits: number; parity: string; stop: string; flow: string;
+} {
+  const m = /^([5-8])([NEOMS])(1\.5|1|2)(?:[-:/]([A-Za-z]+))?$/.exec(text.trim());
+  if (!m) return { bits: 8, parity: "N", stop: "1", flow: "none" };
+  return { bits: Number(m[1]), parity: m[2], stop: m[3],
+    flow: (m[4] || "none").toLowerCase() };
+}
+
+/** 部件 → 内核接受的文本形式（无流控时不带后缀）。 */
+function composeLine(p: { bits: number; parity: string; stop: string; flow: string }): string {
+  const base = `${p.bits}${p.parity}${p.stop}`;
+  return p.flow === "none" ? base : `${base}:${p.flow}`;
+}
+
 function savePref(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value);
@@ -71,6 +132,14 @@ function savePref(key: string, value: string): void {
     /* 忽略：偏好仅本次会话有效 */
   }
 }
+
+/** 传输种类的人话标签：未登记的 kind 直接显示原值（不猜）。 */
+const TRANSPORT_LABELS: Record<string, string> = {
+  serial: "串口",
+  "tcp-client": "TCP 客户端",
+  "tcp-server": "TCP 服务端",
+  udp: "UDP",
+};
 
 type Stats = { lines: number; alerts: number; dropped: number };
 
@@ -104,6 +173,11 @@ export function EvidenceRail({
   const [baudOverride, setBaudOverride] = useState<number | null>(loadBaudPref);
   // 端口覆盖：用户显式选择优先于工程配置/宿主默认；打开监视时按它解析
   const [portOverride, setPortOverride] = useState<string | null>(loadPortPref);
+  // 线参数覆盖（M1）：打开时属性 —— 改后需重开监视才生效
+  const [lineOverride, setLineOverride] = useState<string | null>(loadLinePref);
+  // 连接方式 + 网络配置（M4）：默认 serial；网络传输默认只绑 127.0.0.1
+  const [transportOverride, setTransportOverride] = useState<string | null>(loadTransportPref);
+  const [netPref, setNetPref] = useState<NetPref | null>(loadNetPref);
 
   // 工作区解析：持久化的 id 在当前工程下不存在（如切了工程、yaml 改了 tools:）
   // 时回退到第一个 —— 绝不渲染未注册的工作区。
@@ -118,6 +192,73 @@ export function EvidenceRail({
   // 端口优先级：用户显式选的 → 工程配置 → 宿主默认 → auto。
   // ★ `auto` 把选择权交给内核（USB 优先、排蓝牙、有歧义就报错，不猜）。
   const serialPort = portOverride ?? serialPortBase;
+
+  // 线参数优先级：用户显式选的 → 工程配置 → 宿主默认 → 8N1。
+  // ★ 与 `serialtransport.resolve()` 同一顺序；线参数是**打开时属性**，
+  //   改后需重开监视/重新发送才生效（这不是"没生效"的 bug，是串口的事实）。
+  const cardLine = card?.serial.line;
+  const serialLine = lineOverride
+    ?? (typeof cardLine === "string" ? cardLine : cardLine?.text)
+    ?? caps?.serial.host_line?.text
+    ?? "8N1";
+
+  // ── 连接方式（M4）─────────────────────────────────────────────
+  // 优先级与 `serialtransport.resolve()` 一致：本页覆盖 → 工程 serial.transport
+  // → 内核自描述默认（serial）。传输种类来自 `meta.serial.transports`，
+  // 面板只渲染，不写死业务名词（内核过旧时才用下面这份最小兜底清单）。
+  const transportKinds: string[] = caps?.meta?.serial?.transports?.kinds
+    ?? ["serial", "tcp-client", "tcp-server", "udp"];
+  const transport = transportOverride ?? card?.serial?.transport
+    ?? caps?.meta?.serial?.transports?.default ?? "serial";
+  const isNet = transport !== "serial";
+  const netDefaults = caps?.meta?.serial?.transports?.net?.defaults?.[transport] ?? {};
+  const projNet = card?.serial?.net ?? {};
+  const netHost = netPref?.host
+    ?? String(projNet.host ?? projNet.bind ?? netDefaults.host ?? netDefaults.bind ?? "127.0.0.1");
+  const netPort = netPref?.port
+    ?? Number(projNet.port ?? netDefaults.port ?? 9000);
+  const netAllowRemote = netPref?.allow_remote
+    ?? Boolean(projNet.allow_remote ?? false);
+  /** `tcp-client` 要 host，`tcp-server`/`udp` 要 bind —— 同一份解析器的两个键。 */
+  const netPayload = useMemo(() => {
+    if (!isNet) return undefined;
+    return transport === "tcp-client"
+      ? { host: netHost, port: netPort, allow_remote: netAllowRemote }
+      : { bind: netHost, port: netPort, allow_remote: netAllowRemote };
+  }, [isNet, transport, netHost, netPort, netAllowRemote]);
+  const saveNet = (next: NetPref): void => {
+    setNetPref(next);
+    savePref(NET_PREF_KEY, JSON.stringify(next));
+  };
+  const onTransportChange = (v: string): void => {
+    setTransportOverride(v);
+    savePref(TRANSPORT_PREF_KEY, v);
+  };
+  /** 放开到非回环：首次必须弹一次警告（本机工具不该默认把数据面暴露到局域网）。 */
+  const onAllowRemote = (v: boolean): void => {
+    if (v) {
+      let warned = false;
+      try {
+        warned = window.localStorage.getItem(REMOTE_WARN_KEY) === "1";
+      } catch {
+        warned = false;
+      }
+      if (!warned) {
+        const ok = window.confirm(
+          "确认放开到非回环地址？\n\n" +
+          "串口监视默认只允许本机回环（127.0.0.1）。放开后，局域网内的其他机器 " +
+          "可以连到这条设备数据面（TCP 服务端）或把数据发过来（UDP）。\n\n" +
+          "只在受控网络里这么做。");
+        if (!ok) return;
+        try {
+          window.localStorage.setItem(REMOTE_WARN_KEY, "1");
+        } catch {
+          /* 仅本次会话有效 */
+        }
+      }
+    }
+    saveNet({ host: netHost, port: netPort, allow_remote: v });
+  };
 
   // 徽标计数：book 级单订阅（任何通道变化都惊动一次，250ms 节流）。
   // 通道是动态的，逐通道订阅会随工具数量膨胀；book 级订阅加通道零改动。
@@ -149,8 +290,22 @@ export function EvidenceRail({
     project: serialProject,
     port: serialPort,
     baud: serialBaud,
+    line: serialLine,
+    transport: isNet ? transport : "",
+    net: netPayload,
     enabled: serialWsActive,
   });
+
+  // 监视进行中时，下拉框显示**会话真实的连接方式**（内核回传的 kind），
+  // 否则"已经连到 tcp://…，界面却写着串口"会让人以为连错了。
+  const transportShown = stream.active
+    ? (stream.snap?.kind ?? transport)
+    : transport;
+  const isNetShown = transportShown !== "serial";
+  const liveNet = (stream.snap?.net ?? {}) as Record<string, unknown>;
+  const netHostShown = stream.active
+    ? String(liveNet.host ?? liveNet.bind ?? "") : netHost;
+  const netPortShown = stream.active ? Number(liveNet.port ?? 0) : netPort;
 
   const toggleMonitor = useCallback(async () => {
     if (stream.active) {
@@ -179,7 +334,7 @@ export function EvidenceRail({
     async (line: string) => {
       logs.local("serial", `TX → ${line}`, "warn");
       try {
-        const r = await api.serial({ project: serialProject, data: line, baud: serialBaud, port: serialPort });
+        const r = await api.serial({ project: serialProject, data: line, baud: serialBaud, port: serialPort, line: serialLine });
         if (r.via === "monitor") {
           // ★ 监视会话开着：写进了已打开的口，回显会从实时监视流回来 ——
           //   本请求没有 echo 窗口，渲染话术必须分流（字段语义不同）。
@@ -212,11 +367,14 @@ export function EvidenceRail({
         logs.local("serial", `✗ ${e instanceof Error ? e.message : String(e)}`, "alert");
       }
     },
-    [serialProject, serialBaud, serialPort],
+    [serialProject, serialBaud, serialPort, serialLine],
   );
 
   // 写通道可用性：既要后端**真的支持写**（M3-b），也要有工程上下文。
-  const writable = (caps?.serial.write_available ?? false) && !!serialProject;
+  // ★ 网络传输（M4）没有"无状态往返"这一路（会话才是那条链路）：必须监视已开，
+  //   写入才会走 `write_through` —— 否则会在底下偷偷开一条串口。
+  const writable = (isNet ? stream.active : (caps?.serial.write_available ?? false))
+    && !!serialProject;
 
   // ── 一级导航（工作区切换）─────────────────────────────────
   const tabs: Array<SegTab<WorkspaceId>> = all.map((w) => {
@@ -238,6 +396,10 @@ export function EvidenceRail({
   // ── 串口端口/波特率：监视运行时锁死（换口必须重开串口），展示的是**实际**会话值 ──
   const portShown = stream.active ? (stream.snap?.port ?? serialPort) : serialPort || "auto";
   const baudShown = stream.active ? (stream.snap?.baud ?? serialBaud) : serialBaud;
+  // 线参数同理：运行中显示**实际**会话值（可能是工程配置而非本页覆盖）。
+  const lineShown = stream.active
+    ? (stream.snap?.line_text ?? serialLine)
+    : serialLine;
   const portList = (caps?.serial.ports ?? []).map((p) => ({
     name: p.name,
     label: p.kind === "bluetooth" ? `${p.name}（蓝牙）` : p.name,
@@ -253,6 +415,19 @@ export function EvidenceRail({
     setBaudOverride(v);
     savePref(BAUD_PREF_KEY, String(v));
   };
+  const onLineChange = (v: string): void => {
+    setLineOverride(v);
+    savePref(LINE_PREF_KEY, v);
+  };
+  // 选项来自内核自描述（`meta.serial.line`）；内核过旧时才用最小兜底清单。
+  const lineForms: string[] = caps?.meta?.serial?.line?.text_forms
+    ?? ["8N1", "7E1", "8O1", "8N2", "5N1.5"];
+  const lineList = lineForms.includes(lineShown) ? lineForms : [lineShown, ...lineForms];
+  const lineParts = parseLine(lineShown);
+  const flowForms: string[] = caps?.meta?.serial?.line?.flow
+    ?? ["none", "rtscts", "xonxoff", "dsrdtr"];
+  const flowList = flowForms.includes(lineParts.flow)
+    ? flowForms : [lineParts.flow, ...flowForms];
 
   const doExport = useCallback(() => {
     const text = ringToText(ring);
@@ -340,7 +515,7 @@ export function EvidenceRail({
             const tip = !running
               ? !ok
                 ? av?.reason || "不可用"
-                : `只跑这一步：${stepLabel(id)}`
+                : `只跑这一步：${stepLabel(id, card)}`
               : "有 run 在跑：串口/调试与 run 互斥，等它结束";
             return (
               <Tooltip key={id} tip={tip}>
@@ -358,6 +533,60 @@ export function EvidenceRail({
             ★ 监视开着时选择器锁死：换口必须重开串口（会话绑的是某个物理口）。 */}
         {active.id === "serial" ? (
           <>
+            {/* 连接方式（M4）：串口 / TCP 客户端 / TCP 服务端 / UDP —— 来自内核自描述 */}
+            <select
+              className={s.baud}
+              style={{ maxWidth: "118px" }}
+              value={transportShown}
+              onChange={(e) => onTransportChange(e.currentTarget.value)}
+              title={stream.active
+                ? "监视进行中：先关闭监视再换连接方式"
+                : "连接方式：串口 = 物理串口；网络三种走 socket（默认只绑 127.0.0.1）"}
+              aria-label="连接方式"
+              disabled={stream.active}
+            >
+              {transportKinds.map((k) => (
+                <option key={k} value={k}>
+                  {TRANSPORT_LABELS[k] ?? k}
+                </option>
+              ))}
+            </select>
+            {isNetShown ? (
+              <>
+                <input
+                  className={s.netField}
+                  style={{ width: "132px" }}
+                  value={netHostShown}
+                  onChange={(e) => saveNet({ host: e.currentTarget.value,
+                    port: netPort, allow_remote: netAllowRemote })}
+                  title={transportShown === "tcp-client"
+                    ? "目标地址（host）：默认 127.0.0.1"
+                    : "绑定地址（bind）：默认 127.0.0.1"}
+                  aria-label="网络地址"
+                  spellCheck={false}
+                  disabled={stream.active}
+                />
+                <input
+                  className={s.netField}
+                  style={{ width: "62px" }}
+                  value={netPortShown}
+                  onChange={(e) => saveNet({ host: netHost,
+                    port: Number(e.currentTarget.value) || 0,
+                    allow_remote: netAllowRemote })}
+                  title="端口：默认 9000（刻意避开 openocd 的 3333）"
+                  aria-label="网络端口"
+                  inputMode="numeric"
+                  disabled={stream.active}
+                />
+                <Switch
+                  id="allow_remote"
+                  checked={netAllowRemote}
+                  onChange={onAllowRemote}
+                  label="允许非回环"
+                />
+              </>
+            ) : (
+              <>
             <select
               className={s.baud}
               style={{ maxWidth: "132px" }}
@@ -388,6 +617,42 @@ export function EvidenceRail({
                 </option>
               ))}
             </select>
+            <select
+              className={s.baud}
+              style={{ maxWidth: "92px" }}
+              value={composeLine(lineParts)}
+              onChange={(e) => onLineChange(composeLine({
+                ...parseLine(e.currentTarget.value), flow: lineParts.flow }))}
+              title={stream.active
+                ? "监视进行中：线参数在打开时固定，先关闭监视再改"
+                : "数据位/校验/停止位：下一次打开监视或发送时生效"}
+              aria-label="串口线参数"
+              disabled={stream.active}
+            >
+              {lineList.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+            <select
+              className={s.baud}
+              style={{ maxWidth: "104px" }}
+              value={lineParts.flow}
+              onChange={(e) => onLineChange(composeLine({
+                ...lineParts, flow: e.currentTarget.value }))}
+              title="流控：none=无 / rtscts=硬件 / xonxoff=软件 / dsrdtr=DTR-DSR"
+              aria-label="串口流控"
+              disabled={stream.active}
+            >
+              {flowList.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+              </>
+            )}
             {stream.active ? (
             <Tooltip tip={`监视中：${stream.snap?.port ?? "?"}@${stream.snap?.baud ?? "?"} · 已收 ${stream.snap?.seq ?? 0} 行 / ${stream.snap?.chunk_seq ?? 0} 批 —— 点击关闭并释放串口`}>
               <Button size="sm" variant="outline" onClick={() => void toggleMonitor()}>
@@ -396,17 +661,19 @@ export function EvidenceRail({
             </Tooltip>
           ) : (
             <Tooltip tip={
-              !caps?.serial.available
+              !isNet && !caps?.serial.available
                 ? (caps?.serial.hint ?? "串口后端不可用")
                 : running
                   ? "有 run 在跑：串口/SWD 与 run 互斥（约束 N5），等它结束"
                   : !serialProject
                     ? "先在左侧选一个工程"
-                    : `打开 ${serialPort || "auto"}@${serialBaud} 实时收流（占用串口直到关闭）`
+                    : isNet
+                      ? `打开 ${transport}://${netHost}:${netPort} 实时收流（占用该链路直到关闭）`
+                      : `打开 ${serialPort || "auto"}@${serialBaud} 实时收流（占用串口直到关闭）`
             }>
               <Button
                 size="sm"
-                disabled={!caps?.serial.available || running || !serialProject}
+                disabled={(isNet ? false : !caps?.serial.available) || running || !serialProject}
                 onClick={() => void toggleMonitor()}
               >
                 打开监视
@@ -414,6 +681,23 @@ export function EvidenceRail({
             </Tooltip>
           )}
           </>
+        ) : null}
+        {stream.active && stream.snap?.state === "reconnecting" ? (
+          <span className={s.warn} role="status">
+            掉线重连中{stream.snap?.down_s ? `（${stream.snap.down_s}s）` : ""}
+            {stream.snap?.last_error ? `：${stream.snap.last_error}` : ""}
+          </span>
+        ) : null}
+        {stream.active && stream.snap?.state === "suspended" ? (
+          <span className={s.meta} role="status">
+            已让位给闭环{stream.snap?.suspend_reason ? `（${stream.snap.suspend_reason}）` : ""} · run 结束自动恢复
+          </span>
+        ) : null}
+        {stream.snap?.stats ? (
+          <span className={s.meta} title="最近 1s 的 RX/TX 速率（服务端统计）">
+            ↓{(stream.snap.stats.rx_bps / 1024).toFixed(1)}K ↑
+            {(stream.snap.stats.tx_bps / 1024).toFixed(1)}K B/s
+          </span>
         ) : null}
         <span className={s.meta}>
           {st.lines} 行
@@ -457,6 +741,7 @@ export function EvidenceRail({
           caps={caps}
           project={serialProject}
           running={running}
+          debugFeatures={card?.name === serialProject ? card.debug_features : undefined}
         />
       ) : (
         <LogView
@@ -493,8 +778,12 @@ export function EvidenceRail({
             disabled={!writable}
             onChange={(e) => setDraft(e.currentTarget.value)}
           />
-          <span className={s.portTag} title={`${serialPort || "auto"}@${serialBaud}`}>
-            {serialPort || "auto"}
+          <span className={s.portTag} title={isNetShown
+            ? `${transportShown}://${netHostShown}:${netPortShown}`
+            : `${serialPort || "auto"}@${serialBaud}`}>
+            {isNetShown
+              ? `${transportShown}://${netHostShown}:${netPortShown}`
+              : serialPort || "auto"}
           </span>
         </form>
       ) : null}
@@ -509,8 +798,8 @@ function ws_actionLabel(w: WorkspaceDef, stepId: string, card: ProjectCard | nul
   if (stepId.startsWith("tool:")) {
     const name = stepId.slice(5);
     const t = (card?.tools ?? []).find((x) => x.name === name);
-    return t?.label ?? stepLabel(stepId);
+    return t?.label ?? stepLabel(stepId, card);
   }
   if (w.actionLabel && w.steps.length === 1 && w.steps[0] === stepId) return w.actionLabel;
-  return stepLabel(stepId);
+  return stepLabel(stepId, card);
 }

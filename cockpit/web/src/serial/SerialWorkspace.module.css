@@ -18,6 +18,11 @@
   min-width: 0;
 }
 
+/* 控制项（复位预设 / DTR / RTS）会随能力增长 —— 窄面板下换行而不是被裁掉 */
+.toolbar {
+  flex-wrap: wrap;
+}
+
 .subbar {
   background: color-mix(in srgb, var(--elab-bg-hover) 30%, transparent);
 }
@@ -74,6 +79,164 @@
 .info {
   color: var(--elab-status-run);
   background: color-mix(in srgb, var(--elab-status-run) 10%, transparent);
+}
+
+/* ── 帧协议抽屉（M5）：左侧 JSON 编辑、右侧预览/字段表 ── */
+.framesDrawer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+  border-bottom: 1px solid var(--elab-border);
+  background: color-mix(in srgb, var(--elab-bg-hover) 20%, transparent);
+}
+
+.framesHead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 5px var(--elab-space-3);
+  border-bottom: 1px solid var(--elab-border);
+  min-width: 0;
+}
+
+.framesBody {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  gap: var(--elab-space-2);
+  padding: 8px var(--elab-space-3);
+  min-height: 0;
+  overflow: auto;
+}
+
+.framesEditor {
+  flex: 1 1 52%;
+  min-height: 160px;
+  resize: vertical;
+  padding: 6px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.5;
+  color: var(--elab-fg-primary);
+  background: var(--elab-bg-code);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+}
+
+.framesSide {
+  flex: 1 1 48%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.framesRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.framesPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.framesTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-mono);
+}
+
+.framesTable th,
+.framesTable td {
+  padding: 2px 6px;
+  text-align: left;
+  white-space: nowrap;
+  border: 1px solid var(--elab-border);
+}
+
+.framesTable th {
+  color: var(--elab-fg-secondary);
+  background: color-mix(in srgb, var(--elab-bg-hover) 40%, transparent);
+}
+
+/* 抽屉内的提示条收敛成小块（继承 .warn/.info 语义，不再当成整行横幅） */
+.framesSide .warn,
+.framesSide .info {
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+  padding: 4px 6px;
+  white-space: pre-wrap;
+}
+
+/* ── 波形每通道坐标 / 游标测量（M7） ── */
+.axisPanel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 2px 8px 4px;
+}
+
+.axisRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.axisName {
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-mono);
+  color: var(--elab-fg-secondary);
+  min-width: 56px;
+}
+
+.axisLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-faint);
+}
+
+.axisInput {
+  width: 58px;
+  padding: 1px 4px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-primary);
+  background: var(--elab-bg-code);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+}
+
+.measure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px dashed var(--elab-border);
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-mono);
+}
+
+.measureHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--elab-fg-secondary);
+}
+
+.measureStrong {
+  color: var(--elab-fg-primary);
+  font-weight: 600;
 }
 
 /* ── 滚动区 ── */

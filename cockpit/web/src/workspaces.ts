@@ -97,11 +97,16 @@ const debugWs: WorkspaceDef = {
   label: "调试",
   channel: "debug",
   steps: [],
-  dim: (_card, caps) => !(caps?.meta?.debug?.available ?? false),
-  dimReason: (_card, caps) =>
-    caps?.meta?.debug
-      ? "调试后端不可用"
-      : "内核过旧：缺少 meta.debug（请同步 elab 内核）",
+  dim: (card, caps) =>
+    !(caps?.meta?.debug?.available ?? false) || !(card?.probe || card?.debug_backend),
+  dimReason: (card, caps) =>
+    !(caps?.meta?.debug?.available ?? false)
+      ? (caps?.meta?.debug
+          ? "调试后端不可用"
+          : "内核过旧：缺少 meta.debug（请同步 elab 内核）")
+      : !(card?.probe || card?.debug_backend)
+        ? "该工程既未声明调试探针，芯片也未提供调试后端"
+        : "调试后端不可用",
   emptyText: (_card, caps) => {
     if (!caps?.meta?.debug) {
       return "内核未提供调试能力自描述（meta.debug）。请同步内核后重载本页。";

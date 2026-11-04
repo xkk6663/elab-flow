@@ -38,7 +38,7 @@ import {
   type ProgressState,
   type StepAvailability,
 } from '../domain/pipeline.ts'
-import { setKernelMeta } from '../domain/kernel-meta.ts'
+import { setKernelMeta, setProjectStepLabels } from '../domain/kernel-meta.ts'
 import {
   initialAdaptState,
   reduceAdapt,
@@ -202,6 +202,8 @@ export function createCockpitService(deps: {
     // serialBusy 恒为 false：面板不知道互斥实况（宿主半在 run 侧硬拦），
     // 与旧实现一致 —— 互斥的呈现靠 409 错误回显，不靠本地猜测。
     set({ availability: next, plans: resolveAllPlans(next, false) })
+    // 项目级文案覆盖（ESP32 的 debug_verify = 「烧录校验」）；空值自动回退全局 meta
+    setProjectStepLabels((card?.step_labels ?? {}) as Record<string, string>)
   }
 
   // ── 事件流 ──────────────────────────────────────────────────────
@@ -355,6 +357,7 @@ export function createCockpitService(deps: {
       const nextProject = keep ? snap.project : (list[0]?.name ?? '')
       set({ projects: list, project: nextProject })
       if (nextProject !== '') applyAvailability(nextProject)
+      else setProjectStepLabels(null)
     } catch (e) {
       set({ error: message(e) })
     }

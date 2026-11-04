@@ -42,10 +42,15 @@ from elab import flash as flash_mod                      # noqa: E402
 from elab import debugsession as dbgsess_mod           # noqa: E402
 from elab.plan import plan_for                          # noqa: E402
 from elab import run as run_mod                      # noqa: E402
+from elab import provider as provider_mod            # noqa: E402
 from elab import serialcodec as serialcodec_mod      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
+from elab import serialcontrol as serialcontrol_mod  # noqa: E402
+from elab import logdecode as ld                      # noqa: E402
+from elab import serialframes as sf                   # noqa: E402
 from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
+from elab import serialtransport as serialtransport_mod  # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab import serialwidgets as serialwidgets_mod  # noqa: E402
 from elab.config import Config, ElabError, Host, to_fwd     # noqa: E402
@@ -94,7 +99,18 @@ SERIAL_META = {
     "encodings": ["utf-8", "gbk"],
     "eols": list(serialterm_mod.EOLS.keys()),
     "directions": ["all", "rx", "tx"],
-    "decoders": list(serialcodec_mod.DECODERS),
+    "decoders": [*serialcodec_mod.DECODERS,
+                 {"id": "profile", "label": "项目帧协议",
+                  "channels": "fields",
+                  "desc": "按 projects/<name>.frames.json 的字段表解码"}],
+    # 帧协议配置（M5）：限制与校验目标由内核给出，面板不写死
+    "frames": {"max_profiles": sf.MAX_PROFILES, "max_fields": sf.MAX_FIELDS,
+               "max_frame_bytes": sf.MAX_FRAME, "max_file_bytes": sf.MAX_FILE,
+               "types": list(sf.TYPES), "endians": list(sf.ENDIANS),
+               "checksums": list(sf.CHECKS),
+               "endpoints": {"load": "/api/serial/frames",
+                             "save": "/api/serial/frames",
+                             "preview": "/api/serial/frames/preview"}},
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
                  "capture", "capture_export", "waveform",
                  # 通用发送面板（P1）：自动格式识别 + 服务端字节预览
@@ -106,9 +122,61 @@ SERIAL_META = {
                  # 序列 / 周期（M2）：send+delay+wait、固定节拍、暂停/取消
                  "widget_sequence", "widget_wait", "widget_repeat", "widget_pause",
                  # 发送框的瞬态周期任务（不落盘，与组件同一引擎）
-                 "raw_loop"],
+                 "raw_loop",
+                 # 线参数（M1）：7E1/2 停止位/流控 —— 打开时生效
+                 "line_config",
+                 # DTR/RTS 原始控制 + 包内数据驱动的复位/下载序列（M1）
+                 "dtr_rts", "reset_presets",
+                 # 会话韧性（M2）：掉线自动重连 + 闭环让位/回归 + 速率统计
+                 "reconnect", "conn_state", "run_yield", "rate_stats",
+                 # 日志诊断（M6）：结构化 panic + 地址符号化
+                 "log_profiles", "panic_issues", "symbolize",
+                 # 帧协议（M5）：配置读写 + 无硬件预览 + 实时字段表
+                 "frame_profiles", "frame_preview", "frame_fields",
+                 # 网络传输（M4）：TCP 客户端/服务端 + UDP，默认只绑回环
+                 "net_transport", "udp", "allow_remote"],
+    # 传输种类（M4，内核自描述）：面板按此渲染「连接方式」，不写死业务名词
+    "transports": {
+        "kinds": ["serial", *serialtransport_mod.NET_KINDS],
+        "default": "serial",
+        "net": {
+            "defaults": serialtransport_mod.netio.NET_DEFAULTS,
+            "loopback_only": True,
+            "note": ("默认只允许 127.0.0.1 / localhost；跨机连接需显式 "
+                     "allow_remote（面板首次放开要弹警告）。TCP 服务端一次"
+                     "只服务一个客户端，客户端断开视为链路断开并触发重连。"),
+        },
+    },
     # 组件词汇与限制（内核自描述；工具层/前端只渲染，不写死）
     "widget": serialwidgets_mod.meta(),
+    # 线参数（M1）：面板只渲染这些枚举；默认 8N1 = 旧行为
+    "line": {
+        "data_bits": [5, 6, 7, 8],
+        "parity": list(serialport_mod.PARITIES),
+        "stop_bits": list(serialport_mod.STOP_BITS),
+        "flow": list(serialport_mod.FLOWS),
+        "default": serialport_mod.LineConfig().as_dict(),
+        "text_forms": ["8N1", "7E1", "8O2", "5N1.5"],
+        "note": "线参数是打开时属性 —— 改后需重开监视/发送才生效",
+    },
+    # 重连（M2）：默认开、200ms→5s 无限退避（附录 B）
+    "reconnect": {
+        "default": dict(serialmon_mod.RECONNECT_DEFAULT),
+        "backoff_ms": [200, 400, 800, 1600, 3200, 5000],
+        "states": ["live", "reconnecting", "suspended", "closed"],
+    },
+    # 缓冲上限（M2 统计）：面板只渲染，不写死数字
+    "buffer": serialmon_mod.limits(),
+    # 日志诊断（M6）：profile 来自包/工程数据；内核只有通用解释器
+    "log_profiles": {"source": "/api/serial/log-profiles",
+                     "issues": "/api/serial/monitor/issues",
+                     "symbolize": "/api/serial/symbolize",
+                     "kinds": ["panic", "assert", "hardfault", "reset"],
+                     "session_scoped": True},
+    # 闭环前后监视的处理：open（默认）/ restore / off
+    "run_yield": {"resume_after_run": ["open", "restore", "off"],
+                  "default": "open",
+                  "note": "闭环占用串口时监视自动让位；run 结束按此策略回归"},
     # 定时发送的限制（不写死在面板里）：间隔下限、单任务最长时长、count 语义
     "loop": {
         "min_interval_ms": serialwidgets_mod.MIN_REPEAT_MS,
@@ -156,6 +224,24 @@ DEBUG_META = {
     "exclusive_with": ["run(flash/debug_verify/monitor)", "serial-monitor"],
     "on_close": {"resume": True, "method": "monitor reset run"},
 }
+
+#: 调试页签的**项目级**收敛：全局 ``DEBUG_META.features`` 是内核能力上限，
+#: 实际显示按「项目（芯片）→ 会话（snapshot.features）」逐级收敛。
+_DEBUG_BASE_FEATURES = ["session", "control", "stack", "variables", "registers",
+                        "breakpoints", "memory", "disasm", "watch"]
+
+
+def _debug_features(chip: dict) -> list[str]:
+    """芯片声明的调试能力（如 ESP32 无 SVD → 不出现「外设」页签）。"""
+    dbg = chip.get("debug") or {}
+    feats = list(_DEBUG_BASE_FEATURES)
+    if dbg.get("svd"):
+        feats.append("svd")
+    # RTOS 是固件能力：会话打开后才探测符号；项目级沿用乐观声明（与 debugsession 一致）
+    if dbg.get("rtos") is not False:
+        feats.append("rtos")
+    return feats
+
 
 #: 服务端可能通过 SSE 发出的**命名事件**全集（跨端契约的镜像）。
 #:
@@ -227,6 +313,8 @@ class ActiveRun:
     #: 键用 ``id(q)`` 是安全的 —— q 在整个订阅期都被 ``subscribers`` 持有，
     #: 期间地址不会变也不会被回收（``unsubscribe`` 会同步清掉这条）。
     sub_state: dict = field(default_factory=dict)
+    #: 终态回调（M2 让位/回归）：run 进程退出、stream/closed 扇出后调用。
+    on_finish: "callable | None" = None
 
     @property
     def alive(self) -> bool:
@@ -331,7 +419,7 @@ class RunManager:
     # ── spawn ───────────────────────────────────────────────────
     def spawn(self, *, project: str, steps: list[str] | None = None,
               clean: bool = False, jobs: int | None = None, verbose: bool = False,
-              actor: str = "human") -> dict:
+              actor: str = "human", on_finish=None) -> dict:
         """起一个 ``elab run --emit-events`` 子进程，并立刻开始跟读。
 
         ★ run id **由父进程分配**并显式传给子进程（``--run-id``）：
@@ -382,7 +470,7 @@ class RunManager:
 
         proc = subprocess.Popen(argv, **kwargs)
         ar = ActiveRun(run_id=run_id, project=project, steps=steps, actor=actor,
-                       proc=proc, started_at=time.time())
+                       proc=proc, started_at=time.time(), on_finish=on_finish)
         with self._lock:
             self._active[run_id] = ar
 
@@ -423,6 +511,12 @@ class RunManager:
             #   所以行为不变、只是内存有界。
             with self._lock:
                 self._active.pop(ar.run_id, None)
+            # M2 §4.3.6：run 结束 → 让位过的串口监视回归（失败不影响 run 收尾）
+            if ar.on_finish is not None:
+                try:
+                    ar.on_finish(ar, rc)
+                except Exception as exc:             # noqa: BLE001
+                    self.log(f"[cockpit] on_finish 异常（{ar.run_id}）：{exc}")
 
     def _fanout(self, ar: ActiveRun, ev: dict) -> None:
         """把一条事件推给所有 SSE 订阅者；**队列满时按契约丢弃并留痕**。
@@ -606,11 +700,27 @@ def project_cards(cfg: Config) -> dict:
     probes = ((host.get("probes") or {}).get("list") or {})
     caps = serialport_mod.capabilities()
 
+    def _delegated(proj: dict, step: str) -> bool:
+        """该步骤是否委托给项目声明的 tools.<name>。"""
+        spec = (proj.get("steps") or {}).get(step)
+        return isinstance(spec, str) and spec.startswith(run_mod.TOOL_PREFIX)
+
     cards = []
     for name, raw in sorted(cfg.projects.items()):
         proj = cfg.resolved_project(name)          # 完成 ${...} 插值
         chip_ref = proj.get("chip", "")
-        chip = cfg.chips.get(chip_ref) or {}
+        try:
+            chip = cfg.chip_of(proj)               # 支持项目级 pack 固定
+        except ElabError:
+            chip = {}
+        # ── 工具链 provider（内核解析，工具层只读投影；不 import 任何 provider 代码）──
+        try:
+            tc = provider_mod.resolve(cfg, name)
+            prov_avail = provider_mod.evaluate(cfg, name, tc)
+        except ElabError as exc:
+            tc = None
+            prov_avail = {"available": False, "reasons": [{
+                "code": "provider.error", "key": "", "message": str(exc), "hint": ""}]}
         build = proj.get("build") or {}
         work_dir = build.get("work_dir", "")
         art = proj.get("artifacts") or {}
@@ -627,14 +737,49 @@ def project_cards(cfg: Config) -> dict:
         if not (probe and probe in probes):
             reason = (f"未声明可用探针（debug.probe={probe or '空'}）"
                       if not probe else f"探针 {probe!r} 不在 elab.host.yaml: probes.list 中")
-            avail["flash"] = {"ok": False, "reason": reason}
-            avail["debug_verify"] = {"ok": False, "reason": reason}
+            # ★ 委托步骤不需要探针：烧录/校验由项目自带工具（如 esptool）执行。
+            if not _delegated(proj, "flash"):
+                avail["flash"] = {"ok": False, "reason": reason}
+            if not _delegated(proj, "debug_verify"):
+                avail["debug_verify"] = {"ok": False, "reason": reason}
         if not has_rules:
             avail["monitor"] = {"ok": False,
                                 "reason": "未声明 monitor.close_on → 只能判 inconclusive"}
         elif not caps.get("available"):
             avail["monitor"] = {"ok": False,
                                 "reason": f"串口后端不可用（layer={caps.get('layer')}）"}
+
+        # ── 每步 kind/source/available（全部来自内核 ResolvedToolchain；只读投影）──
+        steps_view: dict[str, dict] = {}
+        for step in run_mod.ALL_STEPS:
+            decl = tc.steps.get(step) if tc else None
+            if decl is None:
+                steps_view[step] = {**avail[step], "kind": "native",
+                                    "source": "elab/native", "tool": ""}
+                continue
+            if decl.kind == "unavailable":
+                steps_view[step] = {"ok": False, "reason": decl.reason,
+                                    "kind": "unavailable", "source": decl.provider,
+                                    "tool": ""}
+                continue
+            if decl.kind == "external":
+                reasons = list((prov_avail or {}).get("reasons") or [])
+                if decl.provider == "project":
+                    reasons = []
+                elif not any("${serial_port}" in str(a) for a in decl.cmd):
+                    reasons = [r for r in reasons
+                               if r.get("code") != "serial.unavailable"]
+                steps_view[step] = {
+                    "ok": not reasons,
+                    "reason": "；".join(str(r.get("message") or r) for r in reasons),
+                    "kind": "external",
+                    "source": (decl.provider if decl.provider == "project"
+                               else f"{tc.provider.name}@{tc.provider.version}"),
+                    "tool": decl.tool_name,
+                }
+                continue
+            steps_view[step] = {**avail[step], "kind": "native",
+                                "source": "elab/native", "tool": ""}
 
         # ── OTA 投影（C1/C3，全部派生：chips yaml ota_layout + boot 台账文件）──
         #   ota=None = 该芯片未声明 ota_layout（普通单镜像工程，UI 不渲染 OTA 行）
@@ -660,6 +805,21 @@ def project_cards(cfg: Config) -> dict:
             "linker_script": build.get("linker_script", ""),
             "artifacts": {k: v for k, v in art.items()},
             "probe": probe,
+            # 调试后端：provider.debug.backend > 芯片声明（如 esp-idf）。
+            # 非空时驾驶舱「调试」页签不因 probe 为空而置灰。
+            "debug_backend": str(
+                ((tc.debug if tc else {}) or {}).get("backend")
+                or (chip.get("debug") or {}).get("backend") or ""),
+            # 调试页签白名单：项目 debug_features ?? provider.debug.features ?? 芯片收敛
+            "debug_features": (list(proj.get("debug_features") or [])
+                               or list(((tc.debug if tc else {}) or {}).get("features") or [])
+                               or _debug_features(chip)),
+            # 工具链 provider 投影（available/reasons 来自内核 requires 求值）
+            "provider": ({"name": tc.provider.name, "version": tc.provider.version,
+                          "source": tc.provider.source, "path": tc.provider.path,
+                          "available": bool(prov_avail.get("available")),
+                          "reasons": list(prov_avail.get("reasons") or [])}
+                         if tc and tc.provider.source != "builtin" else None),
             "serial": proj.get("serial") or {},
             "monitor": {"close_on": len(monitor.get("close_on") or []),
                         "fail_on": len(monitor.get("fail_on") or []),
@@ -668,12 +828,18 @@ def project_cards(cfg: Config) -> dict:
             # 项目声明工具（通用机制）：驾驶舱据此渲染"工具"按钮
             "tools": [{"name": k, "label": ((v or {}).get("label") or k)}
                       for k, v in sorted((proj.get("tools") or {}).items())],
+            # 步骤是否由外部工具执行（项目内联 tool: 或 provider）
+            "delegated": {s: (_delegated(proj, s)
+                              or steps_view[s].get("kind") == "external")
+                          for s in run_mod.ALL_STEPS},
+            # 项目级文案覆盖（可选）：label(step) = step_labels[step] ?? STEP_META.label
+            "step_labels": dict(proj.get("step_labels") or {}),
             # OTA 投影（None=无 ota_layout；boot_owner 在下方第二遍填充）
             "ota": ota,
             "boot_owner": "",
             # ↓ 以下为派生状态位，不是新元数据
             "derived": {"built": built, "work_dir_exists": bool(work_dir) and Path(work_dir).is_dir()},
-            "steps": avail,
+            "steps": steps_view,
             "chip_info": {
                 "id": chip.get("id", ""), "vendor": chip.get("vendor", ""),
                 "family": chip.get("family", ""), "part": chip.get("part", ""),
@@ -778,6 +944,8 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "serial": {**caps, "backend": backend, "ports": ports,
                    "host_default": (host.get("serial") or {}).get("default", "auto"),
                    "host_baud": (host.get("serial") or {}).get("baud", 115200),
+                   # 宿主/工程没写 line 时的默认（面板按此渲染"跟随配置"）
+                   "host_line": serialport_mod.LineConfig().as_dict(),
                    # 写能力与读能力同后端（ctypes L1 也已支持写，见 SerialIO.for_write）。
                    # 单列一个字段是因为前端要据此决定输入框是否可写 —— 不该让它去
                    # 猜"available 是不是也包括写"。
@@ -879,6 +1047,74 @@ def _serial_blocker(mgr: "RunManager") -> dict | None:
         if set(a.get("steps") or []) & _SERIAL_STEPS:
             return a
     return None
+
+
+# ── 闭环与监视：让位 / 回归（M2 §4.3.6）──────────────────────────
+#: 引用计数：并行的 serial 相关 run 全部结束才回归一次（不重复开）。
+_YIELD_LOCK = threading.Lock()
+_YIELD = {"count": 0, "armed": False, "preexisting": False,
+          "project": "", "policy": "open", "suspended": False}
+
+
+def _resume_policy(cfg: Config, project: str, override=None) -> str:
+    """回归策略：请求 > 项目 ``serial.resume_after_run`` > 默认 ``open``。"""
+    pol = str(override or "")
+    if not pol:
+        proj = cfg.resolved_project(project) if project else {}
+        ser = (proj.get("serial") or {}) if isinstance(proj, dict) else {}
+        pol = str(ser.get("resume_after_run") or "open")
+    return pol if pol in ("open", "restore", "off") else "open"
+
+
+def _serial_yield_begin(cfg: Config, project: str, *, policy: str) -> None:
+    """run 要串口：把正在开的监视挂起（保留环与 epoch），并记下回归策略。"""
+    with _YIELD_LOCK:
+        _YIELD["count"] += 1
+        if _YIELD["armed"]:
+            return
+        mon = serialmon_mod.status()
+        preexist = bool(mon.get("active"))
+        _YIELD.update({"armed": True, "preexisting": preexist,
+                       "project": project, "policy": policy, "suspended": False})
+    if not preexist:
+        return
+    # ★ suspend 在锁外执行：它要 join 读线程（最多 2s），不能让别人等锁。
+    res = serialmon_mod.suspend("闭环占用串口，监视已暂停", by_run=True)
+    with _YIELD_LOCK:
+        _YIELD["suspended"] = bool(res.get("ok"))
+
+
+def _serial_yield_end(cfg: Config, log=print) -> None:
+    """run 结束：引用计数归零时按策略回归（原无会话则新开）。"""
+    with _YIELD_LOCK:
+        if _YIELD["count"] > 0:
+            _YIELD["count"] -= 1
+        if _YIELD["count"] > 0 or not _YIELD["armed"]:
+            return
+        state = dict(_YIELD)
+        _YIELD.update({"armed": False, "preexisting": False,
+                       "project": "", "policy": "open", "suspended": False})
+    if state["policy"] == "off":
+        # 回到旧行为：结束即关（把让位中的会话真正关掉，不留 suspended）。
+        if state["preexisting"] and state["suspended"]:
+            serialmon_mod.close_session()
+        return
+    if state["preexisting"]:
+        if state["suspended"]:
+            res = serialmon_mod.resume()
+            log(f"[cockpit] 串口监视回归：{'ok' if res.get('ok') else res.get('error')}")
+        return
+    if state["policy"] == "open" and state["project"]:
+        res = serialmon_mod.open_session(cfg, state["project"], opened_by="auto")
+        if not res.get("ok"):
+            log(f"[cockpit] 自动重开监视失败：{res.get('error')}")
+
+
+def _bool_or_none(value):
+    """JSON body 里的三态布尔：``True`` / ``False`` / ``None``（未给）。"""
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _qs_int(qs: dict, key: str, default: int | None = 0) -> int | None:
@@ -1456,6 +1692,33 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ElabError(f"after 必须是整数：{raw!r}")
                 return self._json(serialmon_mod.tail_decoded(after))
+            if path == "/api/serial/control":
+                # 复位预设清单 + 当前 DTR/RTS 已知状态 + 序列进度（M1）。
+                project = (qs.get("project") or [""])[0]
+                return self._json(serialcontrol_mod.state(self.cfg, project))
+            if path == "/api/serial/log-profiles":
+                # 可用日志 profile 清单（包 + 工程覆盖；M6）。空列表不是错误：
+                # 说明这颗芯片/工程还没人提供诊断数据。
+                project = (qs.get("project") or [""])[0]
+                try:
+                    profiles = ld.load_profiles(self.cfg, project)
+                except ValueError as exc:
+                    raise ElabError(str(exc))
+                return self._json({"profiles": profiles})
+            if path == "/api/serial/frames":
+                # 帧协议配置（M5）：读全部 profile + rev + warnings。
+                project = (qs.get("project") or [""])[0]
+                if not project:
+                    raise ElabError("frames 需要 project 参数")
+                return self._json(sf.load(self.cfg, project))
+            if path == "/api/serial/monitor/issues":
+                # 结构化 issue 增量读回（panic / hardfault / 复位；M6）。
+                raw = (qs.get("after") or ["0"])[0]
+                try:
+                    after = int(raw)
+                except ValueError:
+                    raise ElabError(f"after 必须是整数：{raw!r}")
+                return self._json(serialmon_mod.tail_issues(after))
             if path == "/api/serial/monitor":
                 # 常驻监视会话的增量读回（tail）。「after」= 浏览器已收到的最大 seq。
                 raw = (qs.get("after") or ["0"])[0]
@@ -1612,23 +1875,32 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         f"适配包操作进行中（{busy_job.get('action')} {busy_job.get('name')}，"
                         f"阶段：{busy_job.get('stage')}）—— 闭环已冻结，等它完成后重试"
                         f"（约束：安装期间冻结闭环）"))
-                # ★ 监视会话 ↔ 闭环互斥（N5 的驾驶舱侧守卫）：flash/debug_verify/monitor
-                #   要用串口/SWD，监视会话握着口 → 与手写通道同款 409，指名道姓。
+                # ★ 监视会话 ↔ 闭环（N5 的驾驶舱侧）：不再让用户手动关监视 ——
+                #   改为**自动让位 + run 结束回归**（M2 §4.3.6）。互斥仍然成立：
+                #   会话先挂起并释放 IO，run 拿到口；结束后按策略恢复。
                 want_steps = set(body.get("steps") or run_mod.DEFAULT_STEPS)
-                if want_steps & _SERIAL_STEPS:
-                    mon = serialmon_mod.status()
-                    if mon.get("active"):
-                        return self._err(409, (
-                            f"串口监视正占用 {mon.get('port')}（project={mon.get('project')}）"
-                            f" —— 先在串口 Tab 点「关闭监视」再跑闭环（约束 N5）"))
-                res = self.mgr.spawn(
-                    project=project,
-                    steps=body.get("steps"),
-                    clean=bool(body.get("clean")),
-                    jobs=body.get("jobs"),
-                    verbose=bool(body.get("verbose")),
-                    actor=body.get("actor") or "human",
-                )
+                yielded = bool(want_steps & _SERIAL_STEPS)
+                if yielded:
+                    policy = _resume_policy(self.cfg, project,
+                                            body.get("resume_after_run"))
+                    _serial_yield_begin(self.cfg, project, policy=policy)
+                try:
+                    res = self.mgr.spawn(
+                        project=project,
+                        steps=body.get("steps"),
+                        clean=bool(body.get("clean")),
+                        jobs=body.get("jobs"),
+                        verbose=bool(body.get("verbose")),
+                        actor=body.get("actor") or "human",
+                        on_finish=((lambda ar, rc: _serial_yield_end(self.cfg))
+                                   if yielded else None),
+                    )
+                except Exception:
+                    if yielded:
+                        _serial_yield_end(self.cfg)   # 起不来就立刻回归
+                    raise
+                if yielded:
+                    res["serial_yielded"] = True
                 return self._json(res, 202)
             if u.path == "/api/cancel":
                 body = self._body()
@@ -1802,7 +2074,9 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                else "只写出部分字节（口可能已失效，试试关闭重开监视）"}
                     st_ok = serialmon_mod.status()
                     via_res.update({"port": st_ok.get("port") or "",
-                                    "baud": st_ok.get("baud") or 0})
+                                    "baud": st_ok.get("baud") or 0,
+                                    "line_text": st_ok.get("line_text") or "",
+                                    "line": st_ok.get("line")})
                     try:
                         # TX 照旧落 console 留档（同一条 journal_for 路径，带 project）
                         serialconsole_mod.journal_for(self.cfg, project=project)({
@@ -1824,11 +2098,40 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     newline=bool(body.get("newline", True)),
                     hex_=bool(body.get("hex")),
                     format=fmt, eol=eol, encoding=encoding,
+                    line=body.get("line"),
+                    transport=str(body.get("transport") or ""),
+                    net=body.get("net"),
                     # ★ 落盘：写通道**不属于任何 run**，所以落到独立的 console 日志，
                     #   绝不写进 run 的 .jsonl（那会破坏单写者模型，约束 C17）。
                     journal=serialconsole_mod.journal_for(self.cfg, project=project),
                 )
                 return self._json(res, 200)
+            if u.path == "/api/serial/control":
+                # DTR/RTS：{dtr?, rts?} 立即生效；{preset} 跑 pack.yaml 里的序列；
+                # {cancel: true} 取消序列。物理线路动作 —— 不进字节环、不算 TX。
+                body = self._body()
+                if body.get("cancel"):
+                    return self._json(serialcontrol_mod.cancel(), 200)
+                # 动线会打断烧录/调试时序（尤其 RTS/DTR 参与 BOOT 同步）—— 先拦。
+                busy = _serial_blocker(self.mgr)
+                if busy:
+                    return self._err(409, (
+                        f"有闭环正在跑（run={busy.get('run')}）—— "
+                        f"复位/动 DTR/RTS 会打断烧录或调试，等它跑完或先取消它。"))
+                if body.get("preset"):
+                    res = serialcontrol_mod.run_preset(
+                        self.cfg, str(body.get("project") or ""),
+                        str(body["preset"]), port=str(body.get("port") or ""),
+                        line=body.get("line"),
+                        actor=str(body.get("actor") or "human"))
+                    return self._json(res, 200 if res.get("ok") else 400)
+                res = serialcontrol_mod.apply(
+                    self.cfg, str(body.get("project") or ""),
+                    dtr=_bool_or_none(body.get("dtr")),
+                    rts=_bool_or_none(body.get("rts")),
+                    port=str(body.get("port") or ""), line=body.get("line"),
+                    actor=str(body.get("actor") or "human"))
+                return self._json(res, 200 if res.get("ok") else 400)
             if u.path == "/api/serial/monitor":
                 # 常驻串口监视（「打开监视 / 关闭监视 / 清空 / 暂停」）。
                 # open 前先查闭环占用：与手写通道同款 409 指名道姓 ——
@@ -1853,16 +2156,24 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         opened_by=str(body.get("actor") or "human"),
                         lease_s=lease_s,
                         allow_agent_write=bool(body.get("allow_agent_write")),
-                        decoder=str(body.get("decoder") or ""))
+                        decoder=str(body.get("decoder") or ""),
+                        line=body.get("line"),
+                        reconnect=body.get("reconnect"),
+                        log_profile=str(body.get("log_profile") or ""),
+                        transport=str(body.get("transport") or ""),
+                        net=body.get("net"))
                     return self._json(res, 200)
                 if action == "close":
                     return self._json(serialmon_mod.close_session(), 200)
                 if action == "decoder":
                     # 会话级解码器（P3.5）：agent 选定 → 人面板波页自动同图。
                     # '' = 关闭共享解码（面板回退到本地无状态解码）。
+                    snap = serialmon_mod.status()
                     res = serialmon_mod.set_decoder(
                         str(body.get("decoder") or ""),
-                        actor=str(body.get("actor") or "human"))
+                        actor=str(body.get("actor") or "human"),
+                        cfg=self.cfg,
+                        project=str(body.get("project") or snap.get("project") or ""))
                     return self._json(res, 200 if res.get("ok") else 400)
                 if action == "clear":
                     return self._json(serialmon_mod.clear(), 200)
@@ -1870,8 +2181,75 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     return self._json(serialmon_mod.set_paused(True), 200)
                 if action == "resume":
                     return self._json(serialmon_mod.set_paused(False), 200)
+                if action == "restore":
+                    # M2：闭环让位后手动「立即恢复」（不必等 run 结束/自动回归）
+                    return self._json(serialmon_mod.resume(), 200)
+                if action == "log_profile":
+                    # M6：会话级日志诊断 profile（'' = 关闭诊断）。
+                    snap = serialmon_mod.status()
+                    res = serialmon_mod.set_log_profile(
+                        self.cfg, str(body.get("project") or snap.get("project") or ""),
+                        str(body.get("profile") or ""))
+                    return self._json(res, 200 if res.get("ok") else 400)
                 raise ElabError(
-                    f"action 必须是 open/close/decoder/clear/pause/resume：{action!r}")
+                    f"action 必须是 open/close/decoder/clear/pause/resume/restore/"
+                    f"log_profile：{action!r}")
+            if u.path == "/api/serial/frames":
+                # 保存 / 删除一个 profile。rev 不匹配 → 409（不覆盖别人的改动）。
+                body = self._body()
+                project = str(body.get("project") or "")
+                if not project:
+                    raise ElabError("frames 需要 project")
+                try:
+                    rev = int(body.get("rev") or 0)
+                except (TypeError, ValueError):
+                    raise ElabError("rev 必须是整数")
+                action = str(body.get("action") or "save").strip().lower()
+                if action == "save":
+                    res = sf.save(self.cfg, project, rev, body.get("profile") or {})
+                elif action == "delete":
+                    res = sf.delete(self.cfg, project, rev,
+                                    str(body.get("id") or ""))
+                else:
+                    raise ElabError("action 必须是 save/delete")
+                if res.get("conflict"):
+                    return self._json(res, 409)
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/preview":
+                # 帧解析预览（M5）：不需要开串口/会话，改配置立即验证。
+                body = self._body()
+                project = str(body.get("project") or "")
+                pid = str(body.get("id") or "")
+                prof = sf.get(self.cfg, project, pid) if pid else None
+                if prof is None:
+                    raise ElabError(f"未找到帧协议 profile：{pid!r}")
+                if body.get("b64"):
+                    import base64 as _b64mod
+                    try:
+                        data = _b64mod.b64decode(str(body["b64"]))
+                    except Exception as exc:               # noqa: BLE001
+                        raise ElabError(f"b64 不是合法 base64：{exc}")
+                elif body.get("hex"):
+                    try:
+                        data = bytes.fromhex("".join(str(body["hex"]).split()))
+                    except ValueError as exc:
+                        raise ElabError(f"hex 不是合法十六进制：{exc}")
+                else:
+                    data = b""
+                res = serialcodec_mod.decode(data, f"profile:{pid}",
+                                             profile=prof)
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/symbolize":
+                # M6：地址 → 函数/文件:行（addr2line）。失败如实返回，不编造。
+                body = self._body()
+                project = str(body.get("project") or "")
+                addrs = body.get("addrs") or []
+                if not isinstance(addrs, list):
+                    raise ElabError("addrs 必须是数组")
+                pid = str(body.get("profile") or "")
+                prof = ld.get_profile(self.cfg, project, pid) if pid else None
+                res = ld.symbolize(self.cfg, project, addrs, prof)
+                return self._json(res, 200 if res.get("ok") else 400)
             if u.path == "/api/serial/capture":
                 # K5 显式录制：把**字节**录成有界 JSONL（不录文本投影，可回放）。
                 # start/stop 幂等；status 走 capabilities.serial.monitor.capture。
@@ -1910,8 +2288,16 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         raise ElabError(f"hex 不是合法十六进制：{exc}")
                 else:
                     data = b""
+                prof = None
+                pid = str(body.get("profile") or "")
+                if decoder == "profile" or decoder.startswith("profile:"):
+                    if not pid and ":" in decoder:
+                        pid = decoder.split(":", 1)[1]
+                    prof = sf.get(self.cfg, str(body.get("project") or ""), pid) \
+                        if pid else None
                 res = serialcodec_mod.decode(data, decoder,
-                                             channels=body.get("channels"))
+                                             channels=body.get("channels"),
+                                             profile=prof)
                 return self._json(res, 200 if res.get("ok") else 400)
             if u.path == "/api/adapt":
                 # 一键适配（M5.6）：probe 只读在前，write 显式第二段。

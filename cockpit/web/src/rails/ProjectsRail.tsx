@@ -353,6 +353,11 @@ export function ProjectsRail({
         if (!p) return null;
         const ci = p.chip_info;
         const core = ci.core || {};
+        // 委托烧录/校验（steps.flash / debug_verify = tool:<name>）不需要探针
+        const flashDelegated = Boolean(p.delegated?.flash || p.delegated?.debug_verify);
+        // 芯片声明的调试后端（如 ESP-IDF）：无 probe 也能开调试页签；
+        // 探针可能板载也可能需外接（ESP32-S31-Korvo-1 就需外接 JTAG）。
+        const chipDebug = Boolean(p.debug_backend) && !p.probe;
         return (
           <div className={s.chipBox}>
             <div className={s.chipHead}>
@@ -421,16 +426,20 @@ export function ProjectsRail({
                     opacity: locked || busyProbe ? 0.6 : 1,
                   }}
                 >
-                  <span className={s.ioVal} title={p.probe}>
-                    {p.probe || "未声明"}
+                  <span className={s.ioVal} title={flashDelegated ? "烧录/校验由项目工具执行（无需探针）" : (chipDebug ? `芯片调试后端 ${p.debug_backend}（探针可板载或外接）` : p.probe)}>
+                    {p.probe || (flashDelegated ? "委托工具" : (chipDebug ? "调试后端" : "未声明"))}
                   </span>
                   <span style={{ fontSize: 9, color: "var(--elab-fg-faint)" }}>▾</span>
                 </button>
                 <Pill
-                  tone={p.probe && p.steps.flash.ok ? "green" : "red"}
-                  title="配置层面：工程已声明探针且烧录步骤可用；探针是否插好由烧录时 OpenOCD 判定"
+                  tone={flashDelegated || chipDebug || (p.probe && p.steps.flash.ok) ? "green" : "red"}
+                  title={flashDelegated
+                    ? "烧录/校验委托给项目工具（如 esptool），走 USB 串口，不依赖探针"
+                    : chipDebug
+                      ? `芯片已声明调试后端：${p.debug_backend}；实际连接取决于探针（板载或外接），仍需烧录/调试时校验`
+                      : "配置层面：工程已声明探针且烧录步骤可用；探针是否插好由烧录时 OpenOCD 判定"}
                 >
-                  {p.probe && p.steps.flash.ok ? "已配置" : "未配置"}
+                  {flashDelegated ? "委托工具" : chipDebug ? "调试后端" : (p.probe && p.steps.flash.ok ? "已配置" : "未配置")}
                 </Pill>
                 {probeFor === p.name ? (
                   <div

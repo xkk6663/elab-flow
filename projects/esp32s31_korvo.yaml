@@ -1,0 +1,65 @@
+# projects/esp32s31_korvo.yaml —— ESP32-S31-Korvo-1 最小工程（Provider 验收）
+#
+# ★ 工具链来自**声明式 provider**（providers/official/espressif/idf/provider.yaml）：
+#   编译/烧录/校验的命令模板归 provider，芯片参数归 pack，主机路径归 host。
+#   项目只绑定 provider；缺 provider / 缺步骤直接报错，不回退原生链（D3）。
+#   monitor 永远由内核提供：串口三态与 serial/* 事件不走 provider。
+#
+# 安装：elab provider install espressif/idf（或 --from providers/official/espressif/idf）
+# 换机器只改 host 层；换工具链只换 provider 绑定。
+
+name: esp32s31_korvo
+root: ${ELAB_ROOT}/examples/ESP32S31_Korvo
+pack: espressif/esp32          # 项目固定包：不受 active.json 影响
+chip: esp32s31
+archetype: idf
+provider: espressif/idf@>=1 <2   # 显式绑定；未安装/缺步骤直接报错
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${root}/build
+
+artifacts:
+  elf: ${root}/build/esp32s31_korvo.elf
+  bin: ${root}/build/esp32s31_korvo.bin
+  map: ${root}/build/esp32s31_korvo.map
+  flash_args: ${root}/build/flasher_args.json   # 项目覆盖 provider 同名键（更具体）
+
+serial:
+  port: auto
+  baud: 115200
+  # M2：掉线自动重连（200ms→5s 无限退避）；闭环前后监视自动让位/回归
+  reconnect: { enabled: true, min_ms: 200, max_ms: 5000, max_attempts: 0 }
+  resume_after_run: open
+  # M6：ESP-IDF 日志/panic 结构化（内核只有通用解释器，规则是数据）
+  log_profiles:
+    - id: esp-idf
+      label: ESP-IDF（panic / Guru Meditation）
+      panic_lines:
+        - 'Guru Meditation Error'
+        - 'panic: '
+        - 'assert failed'
+        - ' abort\(\)'
+      reset_lines:
+        - 'ESP-ROM:'
+        - '^rst:0x'
+      core_pattern: 'Core\s*(\d+)'
+      reason_pattern: 'Guru Meditation Error:\s*([^\r\n]+)'
+      backtrace_line: 'Backtrace:\s*(.*)'
+      addr_pattern: '0x[0-9a-fA-F]{8}'
+      # ★ 不写 rom_prefixes：S31 的 IRAM 就在 0x4000xxxx，按前缀预判会把板上
+      #   真实函数误标成 ROM。符号化以 addr2line 为准，解不出来才提示原因。
+      symbolize:
+        tool_key: addr2line_esp32
+        args: ['-pfiaC']
+
+monitor:
+  close_on:
+    - { kind: regex, pattern: "^\\[alive\\]", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "Guru Meditation|panic|assert failed|abort" }
+  idle_timeout_s: 30
+
+step_labels:                    # 项目级文案覆盖（只改显示，不改语义）
+  debug_verify: 烧录校验

@@ -26,6 +26,7 @@ import type {
   SerialBytesTail,
   SerialDecodeResult,
   SerialDecodedTail,
+  SerialFramesResponse,
   SerialMonitorSnapshot,
   SerialMonitorTail,
   SerialWidget,
@@ -205,8 +206,13 @@ export interface SerialPort {
     dataB64?: string
     hex?: string
     channels?: number
+    /** 帧协议（M5）：工程名 + profile 由内核装载（插件只选/只读） */
+    project?: string
+    profile?: string
     sessionId?: string
   }): Promise<SerialDecodeResult>
+  /** 工程帧协议只读投影（M5）：插件只选/只读，编辑在驾驶舱。 */
+  serialFrames(project: string, sessionId?: string): Promise<SerialFramesResponse>
   serialCapture(opts: {
     action: 'start' | 'stop' | 'status'
     project?: string

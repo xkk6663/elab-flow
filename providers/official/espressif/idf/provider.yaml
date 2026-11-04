@@ -1,0 +1,66 @@
+# providers/official/espressif/idf/provider.yaml
+#
+# 工具链 provider（**声明式数据包**，schema v1）：只声明"规范步骤怎么跑"，
+# 不定义新步骤、不接管 monitor、不执行任意脚本（技术方案_Provider工具链架构 §4）。
+#
+# 安装：elab provider install espressif/idf --from providers/official/espressif/idf
+# 或先 `elab pkg index` 后直接 `elab provider install espressif/idf`。
+#
+# 依赖的主机事实源全部在 elab.host.yaml: tools.idf（本文件不写死任何绝对路径）。
+
+schema_version: 1
+provider_api: 1
+name: espressif/idf
+version: 1.0.0
+license: Apache-2.0
+description: ESP-IDF（EIM 安装；工具链路径由 host 层提供）
+
+requires:
+  kernel_api: ">=1 <2"
+  host:
+    - { key: tools.idf.python, check: file }
+    - { key: tools.idf.idf_path, check: dir }
+    - { key: tools.idf.tools_path, check: dir }
+    - { key: tools.idf.venv, check: dir }
+  probe: false
+  serial: true
+
+defaults:
+  cwd: ${root}
+  env:
+    IDF_PATH: "${host:tools.idf.idf_path}"
+    IDF_TOOLS_PATH: "${host:tools.idf.tools_path}"
+    IDF_PYTHON_ENV_PATH: "${host:tools.idf.venv}"
+    IDF_PY: "${host:tools.idf.python}"
+    ESP_IDF_VERSION: "${host:tools.idf.version}"
+  env_from_cmd:
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf_tools.py", "export", "--format", "key-value"]
+    format: key-value
+    path_key: PATH
+
+artifacts:
+  elf: ${work_dir}/${name}.elf
+  bin: ${work_dir}/${name}.bin
+  map: ${work_dir}/${name}.map
+  flash_args: ${work_dir}/flasher_args.json
+
+steps:
+  doctor:
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "--version"]
+    timeout_s: 120
+  build:
+    # 目标芯片来自芯片包事实（${chip.target}），不写死某块板
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "-B", "build", "-DIDF_TARGET=${chip.target}", "build"]
+    timeout_s: 1800
+  flash:
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "-B", "build", "-p", "${serial_port}", "flash"]
+    timeout_s: 600
+  debug_verify:
+    # 偏移/产物名由构建产物自己声明（build/flasher_args.json），不写死
+    cmd: ["${env:IDF_PY}", "-m", "esptool", "--chip", "${chip.flash_chip}", "--port", "${serial_port}", "--baud", "460800", "verify-flash", "${json_args:${work_dir}/flasher_args.json#flash_files}"]
+    timeout_s: 300
+
+debug:
+  backend: esp-idf
+  # 调试页签能力（与内核 DEBUG_META 同源；ESP32 无 SVD → 不出现「外设」）
+  features: [session, control, stack, variables, registers, breakpoints, memory, disasm, watch, rtos]

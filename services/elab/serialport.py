@@ -24,6 +24,7 @@ Windows 选口规则（§16）
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -105,6 +106,8 @@ def _win32():
         k32.SetCommTimeouts.restype = wintypes.BOOL
         k32.PurgeComm.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         k32.PurgeComm.restype = wintypes.BOOL
+        k32.EscapeCommFunction.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.EscapeCommFunction.restype = wintypes.BOOL
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
         k32.CloseHandle.restype = wintypes.BOOL
 
@@ -202,6 +205,13 @@ def capabilities() -> dict:
         "win32_error": err,
         "layer": layer,
         "available": layer != "L2",
+        # 线参数的默认与"哪些组合被支持"（面板只渲染，不写死业务名词）
+        "line_defaults": LineConfig().as_dict(),
+        "line_supported": {
+            "pyserial": True,
+            "ctypes": True,
+            "note": "stop_bits=1.5 仅 data_bits=5；USB 转串口芯片可能按 1/2 取整",
+        },
         "hint": (None if layer != "L2" else
                  "未安装 pyserial 且非 Windows：串口闭环不可用（monitor 会判 failed）。"
                  "安装：pip install pyserial"),
@@ -239,6 +249,217 @@ def select_port(spec: str, ports: list[Port]) -> tuple[str, str, list[Port]]:
         return "", why, []
     return "", (f"auto 有歧义：发现 {len(cands)} 个候选 "
                 f"{[p.name for p in cands]} —— 请在 YAML 里显式写 serial.port"), cands
+
+
+# ── 线参数（数据位 / 校验 / 停止位 / 流控）─────────────────────────
+#: 规范名 → DCB / pyserial 的单字母映射。
+PARITIES = ("none", "even", "odd", "mark", "space")
+_PARITY_CHAR = {"none": "N", "even": "E", "odd": "O", "mark": "M", "space": "S"}
+STOP_BITS = (1.0, 1.5, 2.0)
+FLOWS = ("none", "rtscts", "xonxoff", "dsrdtr")
+
+#: 八个字节宽度（``5N1.5`` 这类文本形式的解析）。停止位允许 ``1.5``。
+_LINE_TEXT_RE = re.compile(r"^([5-8])([NEOMS])(1\.5|1|2)(?:[-:/]([A-Z]+))?$")
+
+
+@dataclass(frozen=True)
+class LineConfig:
+    """一条串口的线参数。默认 ``8N1`` = 今天的行为（缺省零回归）。"""
+
+    data_bits: int = 8
+    parity: str = "none"
+    stop_bits: float = 1.0
+    flow: str = "none"
+
+    @property
+    def parity_char(self) -> str:
+        return _PARITY_CHAR.get(self.parity, "N")
+
+    @property
+    def text(self) -> str:
+        """``8N1`` / ``7E1`` / ``5N1.5`` —— UI 与会话快照都显示这个。"""
+        return f"{self.data_bits}{self.parity_char}{self.stop_bits:g}"
+
+    def as_dict(self) -> dict:
+        return {"data_bits": self.data_bits, "parity": self.parity,
+                "stop_bits": self.stop_bits, "flow": self.flow,
+                "text": self.text}
+
+    def pyserial_kwargs(self) -> dict:
+        """通过给 pyserial 的构造参数（`Serial` / `serial_for_url` 都认）。"""
+        return {
+            "bytesize": self.data_bits,
+            "parity": self.parity_char,
+            "stopbits": self.stop_bits,
+            "rtscts": self.flow == "rtscts",
+            "xonxoff": self.flow == "xonxoff",
+            "dsrdtr": self.flow == "dsrdtr",
+        }
+
+    def dcb_tokens(self, baud: int) -> str:
+        """``BuildCommDCBW`` 的基础串。流控开关不在串里，见 `_apply_dcb_flags`。"""
+        return (f"baud={baud} parity={self.parity_char} "
+                f"data={self.data_bits} stop={self.stop_bits:g}")
+
+
+def line_config(raw=None) -> tuple[LineConfig, list[str]]:
+    """解析线参数（``None`` / ``"8N1"`` / 映射）→ ``(cfg, errors)``。
+
+    接受两种写法，缺省都是 ``8N1``：
+
+        line: 7E1                       # 文本：数据位+校验+停止位，可带 `:rtscts`
+        line: {data_bits: 7, parity: even, stop_bits: 1, flow: none}
+
+    错误**一次性列出**（不静默吞掉拼写错误）；调用方必须在 ``errors`` 非空时拒绝开户。
+    """
+    errors: list[str] = []
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return LineConfig(), errors
+
+    if isinstance(raw, LineConfig):
+        # ★ 接受解析结果本身：`Target.line` 在重连时会被原样传回来。
+        raw = {"data_bits": raw.data_bits, "parity": raw.parity,
+               "stop_bits": raw.stop_bits, "flow": raw.flow}
+
+    if isinstance(raw, str):
+        s = raw.strip().upper().replace(" ", "")
+        m = _LINE_TEXT_RE.match(s)
+        if not m:
+            return LineConfig(), [f"无法解析线参数 {raw!r}（应形如 8N1 / 7E1 / 5N1.5，"
+                                  f"流控可加 :rtscts）"]
+        cfg = LineConfig(int(m.group(1)), _parity_name(m.group(2)),
+                         float(m.group(3)),
+                         (m.group(4) or "none").lower())
+    elif isinstance(raw, dict):
+        data_bits = _as_int(raw, ("data_bits", "data", "databits", "bytesize"),
+                            8, errors)
+        parity = _parity_name(str(raw.get("parity", "none") or "none").lower(),
+                              errors)
+        stop_bits = _as_float(raw, ("stop_bits", "stop", "stopbits"), 1.0, errors)
+        flow = str(raw.get("flow") or raw.get("flowcontrol") or "none").lower()
+        known = {"data_bits", "data", "databits", "bytesize", "parity",
+                 "stop_bits", "stop", "stopbits", "flow", "flowcontrol",
+                 # `as_dict()` 的往返字段：派生值，不是输入
+                 "text"}
+        for k in raw:
+            if str(k).lower() not in known:
+                errors.append(f"未知线参数字段：{k!r}")
+        cfg = LineConfig(data_bits, parity, stop_bits, flow)
+    else:
+        return LineConfig(), [f"线参数必须是字符串或映射，收到 {type(raw).__name__}"]
+
+    if cfg.data_bits not in (5, 6, 7, 8):
+        errors.append(f"data_bits={cfg.data_bits!r} 非法（可选 5/6/7/8）")
+    if cfg.parity not in PARITIES:
+        errors.append(f"parity={cfg.parity!r} 非法（可选 {'/'.join(PARITIES)}）")
+    if cfg.stop_bits not in STOP_BITS:
+        errors.append(f"stop_bits={cfg.stop_bits!r} 非法（可选 1/1.5/2）")
+    if cfg.stop_bits == 1.5 and cfg.data_bits != 5:
+        errors.append("stop_bits=1.5 只能配 data_bits=5（Win32 DCB 限制）")
+    if cfg.flow not in FLOWS:
+        errors.append(f"flow={cfg.flow!r} 非法（可选 {'/'.join(FLOWS)}）")
+    return cfg, errors
+
+
+def _parity_name(ch: str, errors: list[str] | None = None) -> str:
+    """``N/E/O/M/S`` 或规范名（``even``…）→ 规范名；非法时记一条错误并回 ``none``。"""
+    s = (ch or "none").strip().lower()
+    if s in PARITIES:
+        return s
+    upper = s.upper()
+    for name, letter in _PARITY_CHAR.items():
+        if upper == letter:
+            return name
+    if errors is not None:
+        errors.append(f"parity={ch!r} 非法（可选 N/E/O/M/S 或 {'/'.join(PARITIES)}）")
+    return "none"
+
+
+def _as_int(raw: dict, keys: tuple[str, ...], default: int,
+            errors: list[str]) -> int:
+    for k in keys:
+        if k in raw:
+            try:
+                return int(raw[k])
+            except (TypeError, ValueError):
+                errors.append(f"{k}={raw[k]!r} 不是整数")
+                return default
+    return default
+
+
+def _as_float(raw: dict, keys: tuple[str, ...], default: float,
+              errors: list[str]) -> float:
+    for k in keys:
+        if k in raw:
+            try:
+                return float(raw[k])
+            except (TypeError, ValueError):
+                errors.append(f"{k}={raw[k]!r} 不是数字")
+                return default
+    return default
+
+
+# DCB flags（Win32 DCB 结构偏移 8 的那个 DWORD）。
+_F_PARITY = 1 << 1
+_F_OUTXCTSFLOW = 1 << 2
+_F_OUTXDSRFLOW = 1 << 3
+_F_DTRCONTROL_MASK = 3 << 4
+_F_DTRCONTROL_HANDSHAKE = 2 << 4
+_F_DSRSENSITIVITY = 1 << 6
+_F_OUTX = 1 << 8
+_F_INX = 1 << 9
+_F_RTSCONTROL_MASK = 3 << 12
+_F_RTSCONTROL_HANDSHAKE = 2 << 12
+
+
+def _apply_dcb_flags(dcb, line: LineConfig) -> None:
+    """把流控/校验位写进 DCB 的 flags 字段。
+
+    ``BuildCommDCBW`` 只填基础串（波特率/数据位/校验/停止位）；流控开关不在
+    它的字符串语法里，所以这里按 DCB 的位域补 —— 比手写整份 DCB 位域安全，
+    因为基础部分仍由系统解析，我们只动已知的几个位。
+    """
+    import ctypes
+
+    flags = ctypes.c_uint32.from_buffer(dcb, 8)
+    v = flags.value
+    v &= ~(_F_PARITY | _F_OUTXCTSFLOW | _F_OUTXDSRFLOW | _F_DSRSENSITIVITY
+           | _F_OUTX | _F_INX)
+    if line.parity != "none":
+        v |= _F_PARITY
+    if line.flow == "rtscts":
+        v |= _F_OUTXCTSFLOW
+        v = (v & ~_F_RTSCONTROL_MASK) | _F_RTSCONTROL_HANDSHAKE
+    elif line.flow == "xonxoff":
+        v |= _F_OUTX | _F_INX
+    elif line.flow == "dsrdtr":
+        v |= _F_OUTXDSRFLOW | _F_DSRSENSITIVITY
+        v = (v & ~_F_DTRCONTROL_MASK) | _F_DTRCONTROL_HANDSHAKE
+    flags.value = v
+
+
+# ── 传输断开（与普通 IO 错误分开：M2 的重连要靠它判断"该不该重开"）────
+class TransportLost(OSError):
+    """链路已断（拔线 / 驱动卸载 / 端口被抢），而不是"暂时没数据"。"""
+
+    def __init__(self, message: str, *, code: int | None = None,
+                 backend: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.backend = backend
+
+
+#: ReadFile 失败里属于"链路没了"的 GetLastError。
+_LOST_ERRORS = {
+    5,      # ERROR_ACCESS_DENIED（口被别的进程抢走 / 设备卸下）
+    6,      # ERROR_INVALID_HANDLE
+    22,     # ERROR_BAD_COMMAND
+    31,     # ERROR_GEN_FAILURE
+    995,    # ERROR_OPERATION_ABORTED
+    1117,   # ERROR_IO_DEVICE（USB 转串口拔线最常见）
+    1167,   # ERROR_DEVICE_NOT_CONNECTED
+    1617,   # ERROR_DEVICE_REMOVED
+}
 
 
 # ── 端口占用恢复（约束 N5：openocd 与 DAP-Link 虚拟串口互斥）────────
@@ -360,10 +581,12 @@ class SerialIO:
     优先 pyserial，退到 ctypes（约束 N5 的三层降级见模块 docstring）。
     """
 
-    def __init__(self, port: str, baud: int = 115200, *, for_write: bool = False):
+    def __init__(self, port: str, baud: int = 115200, *, for_write: bool = False,
+                 line: LineConfig | None = None):
         self.port = port
         self.baud = baud
         self.for_write = for_write
+        self.line = line or LineConfig()
         self.backend = ""
         self._h = None
         self._ser = None
@@ -391,11 +614,13 @@ class SerialIO:
             # 回读成 RX，整条数据面（TX 入环 / RX 投影 / 解码）都能端到端跑，不必为
             # 测试在生产代码里开特判分支。
             if "://" in self.port:
-                self._ser = mod.serial_for_url(self.port, self.baud, timeout=0.2,
-                                               write_timeout=wt)
+                self._ser = mod.serial_for_url(
+                    self.port, self.baud, timeout=0.2, write_timeout=wt,
+                    **self.line.pyserial_kwargs())
             else:
-                self._ser = mod.Serial(self.port, self.baud, timeout=0.2,
-                                       write_timeout=wt)
+                self._ser = mod.Serial(
+                    self.port, self.baud, timeout=0.2, write_timeout=wt,
+                    **self.line.pyserial_kwargs())
             self.backend = "pyserial"
             return
         env, err = _win32()
@@ -421,9 +646,11 @@ class SerialIO:
         # ★ 用 BuildCommDCBW 从字符串填 DCB，避免手写脆弱的位域布局；
         #   我们只需把 DCB 当不透明缓冲传下去（sizeof(DCB)=28，给 64 足够）。
         dcb = ctypes.create_string_buffer(64)
-        if not k32.BuildCommDCBW(f"baud={self.baud} parity=N data=8 stop=1", dcb):
+        if not k32.BuildCommDCBW(self.line.dcb_tokens(self.baud), dcb):
             k32.CloseHandle(h)
-            raise OSError("BuildCommDCBW 失败：串口参数非法")
+            raise OSError("BuildCommDCBW 失败：串口参数非法"
+                          f"（{self.line.dcb_tokens(self.baud)}）")
+        _apply_dcb_flags(dcb, self.line)
         if not k32.SetCommState(h, dcb):
             k32.CloseHandle(h)
             raise OSError(f"SetCommState 失败，GetLastError={ctypes.get_last_error()}")
@@ -445,7 +672,14 @@ class SerialIO:
 
     def read(self, n: int = 4096) -> bytes:
         if self._ser is not None:
-            return self._ser.read(n) or b""
+            # ★ 读异常**不能吞成 b""**：拔线后那和"200ms 没数据"不可区分，
+            #   读线程会永远安静地空转（M2 的重连也就永远等不到触发条件）。
+            try:
+                return self._ser.read(n) or b""
+            except Exception as exc:          # noqa: BLE001
+                raise TransportLost(
+                    f"{self.port} 读取失败（{type(exc).__name__}: {exc}）",
+                    backend="pyserial") from exc
         if self._h is None:
             return b""
         import ctypes
@@ -457,7 +691,12 @@ class SerialIO:
         buf = ctypes.create_string_buffer(n)
         got = wintypes.DWORD(0)
         if not k32.ReadFile(self._h, buf, n, ctypes.byref(got), None):
-            return b""
+            err = ctypes.get_last_error()
+            if err in _LOST_ERRORS:
+                raise TransportLost(
+                    f"{self.port} 链路已断开（GetLastError={err}）",
+                    code=err, backend="ctypes")
+            raise OSError(f"{self.port} 读取失败，GetLastError={err}")
         return buf.raw[:got.value]
 
     def write(self, data: bytes) -> int:
@@ -493,6 +732,51 @@ class SerialIO:
         if not k32.WriteFile(self._h, buf, len(data), ctypes.byref(put), None):
             return 0
         return int(put.value)
+
+    # EscapeCommFunction 的功能码（Win32 API 常量）
+    _SETDTR, _CLRDTR, _SETRTS, _CLRRTS = 6, 5, 8, 7
+
+    def set_control(self, dtr: bool | None = None,
+                    rts: bool | None = None) -> dict:
+        """设置 DTR / RTS（``None`` = 保持原状）。返回结构化结果。
+
+        ★ 这是**物理线路动作**：不进字节环、不算 TX（证据纪律见方案 §4.2）。
+        ``applied`` 尽量回读**实际值**（pyserial 可回读；ctypes 只能回显请求值，
+        故用 ``verified: false`` 明说"没有回读验证"，而不是假装确认过）。
+        """
+        if self._ser is not None:
+            try:
+                if dtr is not None:
+                    self._ser.dtr = bool(dtr)
+                if rts is not None:
+                    self._ser.rts = bool(rts)
+                applied = {"dtr": bool(self._ser.dtr), "rts": bool(self._ser.rts)}
+                return {"ok": True, "applied": applied, "backend": "pyserial",
+                        "verified": True}
+            except Exception as exc:              # noqa: BLE001
+                return {"ok": False, "backend": "pyserial", "verified": False,
+                        "error": f"{type(exc).__name__}: {exc}"}
+        if self._h is None:
+            return {"ok": False, "error": "端口尚未打开"}
+        env, _e = _win32()
+        if env is None:
+            return {"ok": False, "error": "本机没有 Win32 串口后端"}
+        import ctypes
+        _ctypes, _wintypes, k32, _winreg = env
+        applied: dict = {}
+        failed = ""
+        for key, value, codes in (("dtr", dtr, (self._SETDTR, self._CLRDTR)),
+                                  ("rts", rts, (self._SETRTS, self._CLRRTS))):
+            if value is None:
+                continue
+            if not k32.EscapeCommFunction(self._h, codes[0 if value else 1]):
+                failed = f"{key.upper()} 设置失败，GetLastError={ctypes.get_last_error()}"
+                break
+            applied[key] = bool(value)
+        return ({"ok": False, "applied": applied, "backend": "ctypes",
+                 "verified": False, "error": failed} if failed else
+                {"ok": True, "applied": applied, "backend": "ctypes",
+                 "verified": False})
 
     def close(self) -> None:
         if self._ser is not None:

@@ -83,6 +83,6 @@ declare namespace React {
   interface ChangeEvent<T = Element> { currentTarget: T }
   interface FormEvent<T = Element> { preventDefault(): void; currentTarget: T }
   /** 波形画布的缩放 / 拖拽手势（只声明用到的字段）。 */
-  interface MouseEvent<T = Element> { currentTarget: T; clientX: number; preventDefault(): void }
+  interface MouseEvent<T = Element> { currentTarget: T; clientX: number; clientY: number; shiftKey: boolean; preventDefault(): void }
   interface WheelEvent<T = Element> extends MouseEvent<T> { deltaY: number }
 }

@@ -60,10 +60,20 @@ export interface KernelMeta {
 }
 
 let current: KernelMeta | null = null
+/** 当前工程的项目级文案覆盖（`projects/*.yaml` 的 `step_labels`）。 */
+let projectSteps: Record<string, string> = {}
 
 /** 灌入内核自描述（每次挂载/刷新都会重灌）。 */
 export function setKernelMeta(meta: KernelMeta | null | undefined): void {
   current = meta ?? null
+}
+
+/**
+ * 灌入当前工程的项目级步骤文案（`/api/projects` 卡片的 `step_labels`）。
+ * 空值 = 回到内核全局 `STEP_META` —— 切换工程时不会残留上一个项目的覆盖。
+ */
+export function setProjectStepLabels(labels: Record<string, string> | null | undefined): void {
+  projectSteps = labels ?? {}
 }
 
 /** 读取当前内核 meta（未拿到 = null，调用方走内置默认）。 */
@@ -71,8 +81,10 @@ export function kernelMeta(): KernelMeta | null {
   return current
 }
 
-/** 步骤标签：meta 优先，退回 fallback。 */
+/** 步骤标签：项目覆盖优先，其次内核 meta，最后 fallback。 */
 export function kernelStepLabel(id: string, fallback: string): string {
+  const override = projectSteps[id]
+  if (typeof override === 'string' && override !== '') return override
   const label = current?.steps?.[id]?.label
   return typeof label === 'string' && label !== '' ? label : fallback
 }

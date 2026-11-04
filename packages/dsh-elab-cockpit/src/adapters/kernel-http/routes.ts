@@ -86,6 +86,12 @@ const GET_ALLOW = new Set([
   'serial/monitor/bytes',
   // P3.5 会话级共享解码帧：agent 与面板读同一份（?after= 增量游标）
   'serial/monitor/decoded',
+  // 线参数 / DTR-RTS / 复位预设（M1）：只读状态（预设清单 + 已知线态）
+  'serial/control',
+  // 日志诊断（M6）：可用 profile 清单 + 结构化 issue 增量读回
+  'serial/log-profiles', 'serial/monitor/issues',
+  // 帧协议（M5）：工程项目帧配置读取（插件只读，编辑在 cockpit）
+  'serial/frames',
   // 适配包 / 社区市场投影（只读）：?market=0 跳过联网，?q= 搜索市场条目
   'packs',
   // 包操作任务快照（POST /api/pkg/* 返回 202 后轮询它）
@@ -102,7 +108,9 @@ const GET_ALLOW = new Set([
 
 /** 允许转发的 POST 端点。 */
 const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
-  'serial/capture', 'adapt', 'project',
+  'serial/capture', 'serial/control', 'serial/symbolize', 'adapt', 'project',
+  // 帧协议（M5）：保存/删除（rev 乐观锁）+ 无硬件样本预览
+  'serial/frames', 'serial/frames/preview',
   // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
   'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate',
   // 工程级发送组件（M1/M2）：保存/删除（rev 乐观锁）+ 执行/取消/暂停

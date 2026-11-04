@@ -150,7 +150,70 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 
 安装：`dsh plugin --profile web add github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`（或 `npm install dsh-elab-cockpit`），重载窗口后右栏出现 elab tab。DSH 里的 agent 调用教程见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)。
 
-### ⑦ CLI：一条命令跑完，也能被 CI 直接调用
+### ⑦ 多芯同流程：ESP32-S31 实机闭环（外带工具链 provider）
+
+同一句 `elab loop -p esp32s31_korvo`，在 ESP32-S31 上跑完 **体检 → 编译 → 烧录 → 烧录校验 → 串口闭环**：
+阶段轨五步全绿，串口判据命中 1Hz `[alive] tick=… toggles=…`，内存条显示 16 MB Flash / 512 KB RAM。
+
+<img src="docs/tutorials/assets/esp32/esp32-korvo-loop.png" width="100%" alt="ESP32-S31-Korvo 闭环实机：五阶段全绿与串口心跳">
+
+*ESP32-S31-Korvo（N16R16）实机：`esp32s31_korvo` 五阶段全绿；右列串口工作区收到 `[alive] tick=5…11 toggles=10…22`；左下角芯片信息为 RISC-V / Flash 16384 KB / RAM 512 KB*
+
+**外带工具链（`provider: <name>@<range>`）**：内核不内置 ESP-IDF，也不认识 `idf.py`。
+命令模板住在独立的声明式 provider 数据包，项目 YAML 只写绑定：
+
+```yaml
+# projects/esp32s31_korvo.yaml（节选）
+pack: espressif/esp32            # 项目固定包：不受 packs/installed/active.json 影响
+chip: esp32s31
+provider: espressif/idf@>=1 <2   # 唯一绑定；不再写内联 tools
+artifacts:
+  flash_args: ${work_dir}/flasher_args.json
+```
+
+```yaml
+# providers/official/espressif/idf/provider.yaml（节选）
+name: espressif/idf
+version: 1.0.0
+requires:
+  host:
+    - { key: tools.idf.python, check: file }
+    - { key: tools.idf.idf_path, check: dir }
+steps:
+  build:
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "-B", "build", "-DIDF_TARGET=${chip.target}", "build"]
+    timeout_s: 1800
+  flash:
+    cmd: ["${env:IDF_PY}", "${env:IDF_PATH}/tools/idf.py", "-B", "build", "-p", "${serial_port}", "flash"]
+  debug_verify:
+    cmd: ["${env:IDF_PY}", "-m", "esptool", "--chip", "${chip.flash_chip}", "--port", "${serial_port}", "--baud", "460800", "verify-flash", "${json_args:${work_dir}/flasher_args.json#flash_files}"]
+    timeout_s: 300
+```
+
+- **数据与执行分离**：芯片事实在 pack（`${chip.target}` / `${chip.flash_chip}`）、机器路径在 `elab.host.yaml`（`${host:tools.idf.*}`）、命令模板在 provider；三者都不写进内核。
+- **预览与实跑同源**：`elab run --dry-run` 打印的就是执行器实际 materialize 出的 argv，没有第二套拼命令逻辑。
+- **事件名不变**：委托只换执行者，事件仍是规范步骤名（`build` / `flash` / `debug_verify`），日志照常落在对应通道。
+- **缺步骤不回退**：provider 未提供的步骤直接 `unavailable` 报错（例如 ESP-IDF 没有 `doctor_deep`），不会静默掉回原生链。
+- **内核保留判断力**：`monitor` / `doctor_deep` 永不由 provider 提供，串口三态与 `serial/*` 事件仍在内核。
+- **可显式混用**：项目可写 `steps.flash: tool:my_flash` 单步覆盖，但必须写明；`artifacts` 同名键也可覆盖 provider。
+- **不需要探针**：外带 `flash` / `debug_verify` 由 provider 的 `requires.probe: false` 声明；`doctor` 跳过 ARM 工具链/链接脚本检查，只校验工具命令与主机前提。
+- **可复现**：`elab provider install` 记录来源与 sha256，`elab.lock.yaml` 锁版本，`elab doctor --strict-lock` 可在 CI 升级为失败。
+- **构建产物自描述**：`${json_args:FILE#KEY}` 把 `build/flasher_args.json#flash_files` 展开成 esptool 的偏移/产物对；委托构建成功后按 `artifacts.map` 回填 RAM/FLASH 占位（`memory_source=map`）。
+
+安装与接入：
+
+```bash
+elab pkg install espressif/esp32        # 芯片包：芯片参数 / 厂商指纹
+elab provider install espressif/idf     # 工具链 provider：命令模板，独立于芯片包
+```
+
+`elab adapt <path>` 识别 ESP-IDF 工程（根 `CMakeLists.txt` include `project.cmake`，芯片读 `sdkconfig` 的 `CONFIG_IDF_TARGET`）后直接生成
+`provider: espressif/idf@>=1 <2`，不再写内联 `tools:`（`--no-provider` 才保留内联兜底）——
+后续外部工程（如 `pet_companion`）直接复用这条接入路径。
+
+新机器先装 ESP-IDF：用 **EIM（ESP-IDF Installation Manager）** 装好 v6.1，再把 `elab.host.yaml: tools.idf` 指向 EIM 的安装路径（激活脚本由 `env_from_cmd` 等价替代，不用手动 `export`）。完整步骤见 [ESP32 适配包 README](https://github.com/xkk6663/elab-pack-espressif-esp32#2-接入-elab-flow)。
+
+### ⑧ CLI：一条命令跑完，也能被 CI 直接调用
 
 终端每行按类型着色：编译进度、warning、烧录 `Verified OK`、串口心跳不会混成一片灰字。退出码即结论：`0` ok / `1` failed / `2` inconclusive。
 
@@ -163,7 +226,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 </table>
 </div>
 
-### ⑧ OTA 双槽升级（F411CEU6 实弹样例）
+### ⑨ OTA 双槽升级（F411CEU6 实弹样例）
 
 `examples/STM32F411CEU6` + `examples/F411CEU6_BOOT` 是完整参考实现：boot / APP / 上位机 / 异常注入 / 双槽回滚全链路验证。
 
@@ -172,7 +235,7 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 - **停等协议**：`AA [01|02] SEQ LEN DATA CRC32 EOF 55`，CRC 错 NAK 重传；每 1KB 记页，支持断点续传。
 - **组合工程**：`ota_layout.boot_project: f411_boot` 让 `elab build -p f411` 级联构建；`elab flash` 按 boot bin 的 md5 指纹冻结台账。
 
-### ⑨ 独立 WebUI：通用 agent 怎么调用
+### ⑩ 独立 WebUI：通用 agent 怎么调用
 
 这一节不依赖 DSH 插件，适用于 Claude Code / Cursor / Codex 等任何能跑命令或发 HTTP 的 agent。
 DSH 界面里的 agent 调用教程（开面板、话术、纪律）见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)。
@@ -257,7 +320,7 @@ python -m cockpit.server            # ⑤ 驾驶舱 → http://127.0.0.1:8333/
 - 没有探针时 `doctor` / `build` / `ci` 照样可跑，`loop` 会在 flash 步失败。
 - 门禁：`elab ci` 与 GitHub Actions 共用 `ci/matrix.yaml`；门禁绿却零产物 → 红。
 
-> 已实测：AT32F421G8U7（WorkBench 工程，自动接入）、STM32F103C8T6、STM32F411CEU6（CubeMX + boot 组合工程 / OTA 双槽），业务工程文件树均为 `untouched`。
+> 已实测：AT32F421G8U7（WorkBench 工程，自动接入）、STM32F103C8T6、STM32F411CEU6（CubeMX + boot 组合工程 / OTA 双槽）、ESP32-S31-Korvo（外带 `espressif/idf` provider），业务工程文件树均为 `untouched`。
 
 **工具链**（DSH 插件首次打开会按官方上游直链自动安装，仅 Windows x64；其它平台先探测本机 PATH）：
 
@@ -283,14 +346,15 @@ debug:
 ## 仓库结构
 
 ```text
-services/elab/**          内核：闭环编排、编译/烧录/调试、串口字节面、OTA、适配包协议
+services/elab/**          内核：闭环编排、编译/烧录/调试、串口字节面、OTA、适配包/provider 协议
 cockpit/server.py         内核 HTTP 面 + 自描述（STEP_META / KERNEL_PLANS）
 cockpit/web/**            独立驾驶舱 UI（产物已入仓）
-packs/official|installed  芯片适配包（骨架仓不含芯片；installed/ 不入库）
-market/index.json         零服务器社区市场索引
+packs/official|installed  芯片适配包（芯片参数/指纹；骨架仓不含芯片；installed/ 不入库）
+providers/official|installed 工具链 provider（声明式命令模板；installed/ 不入库）
+market/index.json         零服务器社区市场索引（packs + providers）
 packages/dsh-elab-cockpit DSH 插件（面板 / 进程托管 / elab_* 工具）
 projects/**               工程接入 YAML
-examples/**               实弹样例（F411 OTA、STM32/AT32 工程）
+examples/**               实弹样例（F411 OTA、STM32/AT32 工程、ESP32-S31 心跳）
 tests/ · ci/              内核测试与本地/云端门禁
 docs/**                   教程、设计约束、架构分析
 ```

@@ -1,0 +1,36 @@
+# tests/fixtures/providers/demo/toolchain/provider.yaml
+# 最小合规 provider：只覆盖四个外部步骤，不碰 monitor/doctor_deep。
+schema_version: 1
+provider_api: 1
+name: demo/toolchain
+version: 1.2.0
+license: MIT
+description: 测试用声明式 provider
+
+requires:
+  kernel_api: ">=1 <2"
+  probe: false
+  serial: false
+
+defaults:
+  cwd: ${root}
+  timeout_s: 30
+
+artifacts:
+  elf: ${work_dir}/${name}.elf
+  bin: ${work_dir}/${name}.bin
+  map: ${work_dir}/${name}.map
+
+steps:
+  doctor:
+    cmd: ["${env:PY}", "-c", "print('provider doctor ok')"]
+  build:
+    cmd: ["${env:PY}", "-c", "print('provider build ok')"]
+  flash:
+    cmd: ["${env:PY}", "-c", "print('provider flash ok')"]
+  debug_verify:
+    cmd: ["${env:PY}", "-c", "print('provider verify ok')"]
+
+debug:
+  backend: native
+  features: [session]

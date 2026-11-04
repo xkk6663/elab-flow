@@ -17,9 +17,24 @@ import { api } from "../api/client";
 import type {
   Capabilities,
   SerialChunk,
+  SerialControlStateResponse,
+  SerialDecodeResult,
   SerialFormat,
+  SerialFrameProfile,
+  SerialIssue,
+  SerialLogProfile,
+  SerialSymbol,
   SerialPreviewResult,
   SerialWidgetRunResult,
+} from "../api/types";
+import {
+  autoRange,
+  fmtDuration,
+  fmtValue,
+  measure,
+  nearestFrameIndex,
+  snapshotJson,
+  valueToY,
 } from "../api/types";
 import {
   asciiOf,
@@ -93,6 +108,11 @@ const MAX_WAVE_BYTES = 64 * 1024;
 
 /** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆（含格式与行尾） */
 const HISTORY_KEY = "elab.serial.send.history";
+
+/** 结构化异常的中文标签（kind 来自内核数据驱动解析，不在这里猜厂商）。 */
+const ISSUE_KIND_LABEL: Record<string, string> = {
+  panic: "panic", assert: "assert", hardfault: "hardfault", reset: "复位",
+};
 /** 文件按行发送的行数上限（按行逐条发，太多行会把发送面板占住很久） */
 const MAX_FILE_LINES = 2000;
 
@@ -210,6 +230,218 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [loopInterval, setLoopInterval] = useState("100");
   const [fileBusy, setFileBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // ── 日志诊断（M6）：profile 清单（只读数据）+ 结构化异常展开 ──
+  const [profiles, setProfiles] = useState<SerialLogProfile[]>([]);
+  const [profileId, setProfileId] = useState("");
+  const [issuesOpen, setIssuesOpen] = useState(false);
+  const [symbols, setSymbols] = useState<Record<number, SerialSymbol[]>>({});
+  useEffect(() => {
+    let dead = false;
+    if (!project) {
+      setProfiles([]);
+      return undefined;
+    }
+    void api.serialLogProfiles(project)
+      .then((r) => { if (!dead) setProfiles(r.profiles ?? []); })
+      .catch(() => { if (!dead) setProfiles([]); });
+    return () => { dead = true; };
+  }, [project]);
+  useEffect(() => {
+    // 会话实际启用的 profile 是事实源（打开时可能默认选了第一份）
+    const active = stream.snap?.issues?.profile;
+    if (active) setProfileId(active);
+  }, [stream.snap?.issues?.profile]);
+  const symbolizeIssue = useCallback(async (issue: SerialIssue) => {
+    try {
+      const r = await api.serialSymbolize(
+        project, issue.backtrace, stream.snap?.issues?.profile ?? "");
+      setSymbols((prev) => ({ ...prev, [issue.seq]: r.symbols ?? [] }));
+      if (!r.ok) setNotice(`符号化未完全成功：${r.error ?? "未知原因"}`);
+    } catch (e) {
+      setNotice(`符号化失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, stream.snap?.issues?.profile]);
+
+  // ── 帧协议（M5）：工程 profile 清单 + 编辑器抽屉 ─────────────
+  // ★ 编辑器只在 cockpit：插件侧只读镜像同一份清单（避免两套前端漂移）。
+  const [frameProfiles, setFrameProfiles] = useState<SerialFrameProfile[]>([]);
+  const [frameRev, setFrameRev] = useState(0);
+  const [framePath, setFramePath] = useState("");
+  const [frameWarns, setFrameWarns] = useState<string[]>([]);
+  const [frameSel, setFrameSel] = useState("");
+  const [frameDoc, setFrameDoc] = useState("");
+  const [frameHex, setFrameHex] = useState("");
+  const [framePreview, setFramePreview] = useState<SerialDecodeResult | null>(null);
+  const [frameNotice, setFrameNotice] = useState<string | null>(null);
+  const [framesOpen, setFramesOpen] = useState(false);
+
+  const loadFrames = useCallback(async (select = ""): Promise<void> => {
+    if (!project) {
+      setFrameProfiles([]);
+      setFrameRev(0);
+      setFramePath("");
+      setFrameWarns([]);
+      return;
+    }
+    try {
+      const r = await api.serialFrames(project);
+      setFrameProfiles(r.profiles ?? []);
+      setFrameRev(r.rev ?? 0);
+      setFramePath(r.path ?? "");
+      setFrameWarns(r.warnings ?? []);
+      if (!r.ok) setFrameNotice(`✗ ${r.error ?? "帧配置读取失败"}`);
+      const list = r.profiles ?? [];
+      const hit = list.find((p) => p.id === select) ?? list[0];
+      if (hit) {
+        setFrameSel(hit.id);
+        setFrameDoc(JSON.stringify(hit, null, 2));
+      }
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project]);
+
+  useEffect(() => {
+    void loadFrames();
+  }, [loadFrames]);
+
+  const newFrameProfile = useCallback((): void => {
+    setFrameSel("");
+    setFramePreview(null);
+    setFrameNotice(null);
+    setFrameDoc(JSON.stringify({
+      id: "new",
+      label: "新帧协议",
+      kind: "binary",
+      frame: { head_hex: "A5 5A", tail_hex: "", length: null, max_bytes: 256 },
+      checksum: { kind: "none", at: "tail" },
+      fields: [{ name: "v", offset: 2, type: "u16", endian: "le", scale: 1, unit: "" }],
+    }, null, 2));
+  }, []);
+
+  const saveFrameProfile = useCallback(async (): Promise<void> => {
+    if (!project) return;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(frameDoc);
+    } catch (e) {
+      setFrameNotice(`✗ JSON 语法错误：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    try {
+      const r = await api.serialFramesSave({
+        project, action: "save", rev: frameRev, profile: raw,
+      });
+      if (!r.ok) {
+        setFrameNotice(`✗ ${r.error ?? "保存失败"}`);
+        if (r.conflict) void loadFrames();
+        return;
+      }
+      setFrameRev(r.rev);
+      setFrameProfiles(r.profiles ?? []);
+      setFrameWarns(r.warnings ?? []);
+      const pid = (raw as { id?: string }).id ?? "";
+      const hit = (r.profiles ?? []).find((p) => p.id === pid);
+      if (hit) {
+        setFrameSel(hit.id);
+        setFrameDoc(JSON.stringify(hit, null, 2));
+      }
+      setFrameNotice(`✓ 已保存 ${pid}（rev ${r.rev}）`);
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, frameDoc, frameRev, loadFrames]);
+
+  const deleteFrameProfile = useCallback(async (): Promise<void> => {
+    if (!project || !frameSel) return;
+    if (!window.confirm(`删除帧协议「${frameSel}」？（会写工程 frames.json）`)) return;
+    try {
+      const r = await api.serialFramesSave({
+        project, action: "delete", rev: frameRev, id: frameSel,
+      });
+      if (!r.ok) {
+        setFrameNotice(`✗ ${r.error ?? "删除失败"}`);
+        if (r.conflict) void loadFrames();
+        return;
+      }
+      setFrameRev(r.rev);
+      setFrameProfiles(r.profiles ?? []);
+      setFramePreview(null);
+      const first = (r.profiles ?? [])[0];
+      setFrameSel(first?.id ?? "");
+      setFrameDoc(first ? JSON.stringify(first, null, 2) : "");
+      setFrameNotice(`✓ 已删除 ${frameSel}`);
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, frameSel, frameRev, loadFrames]);
+
+  const previewFrameProfile = useCallback(async (): Promise<void> => {
+    if (!project) return;
+    if (!frameSel) {
+      setFrameNotice("✗ 先保存 profile 再预览（预览按已保存配置解码）");
+      return;
+    }
+    const hex = frameHex.trim();
+    if (!hex) {
+      setFrameNotice("✗ 先填一段样本 HEX");
+      return;
+    }
+    try {
+      const r = await api.serialFramesPreview({ project, id: frameSel, hex });
+      setFramePreview(r);
+      setFrameNotice(r.ok
+        ? `✓ 解出 ${r.total_frames} 帧（跳过 ${r.skipped}，校验失败 ${r.checksum_fail ?? 0}）`
+        : `✗ ${r.error ?? "预览失败"}`);
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, frameSel, frameHex]);
+
+  // ── DTR/RTS + 复位预设（M1）───────────────────────────────
+  // 预设清单来自适配包 `pack.yaml`（内核只执行，不判断厂商）；没有预设时
+  // 这里只剩两个原始开关 —— 这是诚实的能力边界，不是缺省值。
+  const [ctl, setCtl] = useState<SerialControlStateResponse | null>(null);
+  const [preset, setPreset] = useState("");
+  const [ctlBusy, setCtlBusy] = useState(false);
+  const refreshCtl = useCallback(async (): Promise<void> => {
+    if (!project) {
+      setCtl(null);
+      return;
+    }
+    try {
+      setCtl(await api.serialControlState(project));
+    } catch {
+      /* 控制面不可用时静默：不遮住串口主视图 */
+    }
+  }, [project]);
+  useEffect(() => {
+    void refreshCtl();
+  }, [refreshCtl]);
+  useEffect(() => {
+    if (ctl?.sequence.state !== "running") return undefined;
+    const h = window.setInterval(() => void refreshCtl(), 1000);
+    return () => window.clearInterval(h);
+  }, [ctl?.sequence.state, refreshCtl]);
+
+  const doControl = useCallback(
+    async (body: { dtr?: boolean; rts?: boolean; preset?: string; cancel?: boolean }) => {
+      if (!project) return;
+      setCtlBusy(true);
+      try {
+        const r = await api.serialControl({ project, ...body });
+        if (!r.ok) setNotice(`✗ 串口控制失败：${r.error ?? "未知原因"}`);
+        else if (r.note) setNotice(r.note);
+      } catch (e) {
+        setNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setCtlBusy(false);
+        void refreshCtl();
+      }
+    },
+    [project, refreshCtl],
+  );
 
   /** 记一条历史（连格式与行尾一起存，回填时才能"原样重发"）。 */
   const remember = useCallback((entry: SendHistoryEntry): void => {
@@ -342,6 +574,16 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     { id: "justfloat", label: "JustFloat", channels: "auto" as const },
     { id: "firewater", label: "FireWater", channels: "auto" as const },
   ];
+  // 工程帧协议（M5）：与内置解码器并列，id = `profile:<id>`（服务端按工程装载）
+  const decoderOptions = [
+    ...decoders,
+    ...frameProfiles.map((p) => ({
+      id: `profile:${p.id}`,
+      label: `帧 · ${p.label || p.id}`,
+      channels: "fields" as const,
+      desc: "按工程帧协议（frames.json）解码",
+    })),
+  ];
 
   const filtered = useMemo(
     () => (dir === "all" ? stream.chunks : stream.chunks.filter((c) => c.dir === dir)),
@@ -402,18 +644,36 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   }, [termLines, q]);
 
   // ── 波形：对最近一段字节调用内核解码，Canvas 画多通道 ────────
-  const [frames, setFrames] = useState<number[][]>([]);
+  // ★ 会话开着且共享解码器 = 当前选择时，改用**会话共享帧**（带 t_us）：
+  //   既与 agent/插件同图，也让游标 Δt 有真实时间源（M7）。离线才退回无状态解码。
+  const [localFrames, setLocalFrames] = useState<number[][]>([]);
   const [decodeMeta, setDecodeMeta] = useState<{
     channels: number;
     skipped: number;
     pending: number;
+    fields: { name: string; unit: string; type: string; plot: boolean }[];
   } | null>(null);
   const [waveErr, setWaveErr] = useState<string | null>(null);
 
+  const sharedDecoderId = stream.snap?.decode?.decoder ?? "";
+  const sharedLane = stream.active && sharedDecoderId !== "" && sharedDecoderId === decoder;
+
+  // 会话一开就把当前解码器写进会话（P3.5：agent 与面板同图；M7：Δt 才有时间源）。
+  // 只在会话尚未选定解码器时写入 —— 不覆盖 agent/别的标签页的选择。
+  const pushedDecoder = useRef("");
+  useEffect(() => {
+    if (!stream.active || !decoder || sharedDecoderId !== "") return;
+    const key = `${stream.snap?.epoch ?? 0}:${decoder}`;
+    if (pushedDecoder.current === key) return;   // 防止失败后每渲染重试轰炸
+    pushedDecoder.current = key;
+    void stream.setDecoder(decoder);
+  }, [stream.active, decoder, sharedDecoderId, stream]);
+
   useEffect(() => {
     if (view !== "wave") return;
+    if (sharedLane) return;                 // 会话共享帧优先（见上方说明）
     if (!filtered.length) {
-      setFrames([]);
+      setLocalFrames([]);
       setDecodeMeta(null);
       return;
     }
@@ -434,20 +694,28 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     }
     let cancelled = false;
     api
-      .serialDecode({ decoder, dataB64: bytesToB64(bytes) })
+      .serialDecode({
+        decoder,
+        dataB64: bytesToB64(bytes),
+        // profile 配置由服务端按工程装载（前端不缓存配置，避免与编辑器漂移）
+        ...(decoder.startsWith("profile:")
+          ? { project, profile: decoder.slice("profile:".length) }
+          : {}),
+      })
       .then((r) => {
         if (cancelled) return;
         if (!r.ok) {
           setWaveErr(r.error ?? "解码失败");
-          setFrames([]);
+          setLocalFrames([]);
           return;
         }
         setWaveErr(null);
-        setFrames(r.frames);
+        setLocalFrames(r.frames);
         setDecodeMeta({
           channels: r.channels,
           skipped: r.skipped,
           pending: r.pending_bytes,
+          fields: r.fields ?? [],
         });
       })
       .catch((e) => {
@@ -457,7 +725,16 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     return () => {
       cancelled = true;
     };
-  }, [view, filtered, decoder]);
+  }, [view, filtered, decoder, project, sharedLane]);
+
+  // 共享帧（会话）与本地帧（离线解码）的统一投影
+  const frames = sharedLane ? stream.decoded.map((f) => f.values) : localFrames;
+  /** 每帧时间戳（微秒）；null = 无时间源（Δt 显示 —，不编造） */
+  const frameTimes = sharedLane ? stream.decoded.map((f) => f.t_us) : null;
+  /** 通道名/单位：帧协议 profile 才有；其余显示 CHn */
+  const frameFields = sharedLane
+    ? stream.decodedSnap?.fields ?? []
+    : decodeMeta?.fields ?? [];
 
   // ── 波形多面板 + 通道绑定 ──────────────────────────────────────
   interface WaveViewport {
@@ -480,7 +757,10 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   //      通道数在 1↔2 之间抖动会反复重建、把用户新建的面板冲掉。
   const lastTotalCh = useRef(0);
   useEffect(() => {
-    const totalCh = decodeMeta?.channels ?? (frames[0]?.length ?? 0);
+    // ★ 共享解码以会话帧为准；离线才看本地解码结果（两者都不为 0 才没通道）。
+    const totalCh = sharedLane
+      ? (frames[0]?.length ?? 0)
+      : Math.max(decodeMeta?.channels ?? 0, frames[0]?.length ?? 0);
     if (totalCh === 0) return;
     const needInit = waveViewports.length === 0;
     const grew = totalCh > lastTotalCh.current;
@@ -720,6 +1000,12 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const bytes = stream.snap?.bytes_total ?? 0;
   const chunks = stream.chunks.length;
   const lossy = stream.gapLines + stream.gapChunks;
+  // M2 连接态 / 速率（服务端算，这里只渲染）
+  const st = stream.snap?.stats;
+  const connState = stream.snap?.state ?? (stream.active ? "live" : "closed");
+  const fmtBps = (v: number) => (v >= 1024
+    ? `${(v / 1024).toFixed(1)} KiB/s`
+    : `${v.toFixed(0)} B/s`);
 
   return (
     <div className={s.wrap}>
@@ -730,6 +1016,57 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           onChange={setView}
           size="sm"
         />
+        {ctl && ctl.presets.length > 0 ? (
+          <>
+            <select
+              className={s.select}
+              value={preset}
+              onChange={(e) => setPreset(e.currentTarget.value)}
+              aria-label="复位预设"
+              title={ctl.presets.find((p) => p.name === preset)?.description
+                ?? "复位/下载序列（数据来自适配包 pack.yaml；内核只按 steps 动线）"}
+            >
+              <option value="">复位预设…</option>
+              {ctl.presets.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!preset || ctlBusy}
+              onClick={() => void doControl({ preset })}
+              title="执行选中序列（异步；再次触发会取消旧序列）"
+            >
+              执行
+            </Button>
+          </>
+        ) : null}
+        {ctl?.sequence.state === "running" ? (
+          <Button size="sm" variant="outline" onClick={() => void doControl({ cancel: true })}>
+            取消序列
+          </Button>
+        ) : null}
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!project || ctlBusy}
+          onClick={() => void doControl({ dtr: !(ctl?.control.dtr ?? false) })}
+          title="翻转 DTR（物理线路动作：不进字节环、不算 TX）"
+        >
+          DTR {ctl?.control.dtr == null ? "?" : ctl.control.dtr ? "1" : "0"}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!project || ctlBusy}
+          onClick={() => void doControl({ rts: !(ctl?.control.rts ?? false) })}
+          title="翻转 RTS（物理线路动作：不进字节环、不算 TX）"
+        >
+          RTS {ctl?.control.rts == null ? "?" : ctl.control.rts ? "1" : "0"}
+        </Button>
         <span className={s.spacer} />
         <select
           className={s.select}
@@ -761,16 +1098,33 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           <select
             className={s.select}
             value={decoder}
-            onChange={(e) => setDecoder(e.currentTarget.value)}
+            onChange={(e) => {
+              const next = e.currentTarget.value;
+              setDecoder(next);
+              if (stream.active) void stream.setDecoder(next);
+            }}
             aria-label="协议解码器"
-            title={decoders.find((d) => d.id === decoder)?.desc ?? "协议解码器"}
+            title={decoderOptions.find((d) => d.id === decoder)?.desc ?? "协议解码器"}
           >
-            {decoders.map((d) => (
+            {decoderOptions.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.label}
               </option>
             ))}
           </select>
+        ) : null}
+        {view === "wave" && project ? (
+          <Button
+            size="sm"
+            variant={framesOpen ? "outline" : "ghost"}
+            onClick={() => {
+              setFramesOpen((v) => !v);
+              if (!framesOpen) void loadFrames(frameSel);
+            }}
+            title="编辑工程帧协议（projects/<name>.frames.json）：定义帧头/帧尾/字段表，波形按字段名出通道"
+          >
+            {framesOpen ? "收起帧协议" : "帧协议"}
+          </Button>
         ) : null}
         <Button
           size="sm"
@@ -814,10 +1168,53 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           </span>
         ) : null}
         <span className={s.spacer} />
+        {profiles.length ? (
+          <select
+            className={s.select}
+            aria-label="日志诊断 profile"
+            title="日志诊断规则来自包/工程数据（panic / hardfault / 复位）；关闭 = 不解析"
+            value={profileId}
+            disabled={!stream.active}
+            onChange={(e) => {
+              const next = e.currentTarget.value;
+              setProfileId(next);
+              void stream.setLogProfile(next);
+            }}
+          >
+            <option value="">日志诊断：关</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>{p.label || p.id}</option>
+            ))}
+          </select>
+        ) : null}
         <Switch id="serial-follow" checked={autoScroll} onChange={setFollowAll} label="跟随" />
         <span className={s.meta} title="当前缓冲：未清空、未被环形挤出的字节 / 批次">
           {bytes} B · {chunks} 批
         </span>
+        {st ? (
+          <span
+            className={s.meta}
+            title={`最近 1s：RX ${st.rx_bps.toFixed(0)} B/s，TX ${st.tx_bps.toFixed(0)} B/s；`
+              + `累计 RX ${st.rx_bytes_total} B / TX ${st.tx_bytes_total} B；`
+              + `缓冲占用 行 ${(st.buffer.lines * 100).toFixed(0)}% / `
+              + `字节 ${(st.buffer.bytes * 100).toFixed(0)}% / 帧 ${(st.buffer.frames * 100).toFixed(0)}%`
+              + (st.warmup ? "（窗口不足 1s，速率为折算值）" : "")}
+          >
+            ↓ {fmtBps(st.rx_bps)} · ↑ {fmtBps(st.tx_bps)}
+            {st.frames_per_s != null ? ` · ${st.frames_per_s.toFixed(0)} fps` : ""}
+            {st.warmup ? " · 预热" : ""}
+          </span>
+        ) : null}
+        {stream.issueTotal > 0 ? (
+          <Button
+            size="sm"
+            variant={stream.issues.some((i) => i.kind !== "reset") ? "outline" : "ghost"}
+            onClick={() => setIssuesOpen((v) => !v)}
+            title="结构化异常（panic / assert / hardfault / 复位）；可展开符号化回溯地址"
+          >
+            异常 {stream.issueTotal}{issuesOpen ? " ▾" : " ▸"}
+          </Button>
+        ) : null}
         {stream.active && stream.snap?.opened_by ? (
           <span
             className={s.meta}
@@ -832,6 +1229,155 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
         ) : null}
       </div>
 
+      {framesOpen ? (
+        <div className={s.framesDrawer} role="region" aria-label="帧协议编辑">
+          <div className={s.framesHead}>
+            <select
+              className={s.select}
+              value={frameSel}
+              aria-label="选择帧协议"
+              onChange={(e) => {
+                const pid = e.currentTarget.value;
+                setFrameSel(pid);
+                const hit = frameProfiles.find((p) => p.id === pid);
+                setFrameDoc(hit ? JSON.stringify(hit, null, 2) : "");
+                setFramePreview(null);
+                setFrameNotice(null);
+              }}
+            >
+              {frameProfiles.length ? null : <option value="">（还没有 profile）</option>}
+              {frameProfiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label || p.id}（{p.id}）
+                </option>
+              ))}
+            </select>
+            <Button size="sm" variant="outline" onClick={newFrameProfile}>新建</Button>
+            <Button size="sm" variant="outline" onClick={() => void loadFrames(frameSel)}>刷新</Button>
+            <span className={s.spacer} />
+            <span className={s.meta} title={framePath}>rev {frameRev}</span>
+          </div>
+          <div className={s.framesBody}>
+            <textarea
+              className={s.framesEditor}
+              spellCheck={false}
+              value={frameDoc}
+              placeholder="选择或新建一个 profile，然后在这里编辑 JSON"
+              aria-label="帧协议 JSON"
+              onChange={(e) => setFrameDoc(e.currentTarget.value)}
+            />
+            <div className={s.framesSide}>
+              <div className={s.framesRow}>
+                <Input
+                  mono
+                  size="sm"
+                  value={frameHex}
+                  placeholder="样本 HEX（如 A5 5A 03 E8 9C FF 01 …）"
+                  aria-label="预览样本 HEX"
+                  onChange={(e) => setFrameHex(e.currentTarget.value)}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!frameSel}
+                  onClick={() => void previewFrameProfile()}
+                >
+                  预览
+                </Button>
+              </div>
+              <div className={s.framesRow}>
+                <Button size="sm" disabled={!frameDoc.trim()} onClick={() => void saveFrameProfile()}>
+                  保存
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!frameSel}
+                  onClick={() => void deleteFrameProfile()}
+                >
+                  删除
+                </Button>
+              </div>
+              {frameNotice ? (
+                <div className={frameNotice.startsWith("✗") ? s.warn : s.info}>{frameNotice}</div>
+              ) : null}
+              {frameWarns.length ? <div className={s.warn}>{frameWarns.join("；")}</div> : null}
+              {framePreview ? (
+                <div className={s.framesPreview}>
+                  {framePreview.fields?.length ? (
+                    <table className={s.framesTable}>
+                      <thead>
+                        <tr><th>字段</th><th>类型</th><th>单位</th><th>波形</th></tr>
+                      </thead>
+                      <tbody>
+                        {framePreview.fields.map((f) => (
+                          <tr key={f.name}>
+                            <td>{f.name}</td><td>{f.type}</td>
+                            <td>{f.unit || "—"}</td><td>{f.plot ? "是" : "否"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : null}
+                  {framePreview.records?.length ? (() => {
+                    const recs = framePreview.records ?? [];
+                    const keys = Object.keys(recs[0].fields);
+                    return (
+                      <table className={s.framesTable}>
+                        <thead>
+                          <tr>{keys.map((k) => <th key={k}>{k}</th>)}</tr>
+                        </thead>
+                        <tbody>
+                          {recs.slice(-10).map((rec, i) => (
+                            <tr key={i}>
+                              {keys.map((k) => <td key={k}>{String(rec.fields[k] ?? "—")}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    );
+                  })() : <div className={s.meta}>没有解出帧</div>}
+                  {framePreview.errors?.length ? (
+                    <div className={s.warn}>{framePreview.errors.join("；")}</div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className={s.meta}>
+                切帧：head 或 length 必备；offset 从帧首字节算（含 head）；checksum 不含帧尾标记。
+                保存后波形立即按新配置解码（预览按已保存配置）。
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {connState === "reconnecting" ? (
+        <div className={s.warn} role="status">
+          串口已掉线，正在自动重连
+          {stream.snap?.down_s ? `（已断开 ${stream.snap.down_s}s）` : ""}
+          {stream.snap?.last_error ? `：${stream.snap.last_error}` : ""}
+          {" —— 插回/驱动恢复后日志自动续上，无需手动重开。"}
+        </div>
+      ) : null}
+      {connState === "suspended" ? (
+        <div className={s.info} role="status">
+          监视已为闭环让出串口
+          {stream.snap?.suspend_reason ? `（${stream.snap.suspend_reason}）` : ""}
+          {" —— run 结束会自动恢复；也可立即恢复："}
+          <Button size="sm" variant="ghost" onClick={() => void stream.restore()}>
+            立即恢复
+          </Button>
+          {stream.snap?.resume_error ? ` 上次恢复失败：${stream.snap.resume_error}` : ""}
+        </div>
+      ) : null}
+      {stream.snap?.reconnects ? (
+        <div className={s.info}>
+          已自动重连 {stream.snap.reconnects} 次（当前 conn #{stream.snap.conn}）
+          {stream.snap?.port_changed
+            ? `；端口变化 ${stream.snap.port_changed.from} → ${stream.snap.port_changed.to}`
+            : ""}
+        </div>
+      ) : null}
       {stream.error ? (
         <div className={s.warn} role="alert">
           监视已中断：{stream.error}（服务端已释放串口）
@@ -839,6 +1385,40 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       ) : null}
       {stream.paused ? (
         <div className={s.info}>已暂停入环 —— 服务端仍在读口；点「继续」恢复。</div>
+      ) : null}
+      {issuesOpen && stream.issues.length ? (
+        <div className={s.info} role="region" aria-label="结构化异常">
+          <div style={{ maxHeight: 220, overflowY: "auto", display: "flex",
+                       flexDirection: "column", gap: 8 }}>
+            {stream.issues.slice().reverse().map((it) => (
+              <div key={it.seq}>
+                <div>
+                  <b>{ISSUE_KIND_LABEL[it.kind] ?? it.kind}</b>
+                  {` ${it.t}`}
+                  {it.core ? ` · core ${it.core}` : ""}
+                  {it.reason ? ` · ${it.reason}` : ""}
+                  {it.after_reset ? " · 复位后" : ""}
+                  {it.kind !== "reset" && it.backtrace.length ? (
+                    <Button size="sm" variant="ghost"
+                      onClick={() => void symbolizeIssue(it)}>
+                      符号化
+                    </Button>
+                  ) : null}
+                </div>
+                <div className={s.meta}>{it.line}</div>
+                {it.backtrace.length ? (
+                  <div className={s.meta}>{it.backtrace.join(" ")}</div>
+                ) : null}
+                {(symbols[it.seq] ?? []).map((sym) => (
+                  <div className={s.meta} key={sym.addr}>
+                    {`${sym.addr} → ${sym.func ?? sym.note ?? "无法解析"}`}
+                    {sym.file ? `（${sym.file}:${sym.line}）` : ""}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
       ) : null}
       {cap && !cap.active && cap.truncated ? (
         <div className={s.warn}>
@@ -1037,6 +1617,8 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                   <WaveChart
                     key={vp.id}
                     frames={frames}
+                    times={frameTimes}
+                    fields={frameFields}
                     channels={vp.channels}
                     scaleX={vp.scaleX}
                     offsetX={vp.offsetX}
@@ -1048,11 +1630,12 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
               })()
             ) : null}
 
-            {decodeMeta ? (
+            {decodeMeta || sharedLane ? (
               <div className={s.waveMeta}>
-                {frames.length} 帧 · {decodeMeta.channels} 通道
-                {decodeMeta.skipped ? ` · 跳过 ${decodeMeta.skipped}` : ""}
-                {decodeMeta.pending ? ` · 半帧 ${decodeMeta.pending} B（下一轮续解）` : ""}
+                {frames.length} 帧 · {frameFields.length || decodeMeta?.channels || (frames[0]?.length ?? 0)} 通道
+                {sharedLane ? " · 会话共享解码（Δt 可用）" : ""}
+                {decodeMeta?.skipped ? ` · 跳过 ${decodeMeta.skipped}` : ""}
+                {decodeMeta?.pending ? ` · 半帧 ${decodeMeta.pending} B（下一轮续解）` : ""}
               </div>
             ) : null}
           </div>
@@ -1214,6 +1797,10 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
  */
 interface WaveChartProps {
   frames: number[][];
+  /** 每帧时间戳（微秒）；null/缺省 = 无时间源（Δt 显示 —，不编造） */
+  times?: number[] | null;
+  /** 通道名/单位（帧协议字段表；缺省显示 CHn） */
+  fields?: { name: string; unit: string; type: string; plot: boolean }[];
   /** 要显示的通道索引数组，例如 [0, 2] 只画 CH0/CH2；也可以传数字表示"画前 N 个" */
   channels: number[] | number;
   /** X 轴缩放（1 = 全部可见；>1 = 放大） */
@@ -1245,15 +1832,18 @@ function resolvedChannels(ch: number[] | number, frameChannels: number): number[
   return ch.filter((i) => i >= 0 && i < frameChannels);
 }
 
-function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollowChange }: WaveChartProps) {
+function WaveChart({
+  frames, times, fields, channels, scaleX, offsetX, onView, follow, onFollowChange,
+}: WaveChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ startClientX: number; startOffset: number } | null>(null);
+  const downRef = useRef<{ x: number; y: number; shift: boolean } | null>(null);
   const dragActive = useRef(false);
   // ── 取消跟随 = 定格画面 ──────────────────────────────────────
   // 波形是"最近 N 字节"的滚动解码窗口：只钉住 offsetX 没用 —— 窗口本身
   // 在滑，同一个 index 已经对应到新数据，曲线看起来就一直在走。
-  // 所以 follow=false 时留下**这一刻的帧快照**，恢复跟随才换回实时帧。
-  const [frozen, setFrozen] = useState<number[][] | null>(null);
+  // 所以 follow=false 时留下**这一刻的帧 + 时间戳快照**，恢复跟随才换回实时帧。
+  const [frozen, setFrozen] = useState<{ frames: number[][]; times: number[] | null } | null>(null);
   useEffect(() => {
     if (frames.length === 0) {
       setFrozen(null);
@@ -1263,12 +1853,23 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
       setFrozen(null);
       return;
     }
-    setFrozen((cur) => cur ?? frames);
-  }, [follow, frames]);
-  const shown = follow ? frames : (frozen ?? frames);
+    setFrozen((cur) => cur ?? { frames, times: times ?? null });
+  }, [follow, frames, times]);
+  const shown = follow ? frames : (frozen?.frames ?? frames);
+  const shownTimes = follow ? (times ?? null) : (frozen?.times ?? null);
+
+  // ── 每通道坐标（增益/偏移）与游标（M7） ──────────────────────
+  // gain/offset 只影响绘制，不改原始数据；量程仍按原始值自动算。
+  const [axis, setAxis] = useState<Record<number, { gain: number; offset: number }>>({});
+  const axisOf = (ch: number) => axis[ch] ?? { gain: 1, offset: 0 };
+  const [axesOpen, setAxesOpen] = useState(false);
+  const [cursor, setCursor] = useState<{ a: number | null; b: number | null }>({ a: null, b: null });
+  const [snapNotice, setSnapNotice] = useState<string | null>(null);
 
   const frameChannels = shown[0]?.length ?? 0;
   const shownCh = resolvedChannels(channels, frameChannels);
+  const labelOf = (ch: number) => fields?.[ch]?.name || `CH${ch}`;
+  const unitOf = (ch: number) => fields?.[ch]?.unit || "";
 
   // ── 当 frames 更新时自动 follow 到尾 ──────────────────────────
   const lastFramesLen = useRef(0);
@@ -1372,18 +1973,14 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
       ctx.fillText(label, lx, plotBottom + 3);
     }
 
-    // ── 通道折线（各通道独立归一化） ──
+    // ── 通道折线（各通道独立归一化 + 用户增益/偏移） ──
+    const chRange: Record<number, { lo: number; hi: number }> = {};
     for (const ch of shownCh) {
       const values = slice.map((f) => (ch < f.length ? f[ch] : NaN));
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (const v of values) {
-        if (!Number.isFinite(v)) continue;
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-      if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-      if (hi === lo) { hi = lo + 1; lo -= 1; }
+      const range = autoRange(values);
+      if (!range) continue;
+      chRange[ch] = range;
+      const { gain, offset } = axisOf(ch);
       ctx.strokeStyle = palette[ch % palette.length];
       ctx.lineWidth = 1.4;
       ctx.beginPath();
@@ -1391,12 +1988,46 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
       for (let i = 0; i < values.length; i++) {
         if (!Number.isFinite(values[i])) { started = false; continue; }
         const x = xOf(i);
-        const y = plotBottom - ((values[i] - lo) / (hi - lo)) * plotH;
+        const y = valueToY(values[i], range.lo, range.hi, plotH, gain, offset) + plotTop;
         if (!started) { ctx.moveTo(x, y); started = true; }
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
     }
+
+    // ── 游标 A/B（M7）：竖线 + 各通道交点；Δt/ΔY 在下方卡片里算 ──
+    const drawCursor = (idx: number | null, tag: string) => {
+      if (idx === null || idx < startIdx || idx >= endIdx) return;
+      const x = xOf(idx - startIdx);
+      ctx.save();
+      ctx.strokeStyle = tag === "A" ? palette[0] : palette[2];
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const f = shown[idx];
+      for (const ch of shownCh) {
+        const v = f[ch];
+        const r = chRange[ch];
+        if (!r || !Number.isFinite(v)) continue;
+        const { gain, offset } = axisOf(ch);
+        const y = valueToY(v, r.lo, r.hi, plotH, gain, offset) + plotTop;
+        ctx.fillStyle = palette[ch % palette.length];
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = tag === "A" ? palette[0] : palette[2];
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(tag, Math.max(padL, Math.min(w - padR - 8, x + 4)), plotTop + 2);
+      ctx.restore();
+    };
+    drawCursor(cursor.a, "A");
+    drawCursor(cursor.b, "B");
 
     // ── 顶部左右标签：起始帧 / 总帧 + 缩放 ──
     ctx.fillStyle = axisLabel;
@@ -1405,7 +2036,7 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
     ctx.fillText(`帧 ${startIdx} → ${endIdx - 1}`, padL, 2);
     ctx.textAlign = "right";
     ctx.fillText(`共 ${shown.length} 帧 · 窗口 ${endIdx - startIdx} · ×${scaleX.toFixed(1)}`, w - padR, 2);
-  }, [shown, scaleX, offsetX, shownCh]);
+  }, [shown, shownTimes, scaleX, offsetX, shownCh, axis, cursor, fields]);
 
   // ── 交互事件 ──────────────────────────────────────────────────
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1429,6 +2060,7 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     dragRef.current = { startClientX: e.clientX, startOffset: offsetX };
     dragActive.current = true;
+    downRef.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey };
     e.preventDefault();
   };
   const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1439,14 +2071,79 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
     const padL = 8;
     const plotW = rect.width - padL - 8;
     const dx = e.clientX - dragRef.current.startClientX;
-    const offsetDelta = Math.round(-dx / scaleX);
+    // 平移手感必须与**实际画出的帧跨度**一致：帧数少于视口槽位时（低频遥测常见），
+    // 绘制是把整个 slice 铺满宽度，而 `visibleCount` 仍按槽位算 → 用槽位会慢一个数量级。
     const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const startOffset = dragRef.current.startOffset;
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(startOffset, shown.length - 1)));
+    const offsetDelta = Math.round(-dx * span / plotW);
     let newOffset = dragRef.current.startOffset + offsetDelta;
     newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
     if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset);
     if (follow) onFollowChange(false);
   };
-  const endDrag = () => { dragActive.current = false; dragRef.current = null; };
+  /**
+   * 松开鼠标：位移 ≤4px 视为「点选游标」（拖拽则是平移，不落游标）。
+   * 普通点击 = 游标 A（清空 B）；Shift+点击 = 游标 B。
+   */
+  const endDrag = (e?: React.MouseEvent<HTMLCanvasElement>) => {
+    const down = downRef.current;
+    dragActive.current = false;
+    dragRef.current = null;
+    downRef.current = null;
+    const canvas = canvasRef.current;
+    if (!e || !down || !canvas || !shown.length) return;
+    if (Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) > 4) return;
+    const rect = canvas.getBoundingClientRect();
+    const padL = 8;
+    const plotW = rect.width - padL - 8;
+    if (plotW <= 4) return;
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    // 与绘制同源：slice 铺满整宽时，一屏的真实帧数是 min(槽位, 剩余帧)。
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(offsetX, shown.length - 1)));
+    const within = nearestFrameIndex((e.clientX - rect.left - padL) / plotW, span);
+    const idx = Math.max(0, Math.min(shown.length - 1, offsetX + within));
+    setCursor((prev) => (down.shift
+      ? { a: prev.a ?? idx, b: idx }
+      : { a: idx, b: null }));
+  };
+
+  // ── 测量卡（M7）：A/B 的 Δ帧、Δt（真实批次时间）、每通道 ΔY ──────
+  const probe = (i: number | null) => (i === null || !shown[i])
+    ? null
+    : { index: i, t_us: shownTimes?.[i], values: shown[i] };
+  const pa = probe(cursor.a);
+  const pb = probe(cursor.b);
+  const gainArr = shownCh.map((ch) => axisOf(ch).gain);
+  const offsetArr = shownCh.map((ch) => axisOf(ch).offset);
+  const delta = pa && pb ? measure(pa, pb, gainArr, offsetArr) : null;
+
+  const frozenAt = !follow && frozen ? frozen.frames.length - 1 : null;
+  const frozenTime = frozenAt !== null && shownTimes?.[frozenAt] !== undefined
+    ? new Date(shownTimes[frozenAt] / 1000).toISOString().slice(11, 23)
+    : null;
+
+  const copySnapshot = () => {
+    const channelsMeta = shownCh.map((ch) => ({
+      index: ch,
+      label: labelOf(ch),
+      unit: unitOf(ch),
+      gain: axisOf(ch).gain,
+      offset: axisOf(ch).offset,
+    }));
+    const text = snapshotJson({
+      frozen: !follow,
+      scaleX,
+      offsetX,
+      frameCount: shown.length,
+      cursors: { a: pa, b: pb },
+      channels: channelsMeta,
+    });
+    void navigator.clipboard?.writeText(text).then(
+      () => setSnapNotice("快照已复制到剪贴板"),
+      () => setSnapNotice("剪贴板不可用（快照未复制）"),
+    );
+  };
 
   const canvasReady = shown.length > 0;
 
@@ -1456,9 +2153,13 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
       <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
         <div className={s.legend} style={{ flex: "1 1 auto" }}>
           {shownCh.map((ch) => (
-            <span key={ch} className={s.legendItem}>
+            <span
+              key={ch}
+              className={s.legendItem}
+              title={`${labelOf(ch)}${unitOf(ch) ? ` (${unitOf(ch)})` : ""} · gain ${axisOf(ch).gain} · offset ${axisOf(ch).offset}`}
+            >
               <span className={s.swatch} style={{ background: `var(--elab-ansi-${WAVE_PALETTE[ch % 8][0]})` }} />
-              CH{ch}
+              {labelOf(ch)}{unitOf(ch) ? ` (${unitOf(ch)})` : ""}
             </span>
           ))}
         </div>
@@ -1486,6 +2187,28 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
           >⤾</button>
           <button
             type="button"
+            onClick={() => setAxesOpen((v) => !v)}
+            title="每通道坐标：增益（压扁/放大曲线）与偏移（整条上移/下移）"
+            className={s.waveToolBtn}
+            style={axesOpen ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : undefined}
+            disabled={!canvasReady}
+          >通道</button>
+          <button
+            type="button"
+            onClick={() => setCursor({ a: null, b: null })}
+            title="清空游标 A/B（点击画布放 A，Shift+点击放 B）"
+            className={s.waveToolBtn}
+            disabled={cursor.a === null}
+          >清游标</button>
+          <button
+            type="button"
+            onClick={copySnapshot}
+            title="把当前视口 + 游标 + 通道坐标复制成 JSON（便于粘贴到 issue/报告）"
+            className={s.waveToolBtn}
+            disabled={!canvasReady}
+          >快照</button>
+          <button
+            type="button"
             onClick={() => onFollowChange(!follow)}
             title={follow
               ? "正在跟随最新帧，点击暂停（画面定格在当前窗口，数据仍继续接收）"
@@ -1499,16 +2222,121 @@ function WaveChart({ frames, channels, scaleX, offsetX, onView, follow, onFollow
         </div>
       </div>
 
+      {frozenAt !== null ? (
+        <div className={s.meta} style={{ padding: "0 8px" }}>
+          ❚❚ 已冻结 @ #{frozenAt}{frozenTime ? ` · ${frozenTime}` : ""}
+          　（数据仍在接收；点「恢复跟随」回到实时）
+        </div>
+      ) : null}
+      {snapNotice ? <div className={s.meta} style={{ padding: "0 8px" }}>{snapNotice}</div> : null}
+
+      {axesOpen ? (
+        <div className={s.axisPanel} role="region" aria-label="每通道坐标">
+          {shownCh.map((ch) => {
+            const a = axisOf(ch);
+            return (
+              <div key={ch} className={s.axisRow}>
+                <span className={s.swatch} style={{ background: `var(--elab-ansi-${WAVE_PALETTE[ch % 8][0]})` }} />
+                <span className={s.axisName}>{labelOf(ch)}{unitOf(ch) ? ` (${unitOf(ch)})` : ""}</span>
+                <label className={s.axisLabel}>
+                  增益
+                  <input
+                    className={s.axisInput}
+                    type="number"
+                    step="0.1"
+                    value={a.gain}
+                    onChange={(e) => {
+                      const v = Number(e.currentTarget.value);
+                      setAxis((prev) => ({
+                        ...prev,
+                        [ch]: { gain: Number.isFinite(v) ? v : 1, offset: a.offset },
+                      }));
+                    }}
+                  />
+                </label>
+                <label className={s.axisLabel}>
+                  偏移
+                  <input
+                    className={s.axisInput}
+                    type="number"
+                    step="1"
+                    value={a.offset}
+                    onChange={(e) => {
+                      const v = Number(e.currentTarget.value);
+                      setAxis((prev) => ({
+                        ...prev,
+                        [ch]: { gain: a.gain, offset: Number.isFinite(v) ? v : 0 },
+                      }));
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={s.waveToolBtn}
+                  onClick={() => setAxis((prev) => ({ ...prev, [ch]: { gain: 1, offset: 0 } }))}
+                  title="该通道恢复默认坐标（gain=1, offset=0）"
+                >↺</button>
+              </div>
+            );
+          })}
+          <div className={s.meta}>
+            量程始终按原始值自动计算：改增益会压扁/放大曲线，改偏移会整体上下移动（不改变原始数据）。
+          </div>
+        </div>
+      ) : null}
+
       <canvas
         ref={canvasRef}
         className={s.canvas}
-        style={{ cursor: canvasReady ? (dragActive.current ? "grabbing" : "grab") : "default" }}
+        style={{ cursor: canvasReady ? (dragActive.current ? "grabbing" : "crosshair") : "default" }}
         onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={endDrag}
-        onMouseLeave={endDrag}
+        onMouseLeave={() => endDrag()}
       />
+
+      {pa ? (
+        <div className={s.measure} role="status" aria-label="游标测量">
+          <div className={s.measureHead}>
+            <span>A #{pa.index}{pa.t_us !== undefined ? ` · ${new Date(pa.t_us / 1000).toISOString().slice(11, 23)}` : ""}</span>
+            {pb ? (
+              <>
+                <span>B #{pb.index}{pb.t_us !== undefined ? ` · ${new Date(pb.t_us / 1000).toISOString().slice(11, 23)}` : ""}</span>
+                <span className={s.measureStrong}>
+                  Δ帧 {delta?.d_frames ?? "—"}　Δt {fmtDuration(delta?.dt_us ?? null)}
+                </span>
+              </>
+            ) : (
+              <span className={s.meta}>Shift+点击设置 B（当前只有 A；单击画布可重放 A）</span>
+            )}
+          </div>
+          <table className={s.framesTable}>
+            <thead>
+              <tr>
+                <th>通道</th><th>A</th>{pb ? <th>B</th> : null}
+                {pb ? <th>Δ原始</th> : null}<th>{pb ? "Δ缩放" : "单位"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownCh.map((ch, i) => (
+                <tr key={ch}>
+                  <td>{labelOf(ch)}</td>
+                  <td>{fmtValue(pa.values[ch])}</td>
+                  {pb ? <td>{fmtValue(pb.values[ch])}</td> : null}
+                  {pb ? <td>{fmtValue(delta?.dy[i] ?? NaN)}</td> : null}
+                  <td>{pb ? fmtValue(delta?.dy_scaled[i] ?? NaN) : (unitOf(ch) || "—")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {shownTimes === null ? (
+            <div className={s.meta}>当前窗口没有时间源（会话未开或未启用共享解码）→ Δt 显示 —。</div>
+          ) : (
+            <div className={s.meta}>Δt 用 RX 批次时间戳（同批多帧时间相同），精度受批大小限制。</div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

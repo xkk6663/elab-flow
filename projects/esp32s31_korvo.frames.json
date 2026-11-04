@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "rev": 0,
+  "profiles": [
+    {
+      "id": "korvo_telemetry",
+      "label": "Korvo 心跳遥测帧（11B，sum8）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "aa55",
+        "tail_hex": "",
+        "length": 11,
+        "max_bytes": 32
+      },
+      "checksum": {
+        "kind": "sum8",
+        "at": "tail"
+      },
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u8",
+          "offset": 2,
+          "plot": false
+        },
+        {
+          "name": "status",
+          "type": "u8",
+          "offset": 3,
+          "enum": {
+            "0": "IDLE",
+            "1": "RUN"
+          }
+        },
+        {
+          "name": "tick",
+          "type": "u16",
+          "offset": 4,
+          "endian": "le",
+          "plot": false
+        },
+        {
+          "name": "adc0",
+          "type": "u16",
+          "offset": 6,
+          "endian": "le",
+          "unit": "LSB",
+          "plot": true
+        },
+        {
+          "name": "adc1",
+          "type": "u8",
+          "offset": 8,
+          "unit": "LSB",
+          "plot": true
+        },
+        {
+          "name": "vbat",
+          "type": "u8",
+          "offset": 9,
+          "scale": 0.02,
+          "unit": "V",
+          "plot": true
+        }
+      ]
+    }
+  ]
+}

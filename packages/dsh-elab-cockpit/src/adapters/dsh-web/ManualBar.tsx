@@ -69,10 +69,10 @@ function chipFor(primary: boolean, disabled: boolean): React.CSSProperties {
 }
 
 /** 单步启动按钮（每个通道自己的启动入口；串口单独处理）。 */
-const STEP_BUTTONS: ReadonlyArray<{ step: string; label: string }> = [
-  { step: 'build', label: '构建' },
-  { step: 'flash', label: '烧录' },
-  { step: 'debug_verify', label: '调试' },
+const STEP_BUTTONS: ReadonlyArray<{ step: string }> = [
+  { step: 'build' },
+  { step: 'flash' },
+  { step: 'debug_verify' },
 ]
 
 export function ManualBar(props: ManualBarProps): ReactNode {
@@ -177,7 +177,7 @@ export function ManualBar(props: ManualBarProps): ReactNode {
               onClick={() => props.onRunOne(b.step)}
               style={chipFor(false, disabled)}
             >
-              {`\u25b6 ${b.label}`}
+              {`\u25b6 ${stepLabel(b.step)}`}
             </button>
           )
         })}

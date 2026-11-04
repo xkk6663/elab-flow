@@ -58,6 +58,8 @@ class Config:
         self.root = Path(root).resolve()
         self._host = None
         self._chips = None
+        self._all_chips = None
+        self._pinned_chips: dict[str, dict] = {}
         self._projects = None
         self._packs = None
 
@@ -96,6 +98,39 @@ class Config:
         from . import pkg
         return pkg.active_pack(self, self.packs)
 
+    def _load_chips(self, records: list[dict]) -> dict:
+        """从给定包记录加载 ``{ref|id: chip}``（含跨包重复校验）。
+
+        ``records`` 是 ``pkg.discover`` 返回的记录（字段 ``dir`` / ``name``）。
+        """
+        out: dict[str, dict] = {}
+        by_ref: dict[str, str] = {}
+        by_id: dict[str, str] = {}
+        for rec in records:
+            chips_dir = Path(rec["dir"]) / "chips"
+            if not chips_dir.is_dir():
+                continue
+            for path in sorted(chips_dir.rglob("*.yaml")):
+                chip = _yaml.load_file(path) or {}
+                if "id" not in chip:
+                    raise ElabError(f"芯片文件缺少 id：{path}")
+                path_s = to_fwd(path)
+                ref = f"{chip.get('vendor')}/{chip['id']}"
+                if ref in by_ref and by_ref[ref] != path_s:
+                    raise ElabError(
+                        f"芯片 {ref} 在多个适配包中重复：{by_ref[ref]} 与 {path_s}")
+                if chip["id"] in by_id and by_id[chip["id"]] != path_s:
+                    raise ElabError(
+                        f"芯片 id {chip['id']} 在多个适配包中重复："
+                        f"{by_id[chip['id']]} 与 {path_s}")
+                by_ref[ref] = path_s
+                by_id[chip["id"]] = path_s
+                chip["_path"] = path_s
+                chip["_pack"] = rec["name"]
+                out[ref] = chip
+                out.setdefault(chip["id"], chip)
+        return out
+
     @property
     def chips(self) -> dict:
         """返回 ``{ref: chip}``，ref 同时支持 ``vendor/id`` 与裸 ``id``。
@@ -106,43 +141,31 @@ class Config:
           这就是"通用工具链"的形态。
         """
         if self._chips is None:
-            out: dict[str, dict] = {}
-            by_ref: dict[str, str] = {}
-            by_id: dict[str, str] = {}
             active = self.active_pack
-            records = [active] if active else []
-            for rec in records:
-                chips_dir = Path(rec["dir"]) / "chips"
-                if not chips_dir.is_dir():
-                    continue
-                for path in sorted(chips_dir.rglob("*.yaml")):
-                    chip = _yaml.load_file(path) or {}
-                    if "id" not in chip:
-                        raise ElabError(f"芯片文件缺少 id：{path}")
-                    path_s = to_fwd(path)
-                    ref = f"{chip.get('vendor')}/{chip['id']}"
-                    if ref in by_ref and by_ref[ref] != path_s:
-                        raise ElabError(
-                            f"芯片 {ref} 在多个适配包中重复：{by_ref[ref]} 与 {path_s}")
-                    if chip["id"] in by_id and by_id[chip["id"]] != path_s:
-                        raise ElabError(
-                            f"芯片 id {chip['id']} 在多个适配包中重复："
-                            f"{by_id[chip['id']]} 与 {path_s}")
-                    by_ref[ref] = path_s
-                    by_id[chip["id"]] = path_s
-                    chip["_path"] = path_s
-                    chip["_pack"] = rec["name"]
-                    out[ref] = chip
-                    out.setdefault(chip["id"], chip)
-            self._chips = out
+            self._chips = self._load_chips([active] if active else [])
         return self._chips
 
     @property
+    def all_chips(self) -> dict:
+        """**所有已安装包**的芯片视图（只读）。
+
+        ★ 与 ``chips`` 的区别：``chips`` 只含当前启用包（项目运行时口径）；
+          ``all_chips`` 供 ``adapt`` 探测使用 —— 接一颗新芯片的第一件事不该先
+          切换 active（adapter 产出的是固定包项目，运行时不看 active）。
+        """
+        if self._all_chips is None:
+            self._all_chips = self._load_chips(list(self.packs.values()))
+        return self._all_chips
+
+    @property
     def vendor_fingerprints(self) -> list[dict]:
-        """当前启用包声明的厂商指纹（adapt 探测器的**唯一事实源**）。"""
+        """**所有已安装包**声明的厂商指纹（adapt 探测器的唯一事实源）。
+
+        ★ 不用 active 包口径：adapt 要在「当前启用 stm32」时也能识别 ESP-IDF
+          工程，否则接新芯片前得先切换 active —— 顺序反了。
+        """
         out: list[dict] = []
-        active = self.active_pack
-        for rec in ([active] if active else []):
+        for rec in self.packs.values():
             man = rec.get("manifest") or {}
             for fp in man.get("vendor_fingerprints") or []:
                 if not isinstance(fp, dict):
@@ -226,7 +249,29 @@ class Config:
         return proj
 
     def chip_of(self, proj: dict) -> dict:
+        """按项目解析芯片；项目可写 ``pack: vendor/platform`` **固定包**。
+
+        固定包解析**只读**包目录、不改 ``active.json``：不同项目可以并行
+        使用不同适配包（STM32 与 ESP32 不必互相切换）。
+        """
         ref = proj.get("chip")
+        pinned = str(proj.get("pack") or "").strip()
+        if pinned:
+            rec = self.packs.get(pinned)
+            if not rec:
+                raise ElabError(
+                    f"项目 {proj.get('name')} 固定包未安装：{pinned}"
+                    f"（先执行 elab pkg install {pinned}）")
+            cache = self._pinned_chips.get(pinned)
+            if cache is None:
+                cache = self._load_chips([rec])
+                self._pinned_chips[pinned] = cache
+            chip = cache.get(ref) or cache.get(str(ref).split("/")[-1])
+            if chip:
+                return chip
+            known = ", ".join(sorted(k for k in cache if "/" in k)) or "(无)"
+            raise ElabError(
+                f"包 {pinned} 内没有芯片 {ref}（包内芯片：{known}）")
         if ref not in self.chips:
             if not self.packs:
                 hint = ("—— 尚未安装任何芯片适配包；先 "
@@ -315,6 +360,46 @@ class Host:
             return self._gb("arm-none-eabi-gdb")
         return spec.get("path", "")
 
+    @property
+    def gdb_riscv(self) -> str:
+        """RISC-V 调试器（ESP-IDF 自带 riscv32-esp-elf-gdb）。"""
+        return (_env_path("ELAB_GDB_RISCV")
+                or ((self.data.get("tools") or {}).get("gdb_riscv") or {}).get("path", ""))
+
+    # ── ESP-IDF（工程层工具链；主机侧只声明入口路径）────────────────
+    @property
+    def idf(self) -> dict:
+        return (self.data.get("tools") or {}).get("idf") or {}
+
+    @property
+    def idf_python(self) -> str:
+        return _env_path("ELAB_IDF_PYTHON") or self.idf.get("python", "")
+
+    @property
+    def idf_root(self) -> str:
+        return _env_path("ELAB_IDF_PATH") or self.idf.get("idf_path", "")
+
+    @property
+    def idf_tools_path(self) -> str:
+        return _env_path("ELAB_IDF_TOOLS_PATH") or self.idf.get("tools_path", "")
+
+    @property
+    def idf_version(self) -> str:
+        return _env_path("ELAB_IDF_VERSION") or self.idf.get("version", "")
+
+    @property
+    def idf_venv(self) -> str:
+        """ESP-IDF 的 Python venv 根（``IDF_PYTHON_ENV_PATH``）。
+
+        idf.py 会逐字符比较它与 ``sys.prefix``，必须保留宿主原生分隔符
+        （正斜杠会被判成"不是同一个 venv"）。
+        """
+        v = _env_path("ELAB_IDF_VENV") or self.idf.get("venv", "")
+        if v:
+            return v
+        py = self.idf_python
+        return str(Path(py).parent.parent) if py else ""
+
     # ── 主机工具 ─────────────────────────────────────────────────
     @property
     def cmake(self) -> str:
@@ -339,6 +424,17 @@ class Host:
     def openocd_scripts(self) -> str:
         return (_env_path("ELAB_OPENOCD_SCRIPTS")
                 or ((self.data.get("tools") or {}).get("openocd") or {}).get("scripts", ""))
+
+    @property
+    def openocd_esp32(self) -> str:
+        """ESP-IDF 自带 OpenOCD（与 ARM 那份是两套脚本，不能混用）。"""
+        return (_env_path("ELAB_OPENOCD_ESP32")
+                or ((self.data.get("tools") or {}).get("openocd_esp32") or {}).get("path", ""))
+
+    @property
+    def openocd_esp32_scripts(self) -> str:
+        return (_env_path("ELAB_OPENOCD_ESP32_SCRIPTS")
+                or ((self.data.get("tools") or {}).get("openocd_esp32") or {}).get("scripts", ""))
 
     @property
     def probes(self) -> dict:

@@ -24,6 +24,28 @@
       "sha256": "0669317423269bc84472a9962a95879e031a3d237df14372c1f7f1d4afece625"
     },
     {
+      "name": "espressif/esp32",
+      "vendor": "espressif",
+      "platform": "esp32",
+      "version": "0.1.0",
+      "description": "ESP32 芯片适配包（ESP-IDF 工程指纹 + ESP32-S31 参数 + 平台坑位）",
+      "status": "community",
+      "license": "MIT",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "espressif/esp32s31"
+      ],
+      "source": {
+        "type": "git",
+        "url": "https://github.com/xkk6663/elab-pack-espressif-esp32.git",
+        "ref": "6b96b54d3bd4b98d71de8b0bc8ecd0bee5036a8a"
+      },
+      "sha256": "075b7e2b4dea04cbc2845b92949451e65fd675d588e4d7e1a9d41a39eab88b3a"
+    },
+    {
       "name": "st/stm32",
       "vendor": "st",
       "platform": "stm32",
@@ -44,6 +66,50 @@
         "path": "packs/official/st/stm32"
       },
       "sha256": "2257a4e2d4f56cfa8e73730fe660b0f4434403729395e3575fe98b023864a8c9"
+    }
+  ],
+  "providers": [
+    {
+      "name": "espressif/idf",
+      "kind": "provider",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "description": "ESP-IDF（EIM 安装；工具链路径由 host 层提供）",
+      "provider_api": 1,
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "host": [
+          {
+            "key": "tools.idf.python",
+            "check": "file"
+          },
+          {
+            "key": "tools.idf.idf_path",
+            "check": "dir"
+          },
+          {
+            "key": "tools.idf.tools_path",
+            "check": "dir"
+          },
+          {
+            "key": "tools.idf.venv",
+            "check": "dir"
+          }
+        ],
+        "probe": false,
+        "serial": true
+      },
+      "steps": [
+        "build",
+        "debug_verify",
+        "doctor",
+        "flash"
+      ],
+      "source": {
+        "type": "local",
+        "path": "providers/official/espressif/idf"
+      },
+      "sha256": "70f3df2ead6056049039fa3f76d5bdb408ecc7a2ebbd31988d958b7f917a7a5c"
     }
   ]
 }

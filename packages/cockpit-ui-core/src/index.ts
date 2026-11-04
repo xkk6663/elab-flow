@@ -18,3 +18,4 @@ export * from "./icd.ts";
 export * from "./log-buffer.ts";
 export * from "./run-events.ts";
 export * from "./send-history.ts";
+export * from "./wave.ts";

@@ -51,6 +51,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import serialport as sp
+from . import serialtransport as tp
 from .config import Config, ElabError
 
 # 未声明 within_s 时的兜底观察窗口
@@ -98,6 +99,7 @@ class Verdict:
     port: str = ""
     backend: str = ""
     layer: str = ""
+    line: str = ""
     elapsed_s: float = 0.0
 
     @property
@@ -109,7 +111,8 @@ class Verdict:
             "status": self.status, "reason": self.reason,
             "evidence": self.evidence, "bytes": self.bytes_seen,
             "lines": len(self.lines), "port": self.port, "backend": self.backend,
-            "layer": self.layer, "elapsed_s": round(self.elapsed_s, 2),
+            "layer": self.layer, "line": self.line,
+            "elapsed_s": round(self.elapsed_s, 2),
         }
 
 
@@ -239,7 +242,7 @@ def _window(close_on: list[Rule], idle_timeout_s: float, override: float) -> flo
 
 
 def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
-        echo: bool = True, reset_port: bool = False, log=print,
+        echo: bool = True, reset_port: bool = False, line=None, log=print,
         on_open=None, on_line=None, on_close=None) -> Verdict:
     """开串口 → 收行 → 判定。返回值可直接 JSON 化。
 
@@ -256,15 +259,7 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
       ``run.py`` 负责把回调接到事件流上（契约 §5.3「读行 → serial/line 事件」）。
     """
     proj = cfg.resolved_project(name)
-    ser = proj.get("serial") or {}
     mon = proj.get("monitor") or {}
-    host_ser = cfg.host.get("serial") or {}
-
-    spec = port or ser.get("port") or host_ser.get("default") or "auto"
-    try:
-        baud = int(ser.get("baud") or host_ser.get("baud") or 115200)
-    except (TypeError, ValueError):
-        baud = 115200
 
     close_on = parse_rules(mon.get("close_on"), what="monitor.close_on", log=log)
     fail_on = parse_rules(mon.get("fail_on"), what="monitor.fail_on", log=log)
@@ -282,17 +277,22 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
         log(f"[monitor] — {v.reason}")
         return v
 
-    ports, backend = sp.list_ports()
-    v.backend = backend
-    chosen, why, _cands = sp.select_port(spec, ports)
-    v.port = chosen
-    log(f"[monitor] 端口：{why}")
-    if not chosen:
+    target = tp.resolve(cfg, name, port=port, line=line)
+    v.backend = target.backend
+    v.port = target.label
+    v.line = target.line.text
+    log(f"[monitor] 端口：{target.reason}")
+    if target.errors:
+        v.status = _FAILED
+        v.reason = "传输配置不合法：" + "；".join(target.errors)
+        log(f"[monitor] — {v.reason}")
+        return v
+    if not target.label:
         # ★ 选不到口 = 失败（2026-11-03）：没接串口 / auto 有歧义 / 端口被占用，
         #   都属于"用户能修"的环境问题。此前记 inconclusive，闭环总账仍显示通过，
         #   正是"没接串口却没报错"的来源。
         v.status = _FAILED
-        v.reason = why
+        v.reason = target.reason
         log(f"[monitor] — {v.reason}")
         return v
 
@@ -301,7 +301,7 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
         f"fail_on={[r.render() for r in fail_on] or '无'} 窗口={win:g}s")
 
     if reset_port:
-        ok, msg = sp.restart_device(chosen, log=log)
+        ok, msg = sp.restart_device(target.label, log=log)
         log(f"[monitor] {'✓' if ok else '—'} 软复位：{msg}")
         if ok:
             time.sleep(2.5)          # 等设备重新枚举、驱动重新绑定
@@ -309,11 +309,12 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
     opened = False
     try:
         try:
-            with sp.SerialIO(chosen, baud) as s:
+            with tp.open(target) as s:
                 opened = True
-                log(f"[monitor] 已打开 {chosen}@{baud}（backend={s.backend}），开始收行…")
+                log(f"[monitor] 已打开 {target.label}@{target.baud} {target.line.text}"
+                    f"（backend={s.backend}），开始收行…")
                 if on_open is not None:
-                    on_open(chosen, baud, s.backend, v.layer)
+                    on_open(target.label, target.baud, s.backend, v.layer)
                 t0 = time.time()
                 lines: list[tuple[float, str]] = []
                 buf = b""
@@ -376,7 +377,8 @@ def run(cfg: Config, name: str, *, port: str = "", seconds: float = 0.0,
 def render(v: Verdict) -> str:
     mark = {_OK: "✓", _FAILED: "✗", _INCONCL: "—"}[v.status]
     L = [f"[monitor] {mark} 串口闭环：{v.status.upper()}",
-         f"          端口 {v.port or '(未选到)'} / backend={v.backend} / layer={v.layer}",
+         f"          端口 {v.port or '(未选到)'} / backend={v.backend} / layer={v.layer}"
+         f" / 线参数 {v.line or '8N1'}",
          f"          收到 {v.bytes_seen} B，{len(v.lines)} 行，{v.elapsed_s:.1f}s",
          f"          理由：{v.reason}"]
     for e in v.evidence:

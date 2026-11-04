@@ -7,6 +7,7 @@
 
 name: at32f421g8u7
 root: ${ELAB_ROOT}/examples/AT32F421G8U7
+pack: artery/at32              # ★ 项目固定包：active.json 启用 st/stm32 时也能解析
 chip: artery/at32f421g8
 archetype: B
 

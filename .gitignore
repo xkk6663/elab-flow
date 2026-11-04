@@ -7,10 +7,17 @@ projects/*.yaml.bak
 # 示例工程内的历史 IDE / CMake 构建产物
 # （elab 自身产物落在 .work/；examples/ 的源码照常入库，CI 依赖它）
 build/
+# ESP-IDF 每台机器按默认值生成的本地配置；入库的只有 sdkconfig.defaults
+examples/**/sdkconfig
+examples/**/sdkconfig.old
 
 # 适配包安装目录（按需从市场/官方源安装，不入库）；
 # 随仓只保留 packs/official/**（官方包源）与 market/index.json（索引）
 packs/installed/
+
+# 工具链 provider 安装目录（按需从市场/官方源安装，不入库）；
+# 随仓只保留 providers/official/**（官方源）与 market/index.json（索引）
+providers/installed/
 
 # 芯片平台 skill 由 `elab pkg install` / `elab skill` 从适配包生成（骨架不含芯片）。
 # 入库的只有通用 elab-loop skill。

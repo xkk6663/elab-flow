@@ -419,15 +419,108 @@ function serializeSendHistory(items) {
   return JSON.stringify(items.slice(-SEND_HISTORY_MAX));
 }
 
+// ../cockpit-ui-core/src/wave.ts
+function autoRange(values) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  if (hi === lo) {
+    return { lo: lo - Math.abs(lo || 1) * 0.5, hi: hi + Math.abs(hi || 1) * 0.5 };
+  }
+  return { lo, hi };
+}
+function valueToY(v, lo, hi, height, gain = 1, offset = 0) {
+  const span = hi - lo;
+  if (!Number.isFinite(span) || span === 0) return height / 2;
+  return height - (v * gain + offset - lo) / span * height;
+}
+function nearestFrameIndex(ratio, count) {
+  if (count <= 0) return 0;
+  if (!Number.isFinite(ratio)) return 0;
+  const i = Math.round(ratio * (count - 1));
+  return Math.max(0, Math.min(count - 1, i));
+}
+function measure(a, b, gain = [], offset = []) {
+  const n = Math.max(a.values.length, b.values.length);
+  const dy = [];
+  const dyScaled = [];
+  for (let ch = 0; ch < n; ch++) {
+    const va = a.values[ch];
+    const vb = b.values[ch];
+    if (!Number.isFinite(va) || !Number.isFinite(vb)) {
+      dy.push(NaN);
+      dyScaled.push(NaN);
+      continue;
+    }
+    const g = Number.isFinite(gain[ch]) ? gain[ch] : 1;
+    dy.push(vb - va);
+    dyScaled.push((vb - va) * g);
+  }
+  const hasT = Number.isFinite(a.t_us) && Number.isFinite(b.t_us);
+  return {
+    d_frames: b.index - a.index,
+    dt_us: hasT ? b.t_us - a.t_us : null,
+    dy,
+    dy_scaled: dyScaled
+  };
+}
+function fmtDuration(us) {
+  if (us === null || !Number.isFinite(us)) return "\u2014";
+  const a = Math.abs(us);
+  const sign = us < 0 ? "-" : "";
+  if (a < 1e3) return `${sign}${round(a, 1)} \u03BCs`;
+  if (a < 1e6) return `${sign}${round(a / 1e3, 3)} ms`;
+  return `${sign}${round(a / 1e6, 3)} s`;
+}
+function fmtValue(v) {
+  if (!Number.isFinite(v)) return "\u2014";
+  const a = Math.abs(v);
+  if (a >= 1e6 || a > 0 && a < 1e-4) return v.toExponential(2);
+  return String(round(v, 4));
+}
+function round(v, digits) {
+  const p = 10 ** digits;
+  return Math.round(v * p) / p;
+}
+function snapshotJson(input) {
+  return JSON.stringify(
+    {
+      kind: "elab-wave-snapshot",
+      v: 1,
+      taken_at: input.takenAt ?? (/* @__PURE__ */ new Date()).toISOString(),
+      frozen: input.frozen,
+      view: { scale_x: input.scaleX, offset_x: input.offsetX, frames: input.frameCount },
+      cursors: {
+        a: input.cursors.a ? { i: input.cursors.a.index, t_us: input.cursors.a.t_us ?? null, v: input.cursors.a.values } : null,
+        b: input.cursors.b ? { i: input.cursors.b.index, t_us: input.cursors.b.t_us ?? null, v: input.cursors.b.values } : null
+      },
+      channels: input.channels
+    },
+    null,
+    2
+  );
+}
+
 // src/domain/envpack.ts
 var DEFAULT_KERNEL_VERSION = "3.1.0";
 
 // src/domain/kernel-meta.ts
 var current = null;
+var projectSteps = {};
 function setKernelMeta(meta) {
   current = meta ?? null;
 }
+function setProjectStepLabels(labels) {
+  projectSteps = labels ?? {};
+}
 function kernelStepLabel(id, fallback) {
+  const override = projectSteps[id];
+  if (typeof override === "string" && override !== "") return override;
   const label = current?.steps?.[id]?.label;
   return typeof label === "string" && label !== "" ? label : fallback;
 }
@@ -686,6 +779,7 @@ function createCockpitService(deps) {
       next[k] = { ok: v?.ok ?? true, reason: v?.reason };
     }
     set({ availability: next, plans: resolveAllPlans(next, false) });
+    setProjectStepLabels(card?.step_labels ?? {});
   }
   function closeConnection() {
     connection?.dispose();
@@ -799,6 +893,7 @@ function createCockpitService(deps) {
       const nextProject = keep ? snap.project : list[0]?.name ?? "";
       set({ projects: list, project: nextProject });
       if (nextProject !== "") applyAvailability(nextProject);
+      else setProjectStepLabels(null);
     } catch (e) {
       set({ error: message(e) });
     }
@@ -1742,13 +1837,19 @@ var elabApi = {
     withSession("/elab/api/serial/monitor", opts?.sessionId),
     { ...opts ?? {}, action }
   ),
-  /** P3 无状态协议解码（JustFloat / FireWater）。 */
+  /** P3 无状态协议解码（JustFloat / FireWater / 工程帧协议）。 */
   serialDecode: (opts) => post(withSession("/elab/api/serial/decode", opts.sessionId), {
     decoder: opts.decoder,
     ...opts.dataB64 !== void 0 ? { data_b64: opts.dataB64 } : {},
     ...opts.hex !== void 0 ? { hex: opts.hex } : {},
-    ...opts.channels !== void 0 ? { channels: opts.channels } : {}
+    ...opts.channels !== void 0 ? { channels: opts.channels } : {},
+    ...opts.project !== void 0 ? { project: opts.project } : {},
+    ...opts.profile !== void 0 ? { profile: opts.profile } : {}
   }),
+  /** 工程帧协议只读投影（M5）：插件侧只选/只读，编辑在驾驶舱。 */
+  serialFrames: (project, sessionId) => request(
+    withSession(`/elab/api/serial/frames?project=${encodeURIComponent(project)}`, sessionId)
+  ),
   /** K5 显式录制：字节写成有界 JSONL（证据，可回放）。 */
   serialCapture: (opts) => post(withSession("/elab/api/serial/capture", opts.sessionId), {
     action: opts.action,
@@ -2518,7 +2619,7 @@ function stepLabelOf(id) {
     debug_verify: "\u8C03\u8BD5\u6821\u9A8C",
     monitor: "\u4E32\u53E3\u95ED\u73AF"
   };
-  return map[id] ?? (id.startsWith("tool:") ? `\u5DE5\u5177\xB7${id.slice(5)}` : id);
+  return kernelStepLabel(id, map[id] ?? (id.startsWith("tool:") ? `\u5DE5\u5177\xB7${id.slice(5)}` : id));
 }
 function Row(props) {
   const { step, focus, available, running, progress, density } = props;
@@ -2692,9 +2793,9 @@ function chipFor(primary, disabled) {
   return chipBase;
 }
 var STEP_BUTTONS = [
-  { step: "build", label: "\u6784\u5EFA" },
-  { step: "flash", label: "\u70E7\u5F55" },
-  { step: "debug_verify", label: "\u8C03\u8BD5" }
+  { step: "build" },
+  { step: "flash" },
+  { step: "debug_verify" }
 ];
 function ManualBar(props) {
   const { plans, running, busy, cleanTarget } = props;
@@ -2779,7 +2880,7 @@ function ManualBar(props) {
         onClick: () => props.onRunOne(b.step),
         style: chipFor(false, disabled)
       },
-      `\u25B6 ${b.label}`
+      `\u25B6 ${stepLabel(b.step)}`
     );
   }), /* @__PURE__ */ react_default.createElement(
     "button",
@@ -3541,6 +3642,33 @@ function SerialPane(props) {
   const [job, setJob] = useState(null);
   const [jobId, setJobId] = useState("");
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
+  const [frameProfiles, setFrameProfiles] = useState([]);
+  useEffect(() => {
+    let dead = false;
+    if (!project) {
+      setFrameProfiles([]);
+      return void 0;
+    }
+    void api.serialFrames(project, props.sessionId).then((r) => {
+      if (!dead) setFrameProfiles(r.profiles ?? []);
+    }).catch(() => {
+      if (!dead) setFrameProfiles([]);
+    });
+    return () => {
+      dead = true;
+    };
+  }, [api, project, props.sessionId]);
+  const decoderOptions = useMemo(() => {
+    const base = decoders.filter((d) => d.id !== "profile");
+    return [
+      ...base,
+      ...frameProfiles.map((p) => ({
+        id: `profile:${p.id}`,
+        label: `\u5E27 \xB7 ${p.label || p.id}`,
+        desc: "\u6309\u5DE5\u7A0B\u5E27\u534F\u8BAE\uFF08frames.json\uFF09\u89E3\u7801\uFF1B\u914D\u7F6E\u5728\u9A7E\u9A76\u8231\u300C\u5E27\u534F\u8BAE\u300D\u62BD\u5C49\u91CC\u7F16\u8F91"
+      }))
+    ];
+  }, [decoders, frameProfiles]);
   const scrollRef = useRef(null);
   const followRef = useRef(true);
   followRef.current = follow;
@@ -3616,6 +3744,8 @@ function SerialPane(props) {
   const sharedState = sharedActive ? stream.decodedSnap ?? stream.snap?.decode ?? null : null;
   const shownFrames = sharedActive ? sharedFrames : frames;
   const shownChannels = sharedActive ? stream.decodedSnap?.channels ?? (sharedFrames[0]?.length ?? 0) : decodeMeta?.channels ?? (frames[0]?.length ?? 0);
+  const shownTimes = sharedActive ? stream.decoded.map((f) => f.t_us) : null;
+  const shownFields = sharedActive ? stream.decodedSnap?.fields ?? [] : decodeMeta?.fields ?? [];
   useEffect(() => {
     if (view !== "wave" || sharedActive) return;
     if (decoder === "") {
@@ -3646,6 +3776,7 @@ function SerialPane(props) {
     api.serialDecode({
       decoder,
       dataB64: bytesToB64(bytes),
+      ...decoder.startsWith("profile:") ? { project, profile: decoder.slice("profile:".length) } : {},
       ...replayMode ? {} : { sessionId: props.sessionId }
     }).then((r) => {
       if (cancelled) return;
@@ -3656,7 +3787,12 @@ function SerialPane(props) {
       }
       setWaveErr(null);
       setFrames(r.frames);
-      setDecodeMeta({ channels: r.channels, skipped: r.skipped, pending: r.pending_bytes });
+      setDecodeMeta({
+        channels: r.channels,
+        skipped: r.skipped,
+        pending: r.pending_bytes,
+        fields: r.fields ?? []
+      });
     }).catch((e) => {
       if (cancelled) return;
       setWaveErr(e instanceof Error ? e.message : String(e));
@@ -4067,6 +4203,15 @@ function SerialPane(props) {
       baudOptions(baud).map((b) => /* @__PURE__ */ react_default.createElement("option", { key: b, value: b }, b))
     ),
     /* @__PURE__ */ react_default.createElement(
+      "span",
+      {
+        "aria-label": "\u4E32\u53E3\u7EBF\u53C2\u6570\uFF08\u53EA\u8BFB\uFF09",
+        title: "\u7EBF\u53C2\u6570\uFF08\u53EA\u8BFB\uFF09\uFF1A\u5728 cockpit\u300C\u4E32\u53E3\u300D\u5DE5\u4F5C\u533A\u7F16\u8F91\uFF1B\u6539\u540E\u9700\u91CD\u5F00\u76D1\u89C6\u624D\u751F\u6548",
+        style: { ...chip, cursor: "default", fontFamily: "var(--elab-font-mono)" }
+      },
+      stream.snap?.line_text ?? "8N1"
+    ),
+    /* @__PURE__ */ react_default.createElement(
       "select",
       {
         value: dir,
@@ -4101,10 +4246,10 @@ function SerialPane(props) {
           if (!replayMode && stream.active) void stream.setDecoder(next);
         },
         "aria-label": "\u534F\u8BAE\u89E3\u7801\u5668",
-        title: sharedActive ? `\u5171\u4EAB\u89E3\u7801\uFF08${stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"}\uFF09\uFF1A\u9762\u677F\u4E0E agent \u8BFB\u540C\u4E00\u4EFD\u5E27` : decoders.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
+        title: sharedActive ? `\u5171\u4EAB\u89E3\u7801\uFF08${stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"}\uFF09\uFF1A\u9762\u677F\u4E0E agent \u8BFB\u540C\u4E00\u4EFD\u5E27` : decoderOptions.find((d) => d.id === decoder)?.desc ?? "\u534F\u8BAE\u89E3\u7801\u5668",
         style: selectStyle
       },
-      decoders.map((d) => /* @__PURE__ */ react_default.createElement("option", { key: d.id, value: d.id }, d.label)),
+      decoderOptions.map((d) => /* @__PURE__ */ react_default.createElement("option", { key: d.id, value: d.id }, d.label)),
       stream.active ? /* @__PURE__ */ react_default.createElement("option", { value: "" }, "\u672C\u5730\u89E3\u7801\uFF08\u5173\u95ED\u5171\u4EAB\uFF09") : null
     ) : null,
     /* @__PURE__ */ react_default.createElement(
@@ -4230,6 +4375,14 @@ function SerialPane(props) {
       follow ? "\u25BE \u8DDF\u968F" : "\u21BA \u6062\u590D"
     ),
     /* @__PURE__ */ react_default.createElement("span", { style: metaStyle, title: replayMode ? "\u56DE\u653E\u6587\u4EF6\uFF1A\u6279\u6B21\u6570 / \u539F\u59CB\u5B57\u8282\u6570" : "\u5F53\u524D\u7F13\u51B2\uFF1A\u672A\u6E05\u7A7A\u3001\u672A\u88AB\u73AF\u5F62\u6324\u51FA\u7684\u5B57\u8282 / \u6279\u6B21" }, `${bytesShown} B \xB7 ${chunksShown} \u6279`),
+    stream.snap?.stats ? /* @__PURE__ */ react_default.createElement(
+      "span",
+      {
+        style: metaStyle,
+        title: `\u6700\u8FD1 1s\uFF1ARX ${stream.snap.stats.rx_bps.toFixed(0)} B/s\u3001TX ${stream.snap.stats.tx_bps.toFixed(0)} B/s\uFF08\u670D\u52A1\u7AEF\u7EDF\u8BA1${stream.snap.stats.warmup ? "\uFF0C\u7A97\u53E3\u4E0D\u8DB3 1s" : ""}\uFF09`
+      },
+      `\u2193${(stream.snap.stats.rx_bps / 1024).toFixed(1)}K \u2191${(stream.snap.stats.tx_bps / 1024).toFixed(1)}K B/s`
+    ) : null,
     stream.active && openedBy !== void 0 ? /* @__PURE__ */ react_default.createElement(
       "span",
       {
@@ -4241,7 +4394,7 @@ function SerialPane(props) {
       },
       `\u4F1A\u8BDD ${openedBy === "agent" ? "agent" : "\u6211"}${leaseLeft > 0 ? ` \xB7 \u79DF\u7EA6 ${leaseLeft}s` : ""}`
     ) : null
-  ), replayErr !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u56DE\u653E\u5931\u8D25\uFF1A${replayErr}`) : null, replayMode && replay !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u56DE\u653E\u4E2D\uFF1A${replay.name} \u2014\u2014 ${replay.chunks.length} \u6279 / ${replay.bytes} B \xB7 ${replay.lines.length} \u884C\uFF08\u672C\u5730\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09${replay.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${replay.skipped} \u884C` : ""}`) : null, stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
+  ), replayErr !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u56DE\u653E\u5931\u8D25\uFF1A${replayErr}`) : null, replayMode && replay !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u56DE\u653E\u4E2D\uFF1A${replay.name} \u2014\u2014 ${replay.chunks.length} \u6279 / ${replay.bytes} B \xB7 ${replay.lines.length} \u884C\uFF08\u672C\u5730\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09${replay.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${replay.skipped} \u884C` : ""}`) : null, stream.snap?.state === "reconnecting" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barWarn }, `\u4E32\u53E3\u5DF2\u6389\u7EBF\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8FDE${stream.snap.down_s ? `\uFF08\u5DF2\u65AD\u5F00 ${stream.snap.down_s}s\uFF09` : ""}${stream.snap.last_error ? `\uFF1A${stream.snap.last_error}` : ""} \u2014\u2014 \u6062\u590D\u540E\u65E5\u5FD7\u81EA\u52A8\u7EED\u4E0A\u3002`) : null, stream.snap?.state === "suspended" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barInfo }, `\u76D1\u89C6\u5DF2\u4E3A\u95ED\u73AF\u8BA9\u51FA\u4E32\u53E3${stream.snap.suspend_reason ? `\uFF08${stream.snap.suspend_reason}\uFF09` : ""} \u2014\u2014 run \u7ED3\u675F\u81EA\u52A8\u6062\u590D\u3002`) : null, stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
     "div",
     {
       ref: scrollRef,
@@ -4325,8 +4478,8 @@ function SerialPane(props) {
         },
         stream.snap?.decode?.decoder_by === "agent" ? "agent \u9009\u5B9A" : "\u4EBA\u9009\u5B9A"
       ),
-      /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, `${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \xB7 \u5185\u6838\u53EA\u89E3 RX\uFF08\u8BBE\u5907\u8F93\u51FA\uFF09`)
-    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709\u89E3\u51FA\u5B8C\u6574\u5E27\uFF1A\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u89E3\u7801 ${replay?.chunks.length ?? 0} \u6279 \u2014\u2014 \u5F55\u5236\u91CC\u53EF\u80FD\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u5207\u65B9\u5411\u53EA\u770B RX \u6216\u6362\u89E3\u7801\u5668\u3002` : sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoders.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoders.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 && waveViewports.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px", marginBottom: "8px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } }, waveViewports.map((vp) => /* @__PURE__ */ react_default.createElement("div", { key: vp.id, style: { display: "inline-flex", alignItems: "center", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", overflow: "hidden" } }, /* @__PURE__ */ react_default.createElement(
+      /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, `${decoderOptions.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \xB7 \u5185\u6838\u53EA\u89E3 RX\uFF08\u8BBE\u5907\u8F93\u51FA\uFF09`)
+    ) : null, waveErr !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u89E3\u7801\u5931\u8D25\uFF1A${waveErr}`) : null, waveErr === null && shownFrames.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709\u89E3\u51FA\u5B8C\u6574\u5E27\uFF1A\u6309 ${decoderOptions.find((d) => d.id === decoder)?.label ?? decoder} \u89E3\u7801 ${replay?.chunks.length ?? 0} \u6279 \u2014\u2014 \u5F55\u5236\u91CC\u53EF\u80FD\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u5207\u65B9\u5411\u53EA\u770B RX \u6216\u6362\u89E3\u7801\u5668\u3002` : sharedActive ? `\u5C1A\u672A\u89E3\u51FA\u5E27\uFF1A${decoderOptions.find((d) => d.id === sharedDecoder)?.label ?? sharedDecoder} \u89E3\u7801\u5668\u5DF2\u5728\u4F1A\u8BDD\u542F\u7528\uFF0C\u8BBE\u5907\u5F00\u59CB\u8F93\u51FA\u7B26\u5408\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\u540E\u4F1A\u5728\u8FD9\u91CC\u51FA\u73B0\u6298\u7EBF\uFF08agent \u8BFB\u5230\u7684\u4E5F\u662F\u8FD9\u4EFD\u5E27\uFF09\u3002` : `\u5C1A\u65E0\u6CE2\u5F62\u3002\u8BBE\u5907\u6309 ${decoderOptions.find((d) => d.id === decoder)?.label ?? decoder} \u8F93\u51FA\uFF08JustFloat\uFF1AN\xD74 \u5C0F\u7AEF float + \u5C3E 00 00 80 7F\uFF09\u65F6\uFF0C\u8FD9\u91CC\u6309\u901A\u9053\u753B\u6298\u7EBF\u3002`, sharedActive === false && decodeMeta !== null && decodeMeta.skipped > 0 ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("br", null), `\u5F53\u524D\u7A97\u53E3\u672A\u89E3\u51FA\u5B8C\u6574\u5E27\uFF08\u8DF3\u8FC7 ${decodeMeta.skipped} \u6BB5${decodeMeta.pending > 0 ? `\u3001\u6B8B\u7559 ${decodeMeta.pending} B` : ""}\uFF09\u2014\u2014 \u8FD9\u6BB5\u6D41\u91CC\u6DF7\u6709\u4E0D\u5C5E\u4E8E\u8BE5\u534F\u8BAE\u7684\u5B57\u8282\uFF0C\u53EF\u7528\u65B9\u5411\u8FC7\u6EE4\u53EA\u770B\u8BBE\u5907\u5E27\u8F93\u51FA\u3002`) : null) : null, shownFrames.length > 0 && waveViewports.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px", marginBottom: "8px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } }, waveViewports.map((vp) => /* @__PURE__ */ react_default.createElement("div", { key: vp.id, style: { display: "inline-flex", alignItems: "center", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", overflow: "hidden" } }, /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
@@ -4405,6 +4558,8 @@ function SerialPane(props) {
         WaveChart,
         {
           frames: shownFrames,
+          times: shownTimes,
+          fields: shownFields,
           channels: vp.channels,
           scaleX: vp.scaleX,
           offsetX: vp.offsetX,
@@ -4610,9 +4765,10 @@ function resolvedChannelsDsh(ch, frameChannels) {
   return ch.filter((i) => i >= 0 && i < frameChannels);
 }
 function WaveChart(props) {
-  const { frames, channels, scaleX, offsetX, onView, follow, onFollowChange } = props;
+  const { frames, times, fields, channels, scaleX, offsetX, onView, follow, onFollowChange } = props;
   const canvasRef = useRef(null);
   const dragRef = useRef(null);
+  const downRef = useRef(null);
   const dragActive = useRef(false);
   const [frozen, setFrozen] = useState(null);
   useEffect(() => {
@@ -4624,11 +4780,19 @@ function WaveChart(props) {
       setFrozen(null);
       return;
     }
-    setFrozen((cur) => cur ?? frames);
-  }, [follow, frames]);
-  const shown = follow ? frames : frozen ?? frames;
+    setFrozen((cur) => cur ?? { frames, times: times ?? null });
+  }, [follow, frames, times]);
+  const shown = follow ? frames : frozen?.frames ?? frames;
+  const shownTimes = follow ? times ?? null : frozen?.times ?? null;
+  const [axis, setAxis] = useState({});
+  const axisOf = (ch) => axis[ch] ?? { gain: 1, offset: 0 };
+  const [axesOpen, setAxesOpen] = useState(false);
+  const [cursor, setCursor] = useState({ a: null, b: null });
+  const [snapNotice, setSnapNotice] = useState(null);
   const frameChannels = shown[0]?.length ?? 0;
   const shownCh = resolvedChannelsDsh(channels, frameChannels);
+  const labelOf = (ch) => fields?.[ch]?.name || `CH${ch}`;
+  const unitOf = (ch) => fields?.[ch]?.unit || "";
   const lastFramesLen = useRef(0);
   useEffect(() => {
     if (shown.length === 0) {
@@ -4703,19 +4867,13 @@ function WaveChart(props) {
       const lx = Math.min(w - padR - half, Math.max(padL + half, x));
       ctx.fillText(label, lx, plotBottom + 3);
     }
+    const chRange = {};
     for (const ch of shownCh) {
       const values = slice.map((f) => ch < f.length ? f[ch] : NaN);
-      let lo = Infinity, hi = -Infinity;
-      for (const v of values) {
-        if (!Number.isFinite(v)) continue;
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-      if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-      if (hi === lo) {
-        hi = lo + 1;
-        lo -= 1;
-      }
+      const range = autoRange(values);
+      if (!range) continue;
+      chRange[ch] = range;
+      const { gain, offset } = axisOf(ch);
       ctx.strokeStyle = palette[ch % palette.length];
       ctx.lineWidth = 1.4;
       ctx.beginPath();
@@ -4726,7 +4884,7 @@ function WaveChart(props) {
           continue;
         }
         const x = xOf(i);
-        const y = plotBottom - (values[i] - lo) / (hi - lo) * plotH;
+        const y = valueToY(values[i], range.lo, range.hi, plotH, gain, offset) + plotTop;
         if (!started) {
           ctx.moveTo(x, y);
           started = true;
@@ -4734,13 +4892,45 @@ function WaveChart(props) {
       }
       ctx.stroke();
     }
+    const drawCursor = (idx, tag) => {
+      if (idx === null || idx < startIdx || idx >= endIdx) return;
+      const x = xOf(idx - startIdx);
+      ctx.save();
+      ctx.strokeStyle = tag === "A" ? palette[0] : palette[2];
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, plotTop);
+      ctx.lineTo(x, plotBottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const f = shown[idx];
+      for (const ch of shownCh) {
+        const v = f[ch];
+        const r = chRange[ch];
+        if (!r || !Number.isFinite(v)) continue;
+        const { gain, offset } = axisOf(ch);
+        const y = valueToY(v, r.lo, r.hi, plotH, gain, offset) + plotTop;
+        ctx.fillStyle = palette[ch % palette.length];
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = tag === "A" ? palette[0] : palette[2];
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(tag, Math.max(padL, Math.min(w - padR - 8, x + 4)), plotTop + 2);
+      ctx.restore();
+    };
+    drawCursor(cursor.a, "A");
+    drawCursor(cursor.b, "B");
     ctx.fillStyle = axisLabel;
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     ctx.fillText(`\u5E27 ${startIdx} \u2192 ${endIdx - 1}`, padL, 2);
     ctx.textAlign = "right";
     ctx.fillText(`\u5171 ${shown.length} \u5E27 \xB7 \u7A97\u53E3 ${endIdx - startIdx} \xB7 \xD7${scaleX.toFixed(1)}`, w - padR, 2);
-  }, [shown, scaleX, offsetX, shownCh]);
+  }, [shown, scaleX, offsetX, shownCh, axis, cursor]);
   const onWheel = (e) => {
     e.preventDefault();
     const canvas = canvasRef.current;
@@ -4759,6 +4949,7 @@ function WaveChart(props) {
   };
   const onMouseDown = (e) => {
     dragRef.current = { startClientX: e.clientX, startOffset: offsetX };
+    downRef.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey };
     dragActive.current = true;
     e.preventDefault();
   };
@@ -4769,31 +4960,120 @@ function WaveChart(props) {
     const rect = canvas.getBoundingClientRect();
     const plotW = rect.width - 44 - 8;
     const dx = e.clientX - dragRef.current.startClientX;
-    const offsetDelta = Math.round(-dx / scaleX);
     const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const startOffset = dragRef.current.startOffset;
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(startOffset, shown.length - 1)));
+    const offsetDelta = Math.round(-dx * span / plotW);
     let newOffset = dragRef.current.startOffset + offsetDelta;
     newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
     if (newOffset !== dragRef.current.startOffset) onView(scaleX, newOffset);
     if (follow) onFollowChange(false);
   };
-  const endDrag = () => {
+  const endDrag = (e) => {
+    const down = downRef.current;
     dragActive.current = false;
     dragRef.current = null;
+    downRef.current = null;
+    const canvas = canvasRef.current;
+    if (!e || !down || !canvas || !shown.length) return;
+    if (Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) > 4) return;
+    const rect = canvas.getBoundingClientRect();
+    const padL = 8;
+    const plotW = rect.width - padL - 8;
+    if (plotW <= 4) return;
+    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(offsetX, shown.length - 1)));
+    const within = nearestFrameIndex((e.clientX - rect.left - padL) / plotW, span);
+    const idx = Math.max(0, Math.min(shown.length - 1, offsetX + within));
+    setCursor((prev) => down.shift ? { a: prev.a ?? idx, b: idx } : { a: idx, b: null });
+  };
+  const probe = (i) => i === null || !shown[i] ? null : { index: i, t_us: shownTimes?.[i], values: shown[i] };
+  const pa = probe(cursor.a);
+  const pb = probe(cursor.b);
+  const delta = pa && pb ? measure(pa, pb, shownCh.map((ch) => axisOf(ch).gain), shownCh.map((ch) => axisOf(ch).offset)) : null;
+  const frozenAt = !follow && frozen ? frozen.frames.length - 1 : null;
+  const frozenTime = frozenAt !== null && shownTimes?.[frozenAt] !== void 0 ? new Date(shownTimes[frozenAt] / 1e3).toISOString().slice(11, 23) : null;
+  const copySnapshot = () => {
+    const text = snapshotJson({
+      frozen: !follow,
+      scaleX,
+      offsetX,
+      frameCount: shown.length,
+      cursors: { a: pa, b: pb },
+      channels: shownCh.map((ch) => ({
+        index: ch,
+        label: labelOf(ch),
+        unit: unitOf(ch),
+        gain: axisOf(ch).gain,
+        offset: axisOf(ch).offset
+      }))
+    });
+    void navigator.clipboard?.writeText(text).then(
+      () => setSnapNotice("\u5FEB\u7167\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F"),
+      () => setSnapNotice("\u526A\u8D34\u677F\u4E0D\u53EF\u7528\uFF08\u5FEB\u7167\u672A\u590D\u5236\uFF09")
+    );
   };
   const canvasReady = shown.length > 0;
   const chip2 = { padding: "2px 8px", fontSize: 12, lineHeight: 1, border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", background: "var(--elab-bg-surface)", color: "var(--elab-fg-secondary)", cursor: "pointer", fontFamily: "inherit" };
-  return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "12px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", flex: "1 1 auto" } }, shownCh.map((ch) => /* @__PURE__ */ react_default.createElement("span", { key: ch, style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { width: "10px", height: "10px", borderRadius: "2px", background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` } }), `CH${ch}`))), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.max(1, scaleX / 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u7F29\u5C0F\uFF08\u5411\u540E\u770B\u66F4\u591A\u5E27\uFF09" }, "\u2212"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.min(20, scaleX * 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u653E\u5927\uFF08\u770B\u66F4\u7CBE\u7EC6\u7684\u5C40\u90E8\uFF09" }, "+"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(1, 0), style: chip2, disabled: !canvasReady, title: "\u91CD\u7F6E\uFF08\u5168\u90E8\u53EF\u89C1\u3001\u56DE\u5230\u5F00\u5934\uFF09" }, "\u293E"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onFollowChange(!follow), style: { ...chip2, ...follow ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : {} }, disabled: !canvasReady, title: follow ? "\u6B63\u5728\u8DDF\u968F\u6700\u65B0\u5E27\uFF0C\u70B9\u51FB\u6682\u505C\uFF08\u753B\u9762\u5B9A\u683C\u5728\u5F53\u524D\u7A97\u53E3\uFF0C\u6570\u636E\u4ECD\u7EE7\u7EED\u63A5\u6536\uFF09" : "\u753B\u9762\u5DF2\u5B9A\u683C\uFF0C\u70B9\u51FB\u6062\u590D\u8DDF\u968F\u6700\u65B0\u5E27" }, follow ? "\u275A\u275A \u6682\u505C\u8DDF\u968F" : "\u25B6 \u6062\u590D\u8DDF\u968F"))), /* @__PURE__ */ react_default.createElement(
+  return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: "12px", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)", flex: "1 1 auto" } }, shownCh.map((ch) => /* @__PURE__ */ react_default.createElement(
+    "span",
+    {
+      key: ch,
+      style: { display: "inline-flex", alignItems: "center", gap: "4px" },
+      title: `${labelOf(ch)}${unitOf(ch) ? ` (${unitOf(ch)})` : ""} \xB7 gain ${axisOf(ch).gain} \xB7 offset ${axisOf(ch).offset}`
+    },
+    /* @__PURE__ */ react_default.createElement("span", { style: { width: "10px", height: "10px", borderRadius: "2px", background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` } }),
+    labelOf(ch),
+    unitOf(ch) ? ` (${unitOf(ch)})` : ""
+  ))), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.max(1, scaleX / 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u7F29\u5C0F\uFF08\u5411\u540E\u770B\u66F4\u591A\u5E27\uFF09" }, "\u2212"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(Math.min(20, scaleX * 1.2), offsetX), style: chip2, disabled: !canvasReady, title: "\u653E\u5927\uFF08\u770B\u66F4\u7CBE\u7EC6\u7684\u5C40\u90E8\uFF09" }, "+"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onView(1, 0), style: chip2, disabled: !canvasReady, title: "\u91CD\u7F6E\uFF08\u5168\u90E8\u53EF\u89C1\u3001\u56DE\u5230\u5F00\u5934\uFF09" }, "\u293E"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setAxesOpen((v) => !v), style: { ...chip2, ...axesOpen ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : {} }, disabled: !canvasReady, title: "\u6BCF\u901A\u9053\u5750\u6807\uFF1A\u589E\u76CA\uFF08\u538B\u6241/\u653E\u5927\u66F2\u7EBF\uFF09\u4E0E\u504F\u79FB\uFF08\u6574\u6761\u4E0A\u79FB/\u4E0B\u79FB\uFF09" }, "\u901A\u9053"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setCursor({ a: null, b: null }), style: chip2, disabled: cursor.a === null, title: "\u6E05\u7A7A\u6E38\u6807 A/B\uFF08\u70B9\u51FB\u753B\u5E03\u653E A\uFF0CShift+\u70B9\u51FB\u653E B\uFF09" }, "\u6E05\u6E38\u6807"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: copySnapshot, style: chip2, disabled: !canvasReady, title: "\u628A\u89C6\u53E3 + \u6E38\u6807 + \u901A\u9053\u5750\u6807\u590D\u5236\u6210 JSON" }, "\u5FEB\u7167"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => onFollowChange(!follow), style: { ...chip2, ...follow ? { color: "var(--elab-accent)", borderColor: "var(--elab-accent)" } : {} }, disabled: !canvasReady, title: follow ? "\u6B63\u5728\u8DDF\u968F\u6700\u65B0\u5E27\uFF0C\u70B9\u51FB\u6682\u505C\uFF08\u753B\u9762\u5B9A\u683C\u5728\u5F53\u524D\u7A97\u53E3\uFF0C\u6570\u636E\u4ECD\u7EE7\u7EED\u63A5\u6536\uFF09" : "\u753B\u9762\u5DF2\u5B9A\u683C\uFF0C\u70B9\u51FB\u6062\u590D\u8DDF\u968F\u6700\u65B0\u5E27" }, follow ? "\u275A\u275A \u6682\u505C\u8DDF\u968F" : "\u25B6 \u6062\u590D\u8DDF\u968F"))), frozenAt !== null ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, "\u275A\u275A \u5DF2\u51BB\u7ED3 @ #", frozenAt, frozenTime ? ` \xB7 ${frozenTime}` : "", "\u3000\uFF08\u6570\u636E\u4ECD\u5728\u63A5\u6536\uFF1B\u70B9\u300C\u6062\u590D\u8DDF\u968F\u300D\u56DE\u5230\u5B9E\u65F6\uFF09") : null, snapNotice ? /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)" } }, snapNotice) : null, axesOpen ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 12px", fontSize: "var(--elab-fs-xs)" } }, shownCh.map((ch) => {
+    const a = axisOf(ch);
+    const inputStyle3 = { width: "58px", padding: "1px 4px", fontFamily: "var(--elab-font-mono)", fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-primary)", background: "var(--elab-bg-code)", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)" };
+    return /* @__PURE__ */ react_default.createElement("span", { key: ch, style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { width: "10px", height: "10px", borderRadius: "2px", background: `var(--elab-ansi-${WAVE_TOKENS[ch % 8]})` } }), /* @__PURE__ */ react_default.createElement("span", { style: { fontFamily: "var(--elab-font-mono)", color: "var(--elab-fg-secondary)" } }, labelOf(ch), unitOf(ch) ? ` (${unitOf(ch)})` : ""), /* @__PURE__ */ react_default.createElement("label", { style: { display: "inline-flex", alignItems: "center", gap: "3px", color: "var(--elab-fg-faint)" } }, "\u589E\u76CA", /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        type: "number",
+        step: "0.1",
+        value: a.gain,
+        style: inputStyle3,
+        onChange: (e) => {
+          const v = Number(e.currentTarget.value);
+          setAxis((prev) => ({ ...prev, [ch]: { gain: Number.isFinite(v) ? v : 1, offset: a.offset } }));
+        }
+      }
+    )), /* @__PURE__ */ react_default.createElement("label", { style: { display: "inline-flex", alignItems: "center", gap: "3px", color: "var(--elab-fg-faint)" } }, "\u504F\u79FB", /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        type: "number",
+        step: "1",
+        value: a.offset,
+        style: inputStyle3,
+        onChange: (e) => {
+          const v = Number(e.currentTarget.value);
+          setAxis((prev) => ({ ...prev, [ch]: { gain: a.gain, offset: Number.isFinite(v) ? v : 0 } }));
+        }
+      }
+    )), /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        style: { ...chip2, padding: "1px 6px" },
+        title: "\u8BE5\u901A\u9053\u6062\u590D\u9ED8\u8BA4\u5750\u6807\uFF08gain=1, offset=0\uFF09",
+        onClick: () => setAxis((prev) => ({ ...prev, [ch]: { gain: 1, offset: 0 } }))
+      },
+      "\u21BA"
+    ));
+  }), /* @__PURE__ */ react_default.createElement("span", { style: { flexBasis: "100%", color: "var(--elab-fg-faint)" } }, "\u91CF\u7A0B\u6309\u539F\u59CB\u503C\u81EA\u52A8\u8BA1\u7B97\uFF1A\u6539\u589E\u76CA\u4F1A\u538B\u6241/\u653E\u5927\u66F2\u7EBF\uFF0C\u6539\u504F\u79FB\u4F1A\u6574\u4F53\u4E0A\u4E0B\u79FB\u52A8\uFF08\u4E0D\u6539\u539F\u59CB\u6570\u636E\uFF09\u3002")) : null, /* @__PURE__ */ react_default.createElement(
     "canvas",
     {
       ref: canvasRef,
-      style: { width: "100%", height: "220px", display: "block", background: "var(--elab-bg-surface)", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", cursor: canvasReady ? dragActive.current ? "grabbing" : "grab" : "default" },
+      style: { width: "100%", height: "220px", display: "block", background: "var(--elab-bg-surface)", border: "1px solid var(--elab-border)", borderRadius: "var(--elab-radius-sm)", cursor: canvasReady ? dragActive.current ? "grabbing" : "crosshair" : "default" },
       onWheel,
       onMouseDown,
       onMouseMove,
       onMouseUp: endDrag,
-      onMouseLeave: endDrag
+      onMouseLeave: () => endDrag()
     }
-  ));
+  ), pa ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px", paddingTop: "4px", borderTop: "1px dashed var(--elab-border)", fontSize: "var(--elab-fs-xs)", fontFamily: "var(--elab-font-mono)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px", color: "var(--elab-fg-secondary)" } }, /* @__PURE__ */ react_default.createElement("span", null, "A #", pa.index, pa.t_us !== void 0 ? ` \xB7 ${new Date(pa.t_us / 1e3).toISOString().slice(11, 23)}` : ""), pb ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("span", null, "B #", pb.index, pb.t_us !== void 0 ? ` \xB7 ${new Date(pb.t_us / 1e3).toISOString().slice(11, 23)}` : ""), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-primary)", fontWeight: 600 } }, "\u0394\u5E27 ", delta?.d_frames ?? "\u2014", "\u3000\u0394t ", fmtDuration(delta?.dt_us ?? null))) : /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, "Shift+\u70B9\u51FB\u8BBE\u7F6E B\uFF08\u5F53\u524D\u53EA\u6709 A\uFF09")), /* @__PURE__ */ react_default.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "var(--elab-fs-xs)", fontFamily: "var(--elab-font-mono)" } }, /* @__PURE__ */ react_default.createElement("thead", null, /* @__PURE__ */ react_default.createElement("tr", { style: { color: "var(--elab-fg-secondary)" } }, /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "\u901A\u9053"), /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "A"), pb ? /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "B") : null, pb ? /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "\u0394\u539F\u59CB") : null, /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, pb ? "\u0394\u7F29\u653E" : "\u5355\u4F4D"))), /* @__PURE__ */ react_default.createElement("tbody", null, shownCh.map((ch, i) => /* @__PURE__ */ react_default.createElement("tr", { key: ch }, /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, labelOf(ch)), /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(pa.values[ch])), pb ? /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(pb.values[ch])) : null, pb ? /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(delta?.dy[i] ?? NaN)) : null, /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, pb ? fmtValue(delta?.dy_scaled[i] ?? NaN) : unitOf(ch) || "\u2014"))))), /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-fg-faint)" } }, shownTimes === null ? "\u5F53\u524D\u7A97\u53E3\u6CA1\u6709\u65F6\u95F4\u6E90\uFF08\u4F1A\u8BDD\u672A\u5F00\u6216\u672A\u542F\u7528\u5171\u4EAB\u89E3\u7801\uFF09\u2192 \u0394t \u663E\u793A \u2014\u3002" : "\u0394t \u7528 RX \u6279\u6B21\u65F6\u95F4\u6233\uFF08\u540C\u6279\u591A\u5E27\u65F6\u95F4\u76F8\u540C\uFF09\uFF0C\u7CBE\u5EA6\u53D7\u6279\u5927\u5C0F\u9650\u5236\u3002")) : null);
 }
 
 // src/adapters/dsh-web/serial/useSerialStream.ts

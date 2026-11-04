@@ -74,22 +74,28 @@ class Base(unittest.TestCase):
         sm.MAX_BYTES = 1 << 20
         sm.PARTIAL_FLUSH_S = 1.0
         self.io = FakeIO("COM9", 115200, for_write=True)
-        self._orig_sp, self._orig_st = sm.sp, sm.st
+        from elab import serialport as real_sp
+        self._orig_sp, self._orig_tp = sm.sp, sm.tp
         sm.sp = types.SimpleNamespace(SerialIO=lambda p, b, **kw: self.io,
+                                      LineConfig=real_sp.LineConfig,
                                       capabilities=lambda: {
                                           "available": True, "layer": "L1",
                                           "hint": ""})
-        sm.st = types.SimpleNamespace(
-            resolve_target=lambda cfg, name, *, port="", baud=0: {
-                "spec": port or "COM9", "port": self._resolved,
-                "baud": baud or 115200, "reason": "" if self._resolved else "没选到口",
-                "backend": "fake", "ports": []})
+        sm.tp = types.SimpleNamespace(
+            resolve=lambda cfg, name, *, port="", baud=0, line=None,
+            transport="", net=None: types.SimpleNamespace(
+                kind="serial", label=self._resolved,
+                port_spec=port or "COM9", baud=baud or 115200,
+                line=real_sp.LineConfig(), net={},
+                reason="" if self._resolved else "没选到口",
+                errors=(), ports=(), backend="fake"),
+            open=lambda t, for_write=False: self.io)
         self._resolved = "COM9"
         self.cfg = Config(str(ROOT))
 
     def tearDown(self):
         sm.close_session(log=lambda *a: None)
-        sm.sp, sm.st = self._orig_sp, self._orig_st
+        sm.sp, sm.tp = self._orig_sp, self._orig_tp
         sm.MAX_LINES = 2000
         sm.MAX_CHUNKS = 4096
         sm.MAX_BYTES = 1 << 20
@@ -223,7 +229,8 @@ class WriteThrough(Base):
         self.assertIsNone(sm.write_through(b"x"))
 
     def test_write_after_reader_death_returns_zero(self):
-        self.assertTrue(self.open()["ok"])
+        # M2：默认会自动重连；这里显式关掉，验证"关重连时如实收摊"的旧行为。
+        self.assertTrue(self.open(reconnect={"enabled": False})["ok"])
         self.io.fail_read = True
         self.wait_for(lambda: not sm.status()["active"], what="读线程自愈收摊")
         self.assertEqual(sm.write_through(b"x"), 0)

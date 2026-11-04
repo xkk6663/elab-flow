@@ -498,11 +498,14 @@ def _materialize(source=None, *, local=None, git=None, ref=None, archive=None,
 
     s = str(source)
     if Path(s).expanduser().exists():
-        yield from _materialize(local=s)
+        with _materialize(local=s) as made:
+            yield made
     elif s.startswith("git+") or s.rstrip("/").endswith(".git"):
-        yield from _materialize(git=s.replace("git+", "", 1))
+        with _materialize(git=s.replace("git+", "", 1)) as made:
+            yield made
     elif s.startswith(("http://", "https://")):
-        yield from _materialize(archive=s, sha256=sha256)
+        with _materialize(archive=s, sha256=sha256) as made:
+            yield made
     else:
         raise PackError(
             f"无法识别的来源：{s!r}（用市场名，或 --from <目录> / --git <URL> / "

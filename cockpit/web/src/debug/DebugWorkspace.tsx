@@ -37,6 +37,8 @@ export interface DebugWorkspaceProps {
   project: string;
   /** 有 run 在跑时调试与 run 互斥 */
   running: boolean;
+  /** 项目级调试页签白名单（按芯片收敛；打开会话后以 snapshot.features 为准） */
+  debugFeatures?: string[];
 }
 
 type TabId = "stack" | "vars" | "regs" | "bps" | "watch" | "memory"
@@ -82,7 +84,7 @@ function rowDump(addr: string, bytes: string[]): Array<{ addr: string; hex: stri
   return rows;
 }
 
-export function DebugWorkspace({ caps, project, running }: DebugWorkspaceProps) {
+export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugWorkspaceProps) {
   const [snap, setSnap] = useState<DebugSessionSnapshot | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -423,8 +425,8 @@ export function DebugWorkspace({ caps, project, running }: DebugWorkspaceProps) 
 
   // ── 派生 ────────────────────────────────────────────────────
   const features = useMemo(
-    () => snap?.features ?? caps?.meta?.debug?.features ?? [],
-    [snap, caps],
+    () => snap?.features ?? debugFeatures ?? caps?.meta?.debug?.features ?? [],
+    [snap, debugFeatures, caps],
   );
   const visibleTabs = TABS.filter((t) => !t.feature || features.includes(t.feature));
   const currentTab = visibleTabs.some((t) => t.id === tab) ? tab : visibleTabs[0]?.id;

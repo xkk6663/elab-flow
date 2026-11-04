@@ -109,3 +109,20 @@ code {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* 网络传输（M4）：host/port 输入框沿用 .baud 的尺寸，但光标是文本 */
+.netField {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 4px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg);
+  background: var(--elab-bg-surface);
+  border: 1px solid var(--elab-border);
+  border-radius: 4px;
+}
+
+.netField:disabled {
+  opacity: 0.5;
+}

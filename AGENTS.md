@@ -11,6 +11,7 @@
 | **业务层** | `cockpit/server.py` | 内核 HTTP 面 + **内核自描述**（`STEP_META` / `KERNEL_PLANS`：步骤标签、通道、三档定义的唯一事实源） |
 | **业务层** | `projects/**`、`examples/**` | 工程适配与示例 |
 | **数据层（适配包）** | `packs/official/**`、`packs/installed/**` | 芯片参数 / 厂商指纹 / 平台坑位 —— **芯片知识的唯一宿主**；骨架仓不内置任何芯片 |
+| **数据层（工具链 provider）** | `providers/official/**`、`providers/installed/**` | 声明式 `provider.yaml`（命令模板/env/产物/主机前提），**不是可执行插件**；`providers/installed/` 不入库 |
 | **数据层（市场）** | `market/index.json` | 零服务器社区市场索引（包内容留在作者仓库，索引只记 name/version/source/sha256/requires/license） |
 | **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件（开发工具整合器）：面板可视化、进程托管、`elab_*` agent 工具；源码在本仓。市场与 npm 都直接取自该子目录，无额外分发仓 |
 
@@ -40,6 +41,11 @@
    外置包示例仓：`xkk6663/elab-pack-artery-at32`。
 9. **外置包仓库必须带 `.gitattributes`（`* -text`）**：内容哈希按字节计算，
    换行转换会导致 `sha256` 校验失败。
+10. **Provider 与芯片包分离**：工具链命令模板只写 `providers/**`，**不得**塞进
+    `packs/**` 或内核；provider 只是数据，内核 `services/elab/provider.py` 负责解析，
+    执行器只接受不可变的 `ResolvedToolchain`。`monitor` / `doctor_deep` 永不由
+    provider 提供；provider 缺步骤时该步骤直接报错，**不回退**原生链。
+    项目可显式 `steps.<step>: tool:<name>` 覆盖，但必须写明。
 
 ## 芯片闭环第一关（硬）
 
@@ -63,4 +69,4 @@
 - 插件：`npm test` / `tsc --noEmit`（host + client）/ `npm run build`（cwd = `packages/dsh-elab-cockpit`）；
   CI 见 `.github/workflows/plugin.yml`（唯一的插件门禁工作流）
 - 内核：`elab.cmd doctor`（或 `python -m elab doctor`，需 `PYTHONPATH=services`）
-- 改 `cockpit/server.py` 后**两个检出都要同步**（本仓 + 用户的 elab 工作检出）
+- 改 `cockpit/server.py` 后**只维护本仓**（旧的 elab-flow 工作检出已废弃，不再同步）

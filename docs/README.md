@@ -24,7 +24,9 @@
 | [技术方案_驾驶舱UI共享层迁移](design/技术方案_驾驶舱UI共享层迁移.md) | WebUI 与 DSH 面板的逻辑层 + 面板共享方案，含未来自研 harness 双宿主规划（待评审，未动代码） |
 | [ELAB_跨平台CI工作流架构设计](design/ELAB_跨平台CI工作流架构设计.md) | 跨平台 CI 工作流与矩阵设计 |
 | [ICD_cockpit_events](design/ICD_cockpit_events.md) | 事件契约：topic 全集、SSE 帧格式、兼容承诺 |
-| [设计约束](design/设计约束.md) | C1–C35 硬约束，每条附「为什么」与事故来源 |
+| [设计约束](design/设计约束.md) | C1–C36 硬约束，每条附「为什么」与事故来源 |
+| [技术方案_ESP32接入与工具链解耦](design/技术方案_ESP32接入与工具链解耦.md) | ESP32/ESP-IDF 首次接入记录（A 方案内联 `tools:`）；当前主路径已迁移到 Provider，内联写法仅作 `--no-provider` 兜底 |
+| [技术方案_Provider工具链架构](design/技术方案_Provider工具链架构.md) | 默认链/外带链同构的 Provider 架构契约：manifest、绑定优先级、缺步骤不回退、市场分发、`ctx.provide()` 边界（P1/P2 已实现，ESP32 实机闭环通过；P3 外带 GDB 搁置） |
 
 ## reports/ —— 验证报告与可行性研究
 

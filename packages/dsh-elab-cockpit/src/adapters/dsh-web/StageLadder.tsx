@@ -14,6 +14,8 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 
+import { kernelStepLabel } from '../../domain/kernel-meta.ts'
+
 /** 与 `store/runStore.ts` 的 `StepView` 对齐（此处只依赖用到的字段）。 */
 export interface LadderStep {
   id: string
@@ -76,7 +78,7 @@ export function stepLabelOf(id: string): string {
     debug_verify: '\u8c03\u8bd5\u6821\u9a8c',
     monitor: '\u4e32\u53e3\u95ed\u73af',
   }
-  return map[id] ?? (id.startsWith('tool:') ? `\u5de5\u5177\u00b7${id.slice(5)}` : id)
+  return kernelStepLabel(id, map[id] ?? (id.startsWith('tool:') ? `\u5de5\u5177\u00b7${id.slice(5)}` : id))
 }
 
 /** 一行阶梯。 */

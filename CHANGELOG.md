@@ -5,6 +5,33 @@
 
 ---
 
+## [Unreleased] — 2026-11-04（Provider 工具链架构 P1/P2 · ESP32 实机闭环）
+
+### 内核：工具链 provider（数据与执行分离）
+
+- 新增 `services/elab/provider.py`：manifest 校验（未知键/semver/`kernel_api`/超时）、
+  版本约束、注册表、`ResolvedToolchain` 解析、安装/卸载与内容哈希复核。
+- `services/elab/run.py` 改为统一执行器：`StepDecl` 的 `native` / `external` /
+  `unavailable` 三分支；`--dry-run` 与实跑共享同一个 toolchain，外部 build 成功按
+  `artifacts.map` 回填 RAM/FLASH。
+- 解析优先级：项目 `steps.<step>: tool:<name>` → provider `steps` → 无 provider 时的原生链；
+  `monitor` / `doctor_deep` 内核保留，provider 缺步骤直接报错不回退。
+- 新增 `elab provider list|search|install|remove`、`elab.lock.yaml` 与
+  `elab doctor --strict-lock`；`market/index.json` 新增 `providers` 数组。
+- `elab.adapt` 命中 `provider_hint` 时生成 provider 绑定；`--no-provider` 保留内联兜底。
+- 驾驶舱 `/api/projects` 卡片新增 `provider` / `steps`（kind+source）/ `delegated` /
+  `debug_backend` / `debug_features`。
+- ESP32-S31-Korvo 工程迁移为 `provider: espressif/idf@>=1 <2`；ESP-IDF v6.1 实机跑通
+  编译 → 烧录 → 烧录校验 → 串口心跳闭环。
+- 新增 `tests/test_provider.py`（manifest、优先级、等价 argv、安装哈希、卡片投影等 32 项）。
+
+### 仓库整理
+
+- 删除误生成的根 `package.json`、遗留 `projects/idf_adapt_probe.yaml.bak` 与未被引用的截图。
+- README、架构文档、ESP32 方案文档同步到 Provider 架构（内联 `tools:` 仅作兜底）。
+
+---
+
 ## [DSH 插件 0.5.1] — 2026-11-04（agent 上下文跨工程生效 · 面板放大/跟随）
 
 ### DSH 插件：agent 侧上下文跨工程生效

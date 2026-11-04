@@ -1,0 +1,25 @@
+{
+  "rev": 7,
+  "breakpoints": [
+    {
+      "id": "bp-3",
+      "kind": "func",
+      "location": "HardFault_Handler",
+      "condition": "",
+      "enabled": true,
+      "hardware": false
+    }
+  ],
+  "watches": [
+    {
+      "id": "w-1",
+      "expr": "xTickCount",
+      "format": "natural"
+    },
+    {
+      "id": "w-2",
+      "expr": "g_hb_frame.on_frame",
+      "format": "natural"
+    }
+  ]
+}
