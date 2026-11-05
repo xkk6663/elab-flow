@@ -244,5 +244,254 @@ class Decode(unittest.TestCase):
         self.assertIn("需要 profile", res["error"])
 
 
+class ValidateEnhanced(unittest.TestCase):
+    def test_old_profile_shape_is_unchanged(self):
+        p = sf.normalize_profile({"id": "p", "frame": {"length": 4}})
+        self.assertNotIn("length_field", p["frame"])
+        self.assertNotIn("id_field", p["frame"])
+        self.assertNotIn("variants", p)
+
+    def test_length_and_length_field_are_exclusive(self):
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({
+                "id": "p",
+                "frame": {"length": 8,
+                          "length_field": {"offset": 0, "type": "u8"}}})
+
+    def test_bit_field_rules(self):
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({"id": "p", "frame": {"length": 4}, "fields": [
+                {"name": "a", "offset": 0, "type": "f32",
+                 "bit_offset": 0, "bit_length": 3}]})
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({"id": "p", "frame": {"length": 4}, "fields": [
+                {"name": "a", "offset": 0, "type": "u8", "bit_offset": 2}]})
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({"id": "p", "frame": {"length": 1}, "fields": [
+                {"name": "a", "offset": 0, "type": "u8",
+                 "bit_offset": 4, "bit_length": 8}]})
+
+    def test_variants_need_id_field_and_unique_ids(self):
+        base = {"id": "p", "frame": {"head_hex": "AA", "tail_hex": "55"}}
+        with self.assertRaises(ValueError):
+            sf.normalize_profile(dict(base, variants=[
+                {"id": 1, "fields": []}]))
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({
+                **base,
+                "frame": {"head_hex": "AA", "tail_hex": "55",
+                          "id_field": {"offset": 1, "type": "u8"}},
+                "variants": [{"id": 1}, {"id": 1}]})
+
+    def test_variant_field_semantics_must_match(self):
+        with self.assertRaises(ValueError):
+            sf.normalize_profile({
+                "id": "p",
+                "frame": {"head_hex": "AA", "tail_hex": "55",
+                          "id_field": {"offset": 1, "type": "u8"}},
+                "variants": [
+                    {"id": 1, "fields": [
+                        {"name": "v", "offset": 2, "type": "u16"}]},
+                    {"id": 2, "fields": [
+                        {"name": "v", "offset": 2, "type": "u8"}]},
+                ]})
+
+
+class DecodeEnhanced(unittest.TestCase):
+    def test_bit_fields_lsb0_and_msb0(self):
+        lsb = sf.normalize_profile({
+            "id": "bits-lsb", "frame": {"length": 1},
+            "fields": [
+                {"name": "lo", "offset": 0, "type": "u8",
+                 "bit_offset": 0, "bit_length": 3, "bit_order": "lsb0"},
+                {"name": "hi", "offset": 0, "type": "u8",
+                 "bit_offset": 3, "bit_length": 5, "bit_order": "lsb0"}]})
+        res = codec.decode(b"\xA5", "profile:bits-lsb", profile=lsb)
+        self.assertEqual(res["records"][0]["fields"], {"lo": 5, "hi": 20})
+        msb = sf.normalize_profile({
+            "id": "bits-msb", "frame": {"length": 1},
+            "fields": [
+                {"name": "lo", "offset": 0, "type": "u8",
+                 "bit_offset": 0, "bit_length": 3, "bit_order": "msb0"},
+                {"name": "hi", "offset": 0, "type": "u8",
+                 "bit_offset": 3, "bit_length": 5, "bit_order": "msb0"}]})
+        res = codec.decode(b"\xA5", "profile:bits-msb", profile=msb)
+        self.assertEqual(res["records"][0]["fields"], {"lo": 5, "hi": 5})
+
+    def test_signed_bit_field_is_sign_extended(self):
+        p = sf.normalize_profile({
+            "id": "sbits", "frame": {"length": 1},
+            "fields": [{"name": "v", "offset": 0, "type": "i8",
+                        "bit_offset": 0, "bit_length": 4}]})
+        res = codec.decode(b"\x0F", "profile:sbits", profile=p)
+        self.assertEqual(res["records"][0]["fields"]["v"], -1)
+
+    def test_length_field_splits_variable_frames(self):
+        p = sf.normalize_profile({
+            "id": "var", "frame": {"head_hex": "AA",
+                                   "length_field": {"offset": 1,
+                                                    "type": "u8", "add": 2}},
+            "fields": [{"name": "v", "offset": 2, "type": "u8"}]})
+        data = b"\xAA\x03\x11\x22\x33" + b"\xAA\x01\x44"
+        res = codec.decode(data, "profile:var", profile=p)
+        self.assertEqual(res["total_frames"], 2)
+        self.assertEqual([r["fields"]["v"] for r in res["records"]], [17, 68])
+        self.assertEqual(res["pending_bytes"], 0)
+
+    def test_invalid_length_field_skips_and_resyncs(self):
+        p = sf.normalize_profile({
+            "id": "var", "frame": {"head_hex": "AA",
+                                   "length_field": {"offset": 1,
+                                                    "type": "u8", "add": 2}}})
+        res = codec.decode(b"\xAA\xFF\xAA\x01\x00", "profile:var", profile=p)
+        self.assertEqual(res["total_frames"], 1)
+        self.assertEqual(res["skipped"], 1)
+        self.assertIn("长度字段非法", " ".join(res["errors"]))
+
+    def test_variants_dispatch_and_union_channels(self):
+        p = sf.normalize_profile({
+            "id": "multi",
+            "frame": {"head_hex": "AA", "tail_hex": "55",
+                      "id_field": {"offset": 1, "type": "u8"}},
+            "variants": [
+                {"id": 1, "label": "speed", "fields": [
+                    {"name": "speed", "offset": 2, "type": "u16"}]},
+                {"id": 2, "label": "temp", "fields": [
+                    {"name": "temp", "offset": 2, "type": "i16"}]},
+            ]})
+        data = (b"\xAA\x01\x64\x00\x55" + b"\xAA\x02\x9C\xFF\x55")
+        res = codec.decode(data, "profile:multi", profile=p)
+        self.assertEqual(res["total_frames"], 2)
+        self.assertEqual(res["channels"], 2)
+        self.assertEqual([f["name"] for f in res["fields"]], ["speed", "temp"])
+        self.assertEqual(res["frames"], [[100.0, None], [None, -100.0]])
+        self.assertEqual([r["id"] for r in res["records"]], [1, 2])
+        self.assertEqual([r["variant"] for r in res["records"]],
+                         ["speed", "temp"])
+        self.assertEqual(res["unknown_id"], 0)
+
+    def test_unknown_id_without_default_fields(self):
+        p = sf.normalize_profile({
+            "id": "multi",
+            "frame": {"head_hex": "AA", "tail_hex": "55",
+                      "id_field": {"offset": 1, "type": "u8"}},
+            "variants": [{"id": 1, "fields": [
+                {"name": "v", "offset": 2, "type": "u8"}]}]})
+        res = codec.decode(b"\xAA\x09\x00\x55", "profile:multi", profile=p)
+        self.assertEqual(res["total_frames"], 0)
+        self.assertEqual(res["unknown_id"], 1)
+        self.assertEqual(res["skipped"], 1)
+
+
+class Encode(unittest.TestCase):
+    def test_fixed_frame_roundtrip(self):
+        p = _profile()
+        enc = codec.encode(p, {"rpm": 100, "temp": -1, "mode": "RUN"})
+        self.assertTrue(enc["ok"], enc)
+        self.assertEqual(enc["bytes"], 11)
+        self.assertEqual(enc["hex"], _frame().hex())
+        dec = codec.decode(bytes.fromhex(enc["hex"]), "profile:x", profile=p)
+        self.assertEqual(dec["records"][0]["fields"]["mode"], "RUN")
+
+    def test_bitfield_roundtrip(self):
+        p = sf.normalize_profile({
+            "id": "bits", "frame": {"length": 2},
+            "fields": [
+                {"name": "lo", "offset": 0, "type": "u8",
+                 "bit_offset": 0, "bit_length": 3},
+                {"name": "hi", "offset": 0, "type": "u8",
+                 "bit_offset": 3, "bit_length": 5},
+                {"name": "n", "offset": 1, "type": "u8"}]})
+        enc = codec.encode(p, {"lo": 5, "hi": 20, "n": 7})
+        self.assertEqual(enc["hex"], "a507")
+        dec = codec.decode(bytes.fromhex(enc["hex"]), "profile:bits",
+                           profile=p)
+        self.assertEqual(dec["records"][0]["fields"],
+                         {"lo": 5, "hi": 20, "n": 7})
+
+    def test_length_field_roundtrip(self):
+        p = sf.normalize_profile({
+            "id": "var", "frame": {"head_hex": "AA",
+                                   "length_field": {"offset": 1,
+                                                    "type": "u8", "add": 2}},
+            "fields": [{"name": "v", "offset": 2, "type": "u8"}]})
+        enc = codec.encode(p, {"v": 17})
+        self.assertEqual(enc["hex"], "aa0111")
+        self.assertEqual(enc["length_field"], 1)
+        dec = codec.decode(bytes.fromhex(enc["hex"]), "profile:var", profile=p)
+        self.assertEqual(dec["records"][0]["fields"]["v"], 17)
+
+    def test_variant_encode_and_decode(self):
+        p = sf.normalize_profile({
+            "id": "multi",
+            "frame": {"head_hex": "AA", "tail_hex": "55",
+                      "id_field": {"offset": 1, "type": "u8"}},
+            "variants": [
+                {"id": 1, "label": "speed", "fields": [
+                    {"name": "speed", "offset": 2, "type": "u16"}]}]})
+        enc = codec.encode(p, {"speed": 100}, variant_id="0x01")
+        self.assertEqual(enc["hex"], "aa01640055")
+        dec = codec.decode(bytes.fromhex(enc["hex"]), "profile:multi",
+                           profile=p)
+        self.assertEqual(dec["records"][0]["variant"], "speed")
+
+    def test_encode_errors_are_reported(self):
+        p = sf.normalize_profile({
+            "id": "multi",
+            "frame": {"head_hex": "AA", "tail_hex": "55",
+                      "id_field": {"offset": 1, "type": "u8"}},
+            "variants": [{"id": 1, "fields": []}]})
+        self.assertIn("必须给 variant", codec.encode(p, {})["error"])
+        p2 = sf.normalize_profile({"id": "p", "frame": {"length": 2},
+                                   "fields": [{"name": "a", "offset": 0,
+                                               "type": "u8"}]})
+        self.assertIn("范围", codec.encode(p2, {"a": 999})["error"])
+
+
+class Templates(unittest.TestCase):
+    def test_repo_templates_validate(self):
+        cfg = FakeCfg(Path(__file__).resolve().parents[1])
+        res = sf.list_templates(cfg)
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertEqual([t["id"] for t in res["templates"]],
+                         ["dlt645_read", "mavlink_v1", "modbus_rtu",
+                          "telemetry_u16"])
+
+    def test_import_template_saves_with_rev(self):
+        import json
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = (Path(__file__).resolve().parents[1]
+                   / "templates" / "frames" / "modbus_rtu.json")
+            dst = root / "templates" / "frames"
+            dst.mkdir(parents=True)
+            shutil.copy(src, dst / "modbus_rtu.json")
+            cfg = FakeCfg(root)
+            res = sf.import_template(cfg, "p1", 0, "modbus_rtu",
+                                     new_id="mb-demo")
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(res["imported"], "mb-demo")
+            self.assertEqual(sf.get(cfg, "p1", "mb-demo")["label"],
+                             "Modbus RTU 响应（多 ID）")
+            stale = sf.import_template(cfg, "p1", 0, "modbus_rtu")
+            self.assertFalse(stale["ok"])
+            self.assertTrue(stale.get("conflict"))
+
+    def test_broken_template_does_not_block_others(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dst = root / "templates" / "frames"
+            dst.mkdir(parents=True)
+            (dst / "bad.json").write_text("{not json", encoding="utf-8")
+            (dst / "ok.json").write_text(json.dumps({
+                "id": "ok", "frame": {"length": 1}}), encoding="utf-8")
+            res = sf.list_templates(FakeCfg(root))
+            self.assertFalse(res["ok"])
+            self.assertEqual([t["id"] for t in res["templates"]], ["ok"])
+            self.assertIn("bad.json", res["errors"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

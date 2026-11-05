@@ -10,7 +10,7 @@
  */
 
 import React from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
 import type {
@@ -24,6 +24,7 @@ import type {
   DebugRtosResponse,
   DebugSessionSnapshot,
   DebugStackFrame,
+  DebugSvdField,
   DebugVarNode,
   DebugWatchItem,
 } from '../../../domain/debug.ts'
@@ -103,6 +104,21 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
   const [periph, setPeriph] = useState<DebugPeripheralsResponse | null>(null)
   const [rtos, setRtos] = useState<DebugRtosResponse | null>(null)
   const [audit, setAudit] = useState<DebugAuditRecord[]>([])
+  // P1/P2 行内编辑（一次只编辑一个单元）
+  const [editCell, setEditCell] = useState<{ addr: string; value: string; orig: string } | null>(null)
+  const [editReg, setEditReg] = useState<{ name: string; value: string; orig: string } | null>(null)
+  const [editField, setEditField] = useState<{
+    reg: string; addr: string; size: number; base: number
+    offset: number; width: number; value: string
+  } | null>(null)
+  const [svdQuery, setSvdQuery] = useState('')
+  const [svdCollapsed, setSvdCollapsed] = useState<Record<string, boolean>>({})
+  /** 断点命中提示（自动消失，不抢焦点） */
+  const [bpToast, setBpToast] = useState('')
+  /** 宽屏（≥680px）双列：左栈/变量/监视，右寄存器/外设 */
+  const [wide, setWide] = useState(false)
+  const pcRef = useRef<HTMLDivElement | null>(null)
+  const dataRef = useRef<HTMLDivElement | null>(null)
 
   const outId = useRef(0)
   const dataSeq = useRef(-1)
@@ -239,6 +255,90 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     }
   }, [memAddr, memCount, sessionId])
 
+  /** 行内写 1 字节（需人类会话 allow_write；内核记 before/after 审计）。 */
+  const commitByte = useCallback(async (addr: string, raw: string, orig: string): Promise<void> => {
+    const v = raw.trim().replace(/^0x/i, '')
+    if (!/^[0-9a-fA-F]{1,2}$/.test(v)) {
+      setError({ code: 'debug-write-invalid', message: '请输入 1 字节 HEX（00–FF）' })
+      return
+    }
+    const value = v.padStart(2, '0').toLowerCase()
+    setEditCell(null)
+    if (value === orig.toLowerCase()) return
+    try {
+      await api.debugWrite({ target: 'memory', addr, value, confirm: true, sessionId })
+      pushOut(`写内存 ${addr} <- 0x${value}`)
+      await readMem()
+    } catch (e) {
+      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+    }
+  }, [api, sessionId, pushOut, readMem])
+
+  /** 行内写寄存器（32 位 HEX，只允许内核白名单里的 core 寄存器）。 */
+  const commitReg = useCallback(async (name: string, raw: string, orig: string): Promise<void> => {
+    let v = raw.trim()
+    if (v.toLowerCase().startsWith('0x')) v = v.slice(2)
+    if (!/^[0-9a-fA-F]{1,8}$/.test(v)) {
+      setError({ code: 'debug-write-invalid', message: '寄存器值需 1–8 位 HEX（32 位）' })
+      return
+    }
+    const value = v.padStart(8, '0').toLowerCase()
+    setEditReg(null)
+    const normOrig = orig.trim().toLowerCase().replace(/^0x/, '').padStart(8, '0')
+    if (value === normOrig) return
+    try {
+      await api.debugWrite({ target: 'register', name, value, confirm: true, sessionId })
+      pushOut(`写寄存器 ${name} <- 0x${value}`)
+      const r = await api.debugRegisters({ group: 'core', sessionId })
+      setRegs(r.groups)
+    } catch (e) {
+      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+    }
+  }, [api, sessionId, pushOut])
+
+  /** SVD 字段写：读-改-写，保留同寄存器其它位，按寄存器宽度写回。 */
+  const commitField = useCallback(async (): Promise<void> => {
+    const ef = editField
+    if (ef === null) return
+    const raw = ef.value.trim()
+    const num = raw.toLowerCase().startsWith('0x')
+      ? Number.parseInt(raw.slice(2), 16)
+      : Number.parseInt(raw, 10)
+    const max = ef.width >= 32 ? 0x100000000 : 2 ** ef.width
+    if (!Number.isFinite(num) || num < 0 || num >= max) {
+      setError({ code: 'debug-write-invalid', message: `字段 ${ef.width} 位，范围 0–${max - 1}` })
+      return
+    }
+    const mask = ef.width >= 32 ? 0xffffffff : (2 ** ef.width - 1)
+    const next = ((ef.base >>> 0) & ~mask | ((num << ef.offset) & mask)) >>> 0
+    const bytes = Math.max(1, Math.min(4, Math.ceil(ef.size / 8)))
+    // 内核写内存按字节序列落盘（gdb -data-write-memory-bytes）；ARM 是小端：
+    // 必须把整值拆成「低字节在前」，否则 0x0000a00f 会被写成 0x0fa00000。
+    const value = Array.from({ length: bytes },
+      (_, i) => ((next >>> (i * 8)) & 0xff).toString(16).padStart(2, '0')).join('')
+    setEditField(null)
+    try {
+      await api.debugWrite({ target: 'memory', addr: ef.addr, value, confirm: true, sessionId })
+      pushOut(`写字段 ${ef.reg} <- ${raw}（寄存器 0x${value}）`)
+      setPeriph(await api.debugPeripherals({ path: ef.reg, read: true, sessionId }))
+    } catch (e) {
+      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+    }
+  }, [api, editField, sessionId, pushOut])
+
+  /** 反汇编行内「设地址断点」，并回列表刷新。 */
+  const addAddrBp = useCallback(async (addr: string): Promise<void> => {
+    try {
+      await api.debugBreakpoints({ op: 'add', kind: 'addr', location: addr, sessionId })
+      const r = await api.debugBreakpoints({ sessionId })
+      setBps(r.breakpoints)
+      setAllowWrite(r.allow_write === true)
+      pushOut(`地址断点 + ${addr}`)
+    } catch (e) {
+      setError({ code: 'debug-breakpoint-failed', message: e instanceof Error ? e.message : String(e) })
+    }
+  }, [api, sessionId, pushOut])
+
   const loadPeriph = useCallback(async (path: string, read: boolean): Promise<void> => {
     try {
       setPeriph(await api.debugPeripherals({ path, read, sessionId }))
@@ -292,8 +392,18 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         void reloadSession()
         return
       }
-      if (topic === 'debug/opened' || topic === 'debug/state' || topic === 'debug/stop'
-          || topic === 'debug/breakpoint') {
+      if (topic === 'debug/stop') {
+        const reason = String(data.reason ?? '')
+        const bkpt = String(data.bkptno ?? '')
+        if (reason === 'breakpoint-hit' || bkpt !== '') {
+          setBpToast(bkpt === '' ? '命中断点，已切到调用栈' : `命中断点 #${bkpt}，已切到调用栈`)
+          setTab('stack')
+          setFrameIdx(0)
+        }
+        void reloadSession()
+        return
+      }
+      if (topic === 'debug/opened' || topic === 'debug/state' || topic === 'debug/breakpoint') {
         void reloadSession()
       }
     }
@@ -306,6 +416,57 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     return () => es.close()
   }, [visible, available, snap?.id, sessionId, pushOut, reloadSession]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 容器宽度探测：窄栏保持单列，宽屏启用双列（不依赖 DSH 栏位宽度约定）
+  useEffect(() => {
+    const el = dataRef.current
+    if (el === null || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0
+      setWide(w >= 680)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [available])
+
+  // P2：SVD 搜索 + 按 group 分组（折叠状态本地保存）
+  const svdGroups = useMemo(() => {
+    const q = svdQuery.trim().toLowerCase()
+    const list = (periph?.peripherals ?? []).filter((p) =>
+      q === '' || p.name.toLowerCase().includes(q)
+      || (p.description ?? '').toLowerCase().includes(q))
+    const map = new Map<string, typeof list>()
+    for (const p of list) {
+      const g = p.group !== undefined && p.group.trim() !== '' ? p.group : '其它'
+      const cur = map.get(g)
+      if (cur !== undefined) cur.push(p)
+      else map.set(g, [p])
+    }
+    return Array.from(map.entries())
+  }, [periph, svdQuery])
+
+  const svdRegs = useMemo(() => {
+    const q = svdQuery.trim().toLowerCase()
+    return (periph?.peripheral?.registers ?? []).filter((r) =>
+      q === '' || r.name.toLowerCase().includes(q)
+      || (r.description ?? '').toLowerCase().includes(q))
+  }, [periph, svdQuery])
+
+  // 断点命中提示 3s 自动消失
+  useEffect(() => {
+    if (bpToast === '') return
+    const timer = window.setTimeout(() => setBpToast(''), 3000)
+    return () => window.clearTimeout(timer)
+  }, [bpToast])
+
+  // 反汇编 PC 行自动滚到视野中央
+  useEffect(() => {
+    if (tab !== 'disasm') return
+    const el = pcRef.current
+    if (el !== null && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'center', behavior: 'auto' })
+    }
+  }, [disasm, tab])
+
   // ── 动作 ──
   const open = useCallback(async (): Promise<void> => {
     setBusy(true)
@@ -314,6 +475,8 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
       const r = await api.debugOpen({
         project,
         options: { stop_at: 'main' },
+        lease_s: 600,
+        allow_write: true,
         sessionId,
       })
       applySnap(r.session)
@@ -500,6 +663,12 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         </div>
       )}
 
+      {bpToast !== '' && (
+        <div style={{ flex: '0 0 auto', margin: '3px 6px', padding: '3px 8px', border: '1px solid var(--elab-accent)', borderRadius: 'var(--elab-radius-sm)', background: 'var(--elab-bg-raised)', color: 'var(--elab-accent)', fontSize: 'var(--elab-fs-xs)' }}>
+          {bpToast}
+        </div>
+      )}
+
       {/* 子页签 */}
       {snap !== null && (
         <div style={{ display: 'flex', gap: '2px', flex: '0 0 auto', padding: '3px 6px', borderBottom: '1px solid var(--elab-border)', flexWrap: 'wrap' }}>
@@ -520,8 +689,9 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         </div>
       )}
 
-      {/* 数据区 */}
-      <div style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', background: 'var(--elab-bg-surface)' }}>
+      {/* 数据区：窄栏单列；宽屏（≥680px）左右双列（左栈/变量/监视，右寄存器/外设） */}
+      <div ref={dataRef} style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', overflow: 'hidden', background: 'var(--elab-bg-surface)' }}>
+      <div style={{ flex: '1 1 auto', minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         {snap === null && (
           <div style={{ padding: 'var(--elab-space-3)', color: 'var(--elab-fg-secondary)', fontSize: 'var(--elab-fs-sm)', lineHeight: 1.6 }}>
             {project === ''
@@ -587,18 +757,45 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
             {regs.map((g) => (
               <div key={g.name}>
                 <div style={{ padding: '3px 6px', color: 'var(--elab-fg-muted)', ...MONO }}>{g.label}</div>
-                {g.regs.map((r) => (
-                  <div key={r.name} style={ROW}>
-                    <span style={{ color: r.pc ? 'var(--elab-accent)' : 'var(--elab-fg-secondary)', flex: '0 0 52px' }}>{r.name}</span>
-                    <span style={{ color: 'var(--elab-fg-primary)', ...MONO }}>{r.hex}</span>
-                    <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>{r.natural}</span>
-                    {r.flags !== undefined && (
-                      <span style={{ color: 'var(--elab-status-run)', ...MONO }}>
-                        {Object.entries(r.flags).filter(([, v]) => v === 1).map(([k]) => k).join('')}
-                      </span>
-                    )}
-                  </div>
-                ))}
+                {g.regs.map((r) => {
+                  const editable = r.editable === true && allowWrite
+                  const editing = editReg?.name === r.name
+                  return (
+                    <div key={r.name} style={ROW}>
+                      <span style={{ color: r.pc ? 'var(--elab-accent)' : 'var(--elab-fg-secondary)', flex: '0 0 52px' }}>{r.name}</span>
+                      {editing ? (
+                        <input
+                          autoFocus
+                          maxLength={10}
+                          value={editReg.value}
+                          aria-label={`编辑寄存器 ${r.name}`}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditReg({ ...editReg, value: e.currentTarget.value })}
+                          onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                            if (e.key === 'Enter') void commitReg(r.name, editReg.value, editReg.orig)
+                            if (e.key === 'Escape') setEditReg(null)
+                          }}
+                          onBlur={() => setEditReg(null)}
+                          style={{ width: '84px', padding: '0 3px', border: '1px solid var(--elab-accent)', borderRadius: '2px', background: 'var(--elab-bg-code)', color: 'var(--elab-fg-primary)', ...MONO }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          title={editable ? `点击改写 ${r.name}` : '不可写'}
+                          onClick={() => editable ? setEditReg({ name: r.name, value: r.hex, orig: r.hex }) : undefined}
+                          style={{ padding: '0 2px', border: '1px dashed transparent', borderRadius: '2px', background: 'transparent', color: 'var(--elab-fg-primary)', cursor: editable ? 'pointer' : 'default', ...MONO }}
+                        >
+                          {r.hex}
+                        </button>
+                      )}
+                      <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>{r.natural}</span>
+                      {r.flags !== undefined && (
+                        <span style={{ color: 'var(--elab-status-run)', ...MONO }}>
+                          {Object.entries(r.flags).filter(([, v]) => v === 1).map(([k]) => k).join('')}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             ))}
             {regs.length === 0 && <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>（目标运行中，寄存器不可读）</div>}
@@ -673,12 +870,52 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
               <button type="button" onClick={() => void readMem()} style={BTN}>读取</button>
             </div>
             {mem !== null && (
-              <pre style={{ ...MONO, margin: 0, padding: '4px 6px', color: 'var(--elab-fg-primary)', whiteSpace: 'pre', overflow: 'auto' }}>
-                {memDump(mem)}
-              </pre>
+              <div style={{ ...MONO, padding: '4px 6px', color: 'var(--elab-fg-primary)' }}>
+                {memRows(mem).map((row) => (
+                  <div key={row.addr} style={{ display: 'flex', alignItems: 'center', whiteSpace: 'pre' }}>
+                    <span style={{ color: 'var(--elab-fg-faint)', marginRight: '6px' }}>{row.addr}</span>
+                    {row.bytes.map((b, i) => {
+                      const addr = `0x${(Number.parseInt(row.addr, 16) + i).toString(16).padStart(8, '0')}`
+                      const editing = editCell?.addr === addr
+                      if (editing) {
+                        return (
+                          <input
+                            key={addr}
+                            autoFocus
+                            maxLength={2}
+                            value={editCell.value}
+                            aria-label={`编辑 ${addr}`}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditCell({ ...editCell, value: e.currentTarget.value })}
+                            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                              if (e.key === 'Enter') void commitByte(addr, editCell.value, editCell.orig)
+                              if (e.key === 'Escape') setEditCell(null)
+                            }}
+                            onBlur={() => setEditCell(null)}
+                            style={{ width: '20px', margin: '0 1px', padding: 0, textAlign: 'center', border: '1px solid var(--elab-accent)', borderRadius: '2px', background: 'var(--elab-bg-surface)', color: 'var(--elab-fg-primary)', font: 'inherit' }}
+                          />
+                        )
+                      }
+                      return allowWrite ? (
+                        <button
+                          key={addr}
+                          type="button"
+                          title={`点击编辑 ${addr}（当前 0x${b}）`}
+                          onClick={() => setEditCell({ addr, value: b, orig: b })}
+                          style={{ minWidth: '17px', margin: '0 1px', padding: 0, border: 'none', borderRadius: '2px', background: 'transparent', color: 'var(--elab-fg-primary)', font: 'inherit', cursor: 'pointer' }}
+                        >
+                          {b}
+                        </button>
+                      ) : (
+                        <span key={addr} style={{ minWidth: '17px', margin: '0 1px', textAlign: 'center' }}>{b}</span>
+                      )
+                    })}
+                    <span style={{ color: 'var(--elab-fg-muted)', marginLeft: '6px' }}>{row.ascii}</span>
+                  </div>
+                ))}
+              </div>
             )}
             <div style={{ padding: '4px 6px', color: 'var(--elab-fg-muted)', fontSize: 'var(--elab-fs-xs)' }}>
-              写内存只在人类会话且 allow_write=true 时可用，写前写后值进审计（Agent 默认拒绝）。
+              {allowWrite ? '点 HEX 字节可直接改写（内核记 before/after 审计）。' : '只读：写内存需要人类会话且 allow_write=true。'}
             </div>
           </div>
         )}
@@ -691,12 +928,39 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
             </div>
             {disasm === null && <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>（暂无指令；目标需暂停）</div>}
             {disasm?.instructions.map((ins) => (
-              <div key={ins.addr} style={{ ...ROW, background: ins.pc ? 'var(--elab-bg-raised)' : 'transparent' }}>
-                <span style={{ ...MONO, color: ins.pc ? 'var(--elab-accent)' : 'var(--elab-fg-faint)', flex: '0 0 74px' }}>{ins.addr}</span>
+              <div
+                key={ins.addr}
+                ref={ins.pc ? pcRef : undefined}
+                style={{ ...ROW, background: ins.pc ? 'var(--elab-bg-raised)' : 'transparent' }}
+              >
+                <button
+                  type="button"
+                  title="跳到内存视图"
+                  onClick={() => {
+                    setMemAddr(ins.addr)
+                    setTab('mem')
+                    void api.debugMemory({ addr: ins.addr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId })
+                      .then(setMem).catch(() => undefined)
+                  }}
+                  style={{ ...MONO, flex: '0 0 74px', padding: 0, border: 'none', background: 'none', color: ins.pc ? 'var(--elab-accent)' : 'var(--elab-fg-faint)', cursor: 'pointer', textAlign: 'left' }}
+                >
+                  {ins.addr}
+                </button>
+                {ins.pc && (
+                  <span style={{ ...MONO, flex: '0 0 auto', padding: '0 3px', borderRadius: '2px', background: 'var(--elab-accent)', color: 'var(--elab-bg-canvas)' }}>PC</span>
+                )}
                 <span style={{ ...MONO, color: 'var(--elab-fg-primary)', flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {`${ins.mnemonic} ${ins.operands}`}
                 </span>
                 {ins.symbol !== '' && <span style={{ ...MONO, color: 'var(--elab-fg-muted)', flex: '0 0 auto', maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ins.symbol}</span>}
+                <button
+                  type="button"
+                  title="在此地址设断点"
+                  onClick={() => void addAddrBp(ins.addr)}
+                  style={{ ...BTN, flex: '0 0 auto', padding: '0 4px' }}
+                >
+                  ⌖
+                </button>
               </div>
             ))}
           </div>
@@ -709,23 +973,51 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
               {periph?.level !== 'device' && periph?.peripheral !== undefined && (
                 <span style={{ ...MONO, color: 'var(--elab-accent)' }}>{periph.peripheral.name}</span>
               )}
+              {periph?.level !== 'register' && (
+                <input
+                  value={svdQuery}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSvdQuery(e.currentTarget.value)}
+                  placeholder={periph?.level === 'device' ? '搜索外设' : '搜索寄存器'}
+                  style={{ ...INPUT, flex: '0 0 108px' }}
+                />
+              )}
               <button type="button" onClick={() => void loadPeriph('', false)} style={{ ...BTN, marginLeft: 'auto' }}>顶层</button>
             </div>
             {periph === null && <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>（无 SVD 或目标未暂停）</div>}
-            {periph?.level === 'device' && (periph.peripherals ?? []).map((p) => (
-              <button key={p.name} type="button" onClick={() => void loadPeriph(p.name, false)} style={{ ...ROW, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--elab-fg-primary)' }}>
-                <span style={{ ...MONO, color: 'var(--elab-accent)', flex: '0 0 76px' }}>{p.name}</span>
-                <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{p.base}</span>
-                <span style={{ marginLeft: 'auto', ...MONO, color: 'var(--elab-fg-faint)' }}>{`${p.registers_count ?? 0} reg`}</span>
-              </button>
-            ))}
-            {periph?.level === 'peripheral' && (periph.peripheral?.registers ?? []).map((r) => (
+            {periph?.level === 'device' && svdGroups.map(([group, items]) => {
+              const folded = svdCollapsed[group] === true
+              return (
+                <div key={group}>
+                  <button
+                    type="button"
+                    onClick={() => setSvdCollapsed((prev) => ({ ...prev, [group]: !folded }))}
+                    style={{ ...ROW, width: '100%', border: 'none', background: 'transparent', color: 'var(--elab-fg-muted)', cursor: 'pointer', ...MONO }}
+                  >
+                    {`${folded ? '▸' : '▾'} ${group} · ${items.length}`}
+                  </button>
+                  {!folded && items.map((p) => (
+                    <button key={p.name} type="button" onClick={() => void loadPeriph(p.name, false)} style={{ ...ROW, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--elab-fg-primary)' }}>
+                      <span style={{ ...MONO, color: 'var(--elab-accent)', flex: '0 0 76px' }}>{p.name}</span>
+                      <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{p.base}</span>
+                      <span style={{ marginLeft: 'auto', ...MONO, color: 'var(--elab-fg-faint)' }}>{`${p.registers_count ?? 0} reg`}</span>
+                    </button>
+                  ))}
+                </div>
+              )
+            })}
+            {periph?.level === 'device' && svdGroups.length === 0 && (
+              <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>没有匹配的外设</div>
+            )}
+            {periph?.level === 'peripheral' && svdRegs.map((r) => (
               <button key={r.name} type="button" onClick={() => void loadPeriph(`${periph.peripheral?.name ?? ''}.${r.name}`, true)} style={{ ...ROW, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--elab-fg-primary)' }}>
                 <span style={{ ...MONO, color: 'var(--elab-accent)', flex: '0 0 86px' }}>{r.name}</span>
                 <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{r.addr}</span>
                 <span style={{ marginLeft: 'auto', ...MONO, color: 'var(--elab-fg-faint)' }}>{`${r.fields_count ?? 0} 字段`}</span>
               </button>
             ))}
+            {periph?.level === 'peripheral' && svdRegs.length === 0 && (
+              <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>没有匹配的寄存器</div>
+            )}
             {periph?.level === 'register' && periph.register !== undefined && (
               <div>
                 <div style={{ ...ROW, color: 'var(--elab-fg-primary)' }}>
@@ -733,15 +1025,52 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
                   <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{periph.register.addr}</span>
                   <span style={{ marginLeft: 'auto', ...MONO, color: 'var(--elab-accent)' }}>{periph.register.value ?? '—'}</span>
                 </div>
-                {(periph.register.fields ?? []).map((f) => (
-                  <div key={f.name} style={ROW}>
-                    <span style={{ ...MONO, color: 'var(--elab-fg-secondary)', flex: '0 0 96px' }}>{f.name}</span>
-                    <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{`[${f.bits}]`}</span>
-                    <span style={{ marginLeft: 'auto', ...MONO, color: 'var(--elab-fg-primary)' }}>
-                      {f.enum !== null ? f.enum.name : `0x${f.value.toString(16)}`}
-                    </span>
-                  </div>
-                ))}
+                {(periph.register.fields ?? []).map((f: DebugSvdField) => {
+                  const writable = allowWrite && /write/i.test(periph.register?.access ?? '')
+                  const editing = editField?.reg === `${periph.peripheral?.name ?? ''}.${periph.register?.name}`
+                    && editField.offset === f.offset
+                  const base = Number.parseInt(String(periph.register?.value ?? '0').replace(/^0x/, ''), 16) || 0
+                  return (
+                    <div key={f.name} style={ROW}>
+                      <span style={{ ...MONO, color: 'var(--elab-fg-secondary)', flex: '0 0 96px' }}>{f.name}</span>
+                      <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>{`[${f.bits}]`}</span>
+                      {editing ? (
+                        <input
+                          autoFocus
+                          value={editField.value}
+                          aria-label={`编辑字段 ${f.name}`}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditField({ ...editField, value: e.currentTarget.value })}
+                          onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                            if (e.key === 'Enter') void commitField()
+                            if (e.key === 'Escape') setEditField(null)
+                          }}
+                          onBlur={() => setEditField(null)}
+                          style={{ marginLeft: 'auto', width: '72px', padding: '0 3px', border: '1px solid var(--elab-accent)', borderRadius: '2px', background: 'var(--elab-bg-code)', color: 'var(--elab-fg-primary)', ...MONO }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          title={writable ? `点击改写字段 ${f.name}（读-改-写）` : '字段只读'}
+                          onClick={() => {
+                            if (!writable || periph.register === undefined) return
+                            setEditField({
+                              reg: `${periph.peripheral?.name ?? ''}.${periph.register.name}`,
+                              addr: periph.register.addr,
+                              size: periph.register.size,
+                              base,
+                              offset: f.offset,
+                              width: f.width,
+                              value: String(f.value),
+                            })
+                          }}
+                          style={{ marginLeft: 'auto', padding: '0 2px', border: '1px dashed transparent', borderRadius: '2px', background: 'transparent', color: 'var(--elab-fg-primary)', cursor: writable ? 'pointer' : 'default', ...MONO }}
+                        >
+                          {f.enum !== null ? f.enum.name : `0x${f.value.toString(16)}`}
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -802,6 +1131,51 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         )}
       </div>
 
+      {wide && (tab === 'stack' || tab === 'vars' || tab === 'watch') && (
+        <aside style={{ flex: '0 0 42%', minWidth: '170px', borderLeft: '1px solid var(--elab-border)', overflow: 'auto' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 6px', borderBottom: '1px solid var(--elab-border)' }}>
+            <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>寄存器</span>
+            {snap?.svd.available === true && <span style={{ ...MONO, color: 'var(--elab-fg-faint)' }}>· SVD 就绪</span>}
+            <button type="button" onClick={() => setTab('regs')} style={{ ...BTN, marginLeft: 'auto' }}>全屏</button>
+          </div>
+          {regs.map((g) => (
+            <div key={g.name}>
+              <div style={{ padding: '3px 6px', color: 'var(--elab-fg-muted)', ...MONO }}>{g.label}</div>
+              {g.regs.map((r) => (
+                <div key={r.name} style={ROW}>
+                  <span style={{ color: r.pc ? 'var(--elab-accent)' : 'var(--elab-fg-secondary)', flex: '0 0 48px', ...MONO }}>{r.name}</span>
+                  <span style={{ color: 'var(--elab-fg-primary)', ...MONO }}>{r.hex}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {regs.length === 0 && <div style={{ padding: '6px', color: 'var(--elab-fg-muted)', ...MONO }}>（目标运行中，寄存器不可读）</div>}
+          <div style={{ display: 'flex', gap: '4px', padding: '4px 6px', borderTop: '1px solid var(--elab-border)' }}>
+            <span style={{ ...MONO, color: 'var(--elab-fg-muted)' }}>外设</span>
+            <button type="button" onClick={() => setTab('periph')} style={{ ...BTN, marginLeft: 'auto' }}>打开</button>
+          </div>
+        </aside>
+      )}
+
+      {wide && (tab === 'regs' || tab === 'periph') && (
+        <aside style={{ flex: '0 0 40%', minWidth: '160px', order: -1, borderRight: '1px solid var(--elab-border)', overflow: 'auto' }}>
+          <div style={{ padding: '4px 6px', borderBottom: '1px solid var(--elab-border)', color: 'var(--elab-fg-muted)', ...MONO }}>调用栈</div>
+          {frames.slice(0, 12).map((f, i) => (
+            <button
+              key={`${f.addr}-${i}`}
+              type="button"
+              onClick={() => { setTab('stack'); selectFrame(i) }}
+              style={{ ...ROW, width: '100%', border: 'none', borderBottom: '1px solid var(--elab-border)', background: i === frameIdx ? 'var(--elab-bg-raised)' : 'transparent', color: 'var(--elab-fg-primary)', cursor: 'pointer' }}
+            >
+              <span style={{ ...MONO, color: 'var(--elab-accent)', flex: '0 0 18px' }}>{`#${i}`}</span>
+              <span style={{ ...MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.func || f.addr}</span>
+            </button>
+          ))}
+          {frames.length === 0 && <div style={{ padding: '6px', color: 'var(--elab-fg-muted)', ...MONO }}>（暂停后可见）</div>}
+        </aside>
+      )}
+      </div>
+
       {/* 底部提示 */}
       {snap !== null && (
         <div style={{ flex: '0 0 auto', padding: '3px 6px', borderTop: '1px solid var(--elab-border)', color: 'var(--elab-fg-muted)', fontSize: 'var(--elab-fs-xs)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -814,18 +1188,26 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
   )
 }
 
-/** 内存 hex dump（16 字节一行，左地址右 ASCII）。 */
-function memDump(m: DebugMemoryResponse): string {
+type MemRow = { addr: string; bytes: string[]; ascii: string }
+
+/** 16 字节一行（字节单元可编辑 → 需要独立展示，不能再拼成一段文本）。 */
+function memRows(m: DebugMemoryResponse): MemRow[] {
   const raw = m.bytes.split(/\s+/).filter((x) => x !== '')
   const start = Number.parseInt(m.addr, 16)
-  if (raw.length === 0 || !Number.isFinite(start)) return '（无数据）'
-  const lines: string[] = []
+  if (raw.length === 0 || !Number.isFinite(start)) return []
+  const rows: MemRow[] = []
   for (let i = 0; i < raw.length; i += 16) {
     const chunk = raw.slice(i, i + 16)
-    const addr = `0x${(start + i).toString(16).padStart(8, '0')}`
-    lines.push(`${addr}  ${chunk.join(' ').padEnd(47, ' ')}  ${m.ascii.slice(i, i + 16)}`)
+    rows.push({
+      addr: `0x${(start + i).toString(16).padStart(8, '0')}`,
+      bytes: chunk,
+      ascii: chunk.map((b) => {
+        const n = Number.parseInt(b, 16)
+        return n >= 32 && n < 127 ? String.fromCharCode(n) : '.'
+      }).join(''),
+    })
   }
-  return lines.join('\n')
+  return rows
 }
 
 function healthColor(h: 'ok' | 'warn' | 'critical'): string {

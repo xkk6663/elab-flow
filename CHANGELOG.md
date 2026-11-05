@@ -5,6 +5,55 @@
 
 ---
 
+## [Unreleased] — 2026-11-05（帧协议 P0/P1 · 位域 / 变长 / 多 ID / 组帧）
+
+### 内核：帧协议 P0（位域 / 变长 / 多 ID）
+
+- `services/elab/serialframes.py`：字段支持 `bit_offset` / `bit_length` / `bit_order`
+  （`lsb0` 默认、`msb0` 线性大端位流），有符号位域做符号扩展；位域只允许整型。
+- 新增 `frame.length_field`（`type: u8|u16`、`offset/endian/mul/add`），
+  `total = raw*mul + add`；与 `frame.length` 互斥，非法长度进 `skipped` 并重新同步。
+- 新增 `frame.id_field` + `variants`：按 id 分发字段，变体 id 唯一；未命中且有顶层字段则兜底，
+  否则 `unknown_id++` 并跳过。
+- `services/elab/serialcodec.py`：解码支持位域 / 变长 / variant 分发；通道取 variant 字段并集，
+  缺失值输出 `null`；返回新增 `unknown_id`。
+
+### 内核：帧协议 P1（模板 / 组帧）
+
+- 新增 `serialcodec.encode`：字段值 → 字节（枚举 label、逆 `scale/bias`、位写入、
+  固定长/变长反算、head/tail/id/length/checksum 自动写）。
+- 新增只读模板库 `templates/frames/*.json`：`telemetry_u16`、`mavlink_v1`、
+  `modbus_rtu`、`dlt645_read`；`serialframes.list_templates/get_template/import_template`。
+- `cockpit/server.py`：`SERIAL_META.frames` 扩充 `schema` / `templates` / `features`；
+  新增 `GET /api/serial/frames/templates`、`POST /api/serial/frames/templates/import`、
+  `POST /api/serial/frames/encode`；preview 与 `/api/serial/decode` 支持未保存 `profile` 草稿；
+  保存/删除 profile 后活动 `profile:<id>` 会话热更新。
+- 旧 profile 输出形状不变：未启用新特性时不出现 `length_field` / `id_field` / `variants` 键。
+- `tests/test_serialframes.py` 新增 `ValidateEnhanced` / `DecodeEnhanced` / `Encode` / `Templates`。
+
+### 驾驶舱前端
+
+- 帧协议抽屉：模板下拉 + `导入`、草稿预览（无需先保存）、组帧（字段值 → HEX 并填入发送框）、
+  预览记录表新增 `ID` 列。
+- 波形通道名只取 `plot` 字段，修复「枚举字段错位标到曲线」；`frames` / `values` 容忍 `null`。
+
+### DSH 插件
+
+- 新增 `elab_frame_profile`（list/get/preview/save/delete/encode/templates/import）；
+  Agent 只写声明式 JSON；写操作受 `allowAgentWrite` + `rev` 乐观锁。
+- `elab_serial_decode` 支持 `project` + `profile` 草稿（草稿 apply 需先落盘）；
+  `elab_serial_monitor` 描述补充 `profile:<id>`。
+- HTTP 白名单新增 `serial/frames/templates`、`serial/frames/encode`、`serial/frames/templates/import`；
+  `elab_guide` 索引补充三个工具。
+
+### 实机（STM32F103C8T6 / COM10）
+
+- `examples/STM32F103C8T6/Core/Src/main.c` 每 100ms 发三类帧：位域遥测、
+  变长 MAVLink、多 ID 分发；心跳/LED 仍为 1Hz。
+- 新增 `projects/STM32F103C8T6.frames.json` 三份实机 profile；串口教程新增 5.6 节与附录 C。
+
+---
+
 ## [Unreleased] — 2026-11-04（Provider 工具链架构 P1/P2 · ESP32 实机闭环）
 
 ### 内核：工具链 provider（数据与执行分离）

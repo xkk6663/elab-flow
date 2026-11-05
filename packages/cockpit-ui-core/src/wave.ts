@@ -15,8 +15,8 @@ export interface WaveProbe {
   index: number;
   /** 批次采集时刻（微秒）；缺省 = 无时间源（Δt 显示 —） */
   t_us?: number;
-  /** 原始通道值 */
-  values: number[];
+  /** 原始通道值；null = 多 ID 下该帧不携带此通道 */
+  values: Array<number | null>;
 }
 
 export interface Range {
@@ -25,11 +25,11 @@ export interface Range {
 }
 
 /** 一屏内的自动量程：忽略 NaN/±∞；空数组或全无效返回 null（调用方跳过该通道）。 */
-export function autoRange(values: number[]): Range | null {
+export function autoRange(values: Array<number | null>): Range | null {
   let lo = Infinity;
   let hi = -Infinity;
   for (const v of values) {
-    if (!Number.isFinite(v)) continue;
+    if (v === null || !Number.isFinite(v)) continue;
     if (v < lo) lo = v;
     if (v > hi) hi = v;
   }
@@ -95,7 +95,7 @@ export function measure(
   for (let ch = 0; ch < n; ch++) {
     const va = a.values[ch]
     const vb = b.values[ch]
-    if (!Number.isFinite(va) || !Number.isFinite(vb)) {
+    if (va === null || vb === null || !Number.isFinite(va) || !Number.isFinite(vb)) {
       dy.push(NaN)
       dyScaled.push(NaN)
       continue
@@ -126,8 +126,8 @@ export function fmtDuration(us: number | null): string {
 }
 
 /** 数值格式化：去除浮点尾巴（0.30000000000000004 → 0.3），保留最多 4 位小数。 */
-export function fmtValue(v: number): string {
-  if (!Number.isFinite(v)) return '—'
+export function fmtValue(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—'
   const a = Math.abs(v)
   if (a >= 1e6 || (a > 0 && a < 1e-4)) return v.toExponential(2)
   return String(round(v, 4))

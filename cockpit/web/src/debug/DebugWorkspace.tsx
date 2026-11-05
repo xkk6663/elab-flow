@@ -67,13 +67,15 @@ function hexBytes(bytes: string): string[] {
 }
 
 /** 16 字节一行：地址 + HEX + ASCII（与 cortex-debug 内存视图同构）。 */
-function rowDump(addr: string, bytes: string[]): Array<{ addr: string; hex: string; ascii: string }> {
+function rowDump(addr: string, bytes: string[]):
+Array<{ addr: string; bytes: string[]; hex: string; ascii: string }> {
   const base = Number.parseInt(addr, 16);
-  const rows: Array<{ addr: string; hex: string; ascii: string }> = [];
+  const rows: Array<{ addr: string; bytes: string[]; hex: string; ascii: string }> = [];
   for (let i = 0; i < bytes.length; i += 16) {
     const chunk = bytes.slice(i, i + 16);
     rows.push({
       addr: `0x${(base + i).toString(16).padStart(8, "0")}`,
+      bytes: chunk,
       hex: chunk.join(" ").padEnd(47, " "),
       ascii: chunk.map((b) => {
         const n = Number.parseInt(b, 16);
@@ -82,6 +84,19 @@ function rowDump(addr: string, bytes: string[]): Array<{ addr: string; hex: stri
     });
   }
   return rows;
+}
+
+/** 单元格地址：行首地址 + 单元格序号（HEX）。 */
+function cellAddr(rowAddr: string, index: number): string {
+  const base = Number.parseInt(rowAddr, 16);
+  return `0x${(base + index).toString(16).padStart(8, "0")}`;
+}
+
+/** 1 字节 HEX 校验：接受 1–2 位，补零后返回小写两字符。 */
+function normByte(raw: string): string | null {
+  const v = raw.trim().replace(/^0x/i, "");
+  if (!/^[0-9a-fA-F]{1,2}$/.test(v)) return null;
+  return v.padStart(2, "0").toLowerCase();
 }
 
 export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugWorkspaceProps) {
@@ -114,6 +129,23 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
   const [outLines, setOutLines] = useState<string[]>([]);
   const [stopAt, setStopAt] = useState<"main" | "reset" | "none">("main");
 
+  // P1：写权限来自会话（/breakpoints 的 allow_write），不是内核能力位
+  const [allowWrite, setAllowWrite] = useState(false);
+  /** 行内编辑：一次只编辑一个字节 / 一个寄存器 / 一个 SVD 字段 */
+  const [editCell, setEditCell] = useState<{ addr: string; value: string; orig: string } | null>(null);
+  const [editReg, setEditReg] = useState<{ name: string; value: string; orig: string } | null>(null);
+  const [editField, setEditField] = useState<{
+    reg: string; addr: string; size: number; base: number;
+    offset: number; width: number; value: string;
+  } | null>(null);
+  const [svdQuery, setSvdQuery] = useState("");
+  const [svdCollapsed, setSvdCollapsed] = useState<Record<string, boolean>>({});
+  /** 断点命中通知（自动消失） */
+  const [bpToast, setBpToast] = useState("");
+
+  const disasmRef = useRef<HTMLDivElement | null>(null);
+  const pcRef = useRef<HTMLDivElement | null>(null);
+
   const snapRef = useRef<DebugSessionSnapshot | null>(null);
   snapRef.current = snap;
 
@@ -140,7 +172,7 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
     }
     const busyJobs: Array<Promise<unknown>> = [];
     busyJobs.push(api.debugBreakpoints()
-      .then((x) => { setBps(x.breakpoints); setRev(x.rev ?? 0); })
+      .then((x) => { setBps(x.breakpoints); setRev(x.rev ?? 0); setAllowWrite(x.allow_write === true); })
       .catch(() => undefined));
     if (sess.state === "stopped") {
       busyJobs.push(api.debugStack()
@@ -220,8 +252,24 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
   useEffect(() => {
     const es = new EventSource("/api/debug/events");
     const onStop = (e: MessageEvent) => {
+      let reason = "";
+      let bkpt = "";
+      try {
+        const env = JSON.parse(e.data) as { data?: { reason?: string; bkptno?: string } };
+        reason = env.data?.reason ?? "";
+        bkpt = env.data?.bkptno ?? "";
+      } catch {
+        /* 忽略坏帧 */
+      }
+      // 断点命中：面板内提示并自动落到调用栈（与插件同源行为）
+      if (reason === "breakpoint-hit" || bkpt !== "") {
+        const label = bkpt === "" ? "断点" : `断点 #${bkpt}`;
+        setBpToast(`命中${label}，已切到调用栈`);
+        setTab("stack");
+        setFrame(0);
+      }
       void refreshCommon();
-      pushOut(`停止：${e.data}`);
+      pushOut(`${reason === "breakpoint-hit" ? "命中断点" : "停止"}：${e.data}`);
     };
     const onState = (e: MessageEvent) => {
       try {
@@ -255,13 +303,26 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
         /* 忽略 */
       }
     };
+    const onBreakpoint = () => {
+      void api.debugBreakpoints()
+        .then((x) => { setBps(x.breakpoints); setRev(x.rev ?? 0); setAllowWrite(x.allow_write === true); })
+        .catch(() => undefined);
+    };
     es.addEventListener("debug/stop", onStop);
     es.addEventListener("debug/state", onState);
     es.addEventListener("debug/closed", onClosed);
     es.addEventListener("debug/output", onOutput);
     es.addEventListener("debug/error", onError);
+    es.addEventListener("debug/breakpoint", onBreakpoint);
     return () => es.close();
   }, [refreshCommon, setSession, pushOut]);
+
+  // 断点命中提示：3s 自动消失，不抢焦点
+  useEffect(() => {
+    if (bpToast === "") return;
+    const timer = window.setTimeout(() => setBpToast(""), 3000);
+    return () => window.clearTimeout(timer);
+  }, [bpToast]);
 
   // 新 stop_seq → 重拉当前页签数据
   useEffect(() => {
@@ -278,6 +339,15 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
     if (tab === "audit") void loadAudit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopSeq, tab]);
+
+  // 反汇编加载后把 PC 行滚到视野中央（断点命中/单步后不丢位置）
+  useEffect(() => {
+    if (tab !== "disasm") return;
+    const el = pcRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "center", behavior: "auto" });
+    }
+  }, [disasm, tab]);
 
   // ── 动作 ────────────────────────────────────────────────────
   const openSession = async () => {
@@ -350,6 +420,18 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
     }
   };
 
+  /** 反汇编行内「设地址断点」（rev 乐观锁与列表一致）。 */
+  const addAddrBp = async (addr: string) => {
+    try {
+      const r = await api.debugBreakpoints({ op: "add", kind: "addr", location: addr, rev });
+      setBps(r.breakpoints);
+      setRev(r.rev ?? rev);
+      pushOut(`地址断点 + ${addr}`);
+    } catch (e) {
+      setError(msg(e));
+    }
+  };
+
   const bpOp = async (op: "toggle" | "remove", id: string) => {
     try {
       const r = await api.debugBreakpoints({ op, id, rev });
@@ -394,30 +476,72 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
     }
   };
 
-  const writeMem = async () => {
-    const addr = window.prompt("写内存：目标地址（HEX）", memAddr);
-    if (!addr) return;
-    const value = window.prompt("写入字节（HEX，空格分隔，如 01 02 03）", "");
-    if (!value) return;
-    if (!window.confirm(`确认写入 ${addr} ← ${value}？（会记入审计）`)) return;
+  /** 行内写 1 字节：只发 1 个 HEX 字节，内核会做 before/after 审计。 */
+  const commitByte = async (addr: string, raw: string, orig: string) => {
+    const value = normByte(raw);
+    if (value === null) {
+      setError("请输入 1 字节 HEX（00–FF）");
+      return;
+    }
+    setEditCell(null);
+    if (value === orig.toLowerCase()) return;
     try {
-      await api.debugWrite({ target: "memory", addr, value });
-      pushOut(`写内存 ${addr} ← ${value}`);
-      await loadMemory(addr, memCount);
+      await api.debugWrite({ target: "memory", addr, value, confirm: true });
+      pushOut(`写内存 ${addr} ← 0x${value}`);
+      await loadMemory(memAddr, memCount);
     } catch (e) {
       setError(msg(e));
     }
   };
 
-  const writeReg = async (name: string) => {
-    const value = window.prompt(`写寄存器 ${name}（HEX/十进制）`, "");
-    if (!value) return;
-    if (!window.confirm(`确认写寄存器 ${name} ← ${value}？`)) return;
+  /** 行内写寄存器：32 位 HEX（内核白名单只允许 core 寄存器）。 */
+  const commitReg = async (name: string, raw: string, orig: string) => {
+    let v = raw.trim();
+    if (v.toLowerCase().startsWith("0x")) v = v.slice(2);
+    if (!/^[0-9a-fA-F]{1,8}$/.test(v)) {
+      setError("寄存器值需 1–8 位 HEX（32 位）");
+      return;
+    }
+    const value = v.padStart(8, "0").toLowerCase();
+    setEditReg(null);
+    const normOrig = orig.trim().toLowerCase().replace(/^0x/, "").padStart(8, "0");
+    if (value === normOrig) return;
     try {
-      await api.debugWrite({ target: "register", name, value });
-      pushOut(`写寄存器 ${name} ← ${value}`);
+      await api.debugWrite({ target: "register", name, value, confirm: true });
+      pushOut(`写寄存器 ${name} ← 0x${value}`);
       const r = await api.debugRegisters({ group: regGroup });
       setRegs(r.groups);
+    } catch (e) {
+      setError(msg(e));
+    }
+  };
+
+  /** SVD 字段写：读-改-写（保留同寄存器其它位），按寄存器宽度写回。 */
+  const commitField = async () => {
+    const ef = editField;
+    if (!ef) return;
+    const raw = ef.value.trim();
+    const num = raw.toLowerCase().startsWith("0x")
+      ? Number.parseInt(raw.slice(2), 16)
+      : Number.parseInt(raw, 10);
+    const max = ef.width >= 32 ? 0x100000000 : 2 ** ef.width;
+    if (!Number.isFinite(num) || num < 0 || num >= max) {
+      setError(`字段 ${ef.width} 位，取值范围 0–${max - 1}`);
+      return;
+    }
+    const mask = ef.width >= 32 ? 0xffffffff : (2 ** ef.width - 1);
+    const cur = ef.base >>> 0;
+    const next = ((cur & ~mask) | ((num << ef.offset) & mask)) >>> 0;
+    const bytes = Math.max(1, Math.min(4, Math.ceil(ef.size / 8)));
+    // 内核写内存按字节序列落盘（gdb -data-write-memory-bytes）；ARM 是小端：
+    // 必须把整值拆成「低字节在前」，否则 0x0000a00f 会被写成 0x0fa00000。
+    const value = Array.from({ length: bytes },
+      (_, i) => ((next >>> (i * 8)) & 0xff).toString(16).padStart(2, "0")).join("");
+    setEditField(null);
+    try {
+      await api.debugWrite({ target: "memory", addr: ef.addr, value, confirm: true });
+      pushOut(`写字段 ${ef.reg} ← ${raw}（寄存器 0x${value}）`);
+      await loadSvd(ef.reg);
     } catch (e) {
       setError(msg(e));
     }
@@ -431,7 +555,29 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
   const visibleTabs = TABS.filter((t) => !t.feature || features.includes(t.feature));
   const currentTab = visibleTabs.some((t) => t.id === tab) ? tab : visibleTabs[0]?.id;
   const stopped = snap?.state === "stopped";
-  const allowWrite = caps?.meta?.debug?.available ?? false; // 会话 open 时已带 allow_write
+
+  // P2：SVD 搜索 + 按 group 分组（折叠状态保存在本地）
+  const svdDeviceGroups = useMemo(() => {
+    const q = svdQuery.trim().toLowerCase();
+    const list = (svd?.peripherals ?? []).filter((p) =>
+      q === "" || p.name.toLowerCase().includes(q)
+      || (p.description ?? "").toLowerCase().includes(q));
+    const map = new Map<string, typeof list>();
+    for (const p of list) {
+      const g = p.group !== undefined && p.group.trim() !== "" ? p.group : "其它";
+      const cur = map.get(g);
+      if (cur) cur.push(p);
+      else map.set(g, [p]);
+    }
+    return Array.from(map.entries());
+  }, [svd, svdQuery]);
+
+  const svdRegisters = useMemo(() => {
+    const q = svdQuery.trim().toLowerCase();
+    return (svd?.peripheral?.registers ?? []).filter((r) =>
+      q === "" || r.name.toLowerCase().includes(q)
+      || (r.description ?? "").toLowerCase().includes(q));
+  }, [svd, svdQuery]);
 
   const toggleVar = async (node: DebugVarNode) => {
     if (expanded[node.name]) {
@@ -522,6 +668,7 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
       </div>
 
       {error ? <div className={s.error}>{error}</div> : null}
+      {bpToast ? <div className={s.toast}>{bpToast}</div> : null}
 
       {!snap ? (
         <div className={s.empty}>
@@ -618,19 +765,40 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                 {regs.map((g) => (
                   <div key={g.name}>
                     <div className={s.group}>{g.label}</div>
-                    {g.regs.map((r) => (
-                      <button
-                        key={r.name}
-                        type="button"
-                        className={`${s.row} ${r.pc ? s.rowAccent : ""}`}
-                        title={r.editable && allowWrite ? "点击写寄存器" : "不可写"}
-                        onClick={() => r.editable && allowWrite ? void writeReg(r.name) : undefined}
-                      >
-                        <span className={s.mono}>{r.name}</span>
-                        <span className={s.value}>{r.hex}</span>
-                        <span className={s.dimText}>{r.natural}</span>
-                      </button>
-                    ))}
+                    {g.regs.map((r) => {
+                      const editable = r.editable && allowWrite;
+                      const editing = editReg?.name === r.name;
+                      return (
+                        <div key={r.name} className={`${s.row} ${r.pc ? s.rowAccent : ""}`}>
+                          <span className={s.mono}>{r.name}</span>
+                          {editing ? (
+                            <input
+                              className={s.valueInput}
+                              autoFocus
+                              maxLength={10}
+                              value={editReg.value}
+                              aria-label={`编辑寄存器 ${r.name}`}
+                              onChange={(e) => setEditReg({ ...editReg, value: e.currentTarget.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void commitReg(r.name, editReg.value, editReg.orig);
+                                if (e.key === "Escape") setEditReg(null);
+                              }}
+                              onBlur={() => setEditReg(null)}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className={editable ? s.valueEdit : s.value}
+                              title={editable ? `点击改写 ${r.name}` : "不可写"}
+                              onClick={() => editable ? setEditReg({ name: r.name, value: r.hex, orig: r.hex }) : undefined}
+                            >
+                              {r.hex}
+                            </button>
+                          )}
+                          <span className={s.dimText}>{r.natural}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
                 {regs.length === 0 ? <div className={s.hint}>无寄存器数据</div> : null}
@@ -710,17 +878,52 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                     onKeyDown={(e) => { if (e.key === "Enter") void loadMemory(); }}
                   />
                   <Button size="sm" onClick={() => void loadMemory()}>读取</Button>
-                  <Button size="sm" variant="outline" disabled={!allowWrite} onClick={() => void writeMem()}>
-                    写内存
-                  </Button>
+                  <span className={s.dimText}>{allowWrite ? "点字节可直接改（进审计）" : "只读（会话未开写权限）"}</span>
                 </div>
                 {mem ? (
                   <div className={s.memWrap}>
-                    <pre className={s.mem}>
+                    <div className={s.mem}>
                       {rowDump(mem.addr, hexBytes(mem.bytes)).map((line) => (
-                        <div key={line.addr}>{`${line.addr}  ${line.hex}`}</div>
+                        <div key={line.addr} className={s.memRow}>
+                          <span className={s.memAddr}>{line.addr}</span>
+                          {line.bytes.map((b, i) => {
+                            const addr = cellAddr(line.addr, i);
+                            const editing = editCell?.addr === addr;
+                            if (editing) {
+                              return (
+                                <input
+                                  key={addr}
+                                  className={s.memCellInput}
+                                  autoFocus
+                                  maxLength={2}
+                                  value={editCell.value}
+                                  aria-label={`编辑 ${addr}`}
+                                  onChange={(e) => setEditCell({ ...editCell, value: e.currentTarget.value })}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") void commitByte(addr, editCell.value, editCell.orig);
+                                    if (e.key === "Escape") setEditCell(null);
+                                  }}
+                                  onBlur={() => setEditCell(null)}
+                                />
+                              );
+                            }
+                            return allowWrite ? (
+                              <button
+                                key={addr}
+                                type="button"
+                                className={s.memCell}
+                                title={`点击编辑 ${addr}（当前 0x${b}）`}
+                                onClick={() => setEditCell({ addr, value: b, orig: b })}
+                              >
+                                {b}
+                              </button>
+                            ) : (
+                              <span key={addr} className={s.memCell}>{b}</span>
+                            );
+                          })}
+                        </div>
                       ))}
-                    </pre>
+                    </div>
                     <pre className={s.ascii}>{rowDump(mem.addr, hexBytes(mem.bytes))
                       .map((line) => line.ascii).join("\n")}</pre>
                   </div>
@@ -742,14 +945,39 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                   />
                   <Button size="sm" onClick={() => void loadDisasm()}>反汇编</Button>
                 </div>
-                {disasm?.instructions.map((ins: DebugDisasmLine) => (
-                  <div key={ins.addr} className={`${s.row} ${ins.pc ? s.rowAccent : ""}`}>
-                    <span className={s.mono}>{ins.addr}</span>
-                    <span className={s.mono}>{ins.mnemonic} {ins.operands}</span>
-                    {ins.symbol ? <span className={s.dimText}>{ins.symbol}</span> : null}
-                    {ins.pc ? <span className={s.badge}>PC</span> : null}
-                  </div>
-                ))}
+                <div ref={disasmRef}>
+                  {disasm?.instructions.map((ins: DebugDisasmLine) => (
+                    <div
+                      key={ins.addr}
+                      ref={ins.pc ? pcRef : undefined}
+                      className={`${s.row} ${ins.pc ? s.rowAccent : ""}`}
+                    >
+                      <button
+                        type="button"
+                        className={s.addrLink}
+                        title="跳到内存视图"
+                        onClick={() => {
+                          setMemAddr(ins.addr);
+                          void loadMemory(ins.addr, memCount);
+                          setTab("memory");
+                        }}
+                      >
+                        {ins.addr}
+                      </button>
+                      <span className={s.mono}>{ins.mnemonic} {ins.operands}</span>
+                      {ins.symbol ? <span className={s.dimText}>{ins.symbol}</span> : null}
+                      {ins.pc ? <span className={s.badge}>PC</span> : null}
+                      <button
+                        type="button"
+                        className={s.link}
+                        title="在此地址设断点"
+                        onClick={() => void addAddrBp(ins.addr)}
+                      >
+                        ⌖
+                      </button>
+                    </div>
+                  ))}
+                </div>
                 {!disasm ? <div className={s.hint}>点「反汇编」</div> : null}
               </div>
             ) : null}
@@ -763,6 +991,14 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                   <span className={s.dimText}>
                     {svd ? `${svd.svd.name} · ${svd.level}` : "SVD 未加载"}
                   </span>
+                  {svd && svd.level !== "register" ? (
+                    <Input
+                      mono
+                      placeholder={svd.level === "device" ? "搜索外设" : "搜索寄存器"}
+                      value={svdQuery}
+                      onChange={(e) => setSvdQuery(e.currentTarget.value)}
+                    />
+                  ) : null}
                   <span className={s.spacer} />
                   {svd?.level === "peripheral" ? (
                     <button type="button" className={s.link}
@@ -770,15 +1006,34 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                   ) : null}
                 </div>
                 {svd?.level === "device" ? (
-                  <div className={s.grid}>
-                    {(svd.peripherals ?? []).map((p) => (
-                      <button key={p.name} type="button" className={s.card}
-                              onClick={() => void loadSvd(p.name)}>
-                        <b>{p.name}</b>
-                        <span>{p.base}</span>
-                        <span>{p.registers_count ?? 0} 寄存器</span>
-                      </button>
-                    ))}
+                  <div>
+                    {svdDeviceGroups.map(([group, items]) => {
+                      const folded = svdCollapsed[group] === true;
+                      return (
+                        <div key={group}>
+                          <button
+                            type="button"
+                            className={s.group}
+                            onClick={() => setSvdCollapsed((prev) => ({ ...prev, [group]: !folded }))}
+                          >
+                            {folded ? "▸" : "▾"} {group} · {items.length}
+                          </button>
+                          {folded ? null : (
+                            <div className={s.grid}>
+                              {items.map((p) => (
+                                <button key={p.name} type="button" className={s.card}
+                                        onClick={() => void loadSvd(p.name)}>
+                                  <b>{p.name}</b>
+                                  <span>{p.base}</span>
+                                  <span>{p.registers_count ?? 0} 寄存器</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {svdDeviceGroups.length === 0 ? <div className={s.hint}>没有匹配的外设</div> : null}
                   </div>
                 ) : null}
                 {svd?.level === "peripheral" ? (
@@ -788,7 +1043,7 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                       <span className={s.dimText}>{svd.peripheral?.base}</span>
                       <span className={s.dimText}>{svd.peripheral?.description}</span>
                     </div>
-                    {(svd.peripheral?.registers ?? []).map((r) => (
+                    {svdRegisters.map((r) => (
                       <button key={r.name} type="button" className={s.row}
                               onClick={() => void loadSvd(`${svd.peripheral?.name}.${r.name}`)}>
                         <span className={s.mono}>{r.name}</span>
@@ -797,6 +1052,7 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                         <span className={s.value}>{r.fields_count ? `${r.fields_count} 字段` : ""}</span>
                       </button>
                     ))}
+                    {svdRegisters.length === 0 ? <div className={s.hint}>没有匹配的寄存器</div> : null}
                   </div>
                 ) : null}
                 {svd?.level === "register" && svd.register ? (
@@ -806,14 +1062,54 @@ export function DebugWorkspace({ caps, project, running, debugFeatures }: DebugW
                       <span className={s.value}>{svd.register.value ?? "—"}</span>
                       <span className={s.dimText}>{svd.register.description}</span>
                     </div>
-                    {(svd.register.fields ?? []).map((f) => (
-                      <div key={f.name} className={s.row}>
-                        <span className={s.mono}>{f.name}</span>
-                        <span className={s.dimText}>[{f.bits}]</span>
-                        <span className={s.value}>{f.enum ? `${f.enum.name} (${f.enum.value})` : `${f.value} (${f.hex})`}</span>
-                        <span className={s.dimText}>{f.description}</span>
-                      </div>
-                    ))}
+                    {(svd.register.fields ?? []).map((f) => {
+                      const writable = allowWrite && /write/i.test(svd.register?.access ?? "");
+                      const editing = editField?.reg === `${svd.peripheral?.name}.${svd.register?.name}`
+                        && editField.offset === f.offset;
+                      const base = Number.parseInt(
+                        String(svd.register?.value ?? "0").replace(/^0x/, ""), 16) || 0;
+                      return (
+                        <div key={f.name} className={s.row}>
+                          <span className={s.mono}>{f.name}</span>
+                          <span className={s.dimText}>[{f.bits}]</span>
+                          {editing ? (
+                            <input
+                              className={s.valueInput}
+                              autoFocus
+                              value={editField.value}
+                              aria-label={`编辑字段 ${f.name}`}
+                              onChange={(e) => setEditField({ ...editField, value: e.currentTarget.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void commitField();
+                                if (e.key === "Escape") setEditField(null);
+                              }}
+                              onBlur={() => setEditField(null)}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className={writable ? s.valueEdit : s.value}
+                              title={writable ? `点击改写字段 ${f.name}（读-改-写）` : "字段只读"}
+                              onClick={() => {
+                                if (!writable || !svd.register) return;
+                                setEditField({
+                                  reg: `${svd.peripheral?.name}.${svd.register.name}`,
+                                  addr: svd.register.addr,
+                                  size: svd.register.size,
+                                  base,
+                                  offset: f.offset,
+                                  width: f.width,
+                                  value: String(f.value),
+                                });
+                              }}
+                            >
+                              {f.enum ? `${f.enum.name} (${f.enum.value})` : `${f.value} (${f.hex})`}
+                            </button>
+                          )}
+                          <span className={s.dimText}>{f.description}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
                 {!svd ? <div className={s.hint}>加载中… 或该芯片未提供 SVD</div> : null}

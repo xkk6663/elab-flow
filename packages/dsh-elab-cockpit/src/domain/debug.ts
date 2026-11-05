@@ -362,6 +362,16 @@ export interface DebugApi {
   debugMemory(opts: { addr: string; count?: number; sessionId?: string }): Promise<DebugMemoryResponse>
   debugDisasm(opts?: { addr?: string; count?: number; mode?: number; sessionId?: string }):
   Promise<DebugDisasmResponse>
+  /** 写内存/寄存器：需 allow_write 会话 + confirm=true（内核二次闸门）。 */
+  debugWrite(opts: {
+    target: 'memory' | 'register'
+    addr?: string
+    name?: string
+    value: string
+    confirm?: boolean
+    agent?: boolean
+    sessionId?: string
+  }): Promise<DebugWriteResponse>
   debugEvaluate(opts: { expr: string; frame?: number; agent?: boolean; sessionId?: string }):
   Promise<DebugEvaluateResponse>
   debugWatch(opts?: {

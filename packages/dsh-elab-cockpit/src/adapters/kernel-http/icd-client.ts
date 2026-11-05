@@ -56,6 +56,7 @@ import type {
   DebugStackResponse,
   DebugVariablesResponse,
   DebugWatchResponse,
+  DebugWriteResponse,
 } from '../../domain/debug.ts'
 
 export type {
@@ -591,7 +592,7 @@ export const elabApi = {
     agent?: boolean
     sessionId?: string
   }) =>
-    post<Record<string, unknown>>(
+    post<DebugWriteResponse>(
       withSession('/elab/api/debug/write', opts.sessionId),
       {
         target: opts.target,

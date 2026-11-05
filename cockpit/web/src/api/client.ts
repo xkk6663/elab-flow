@@ -27,6 +27,8 @@ import type {
   SerialDecodedTail,
   SerialFormat,
   SerialFramesResponse,
+  SerialFrameEncodeResult,
+  SerialFrameTemplatesResponse,
   SerialIssue,
   SerialLogProfile,
   SerialMonitorSnapshot,
@@ -487,10 +489,11 @@ export const api = {
       id: opts.id,
     }),
 
-  /** 无硬件预览：把一段样本字节按指定 profile 解码（与实际会话同一引擎）。 */
+  /** 无硬件预览：把一段样本字节按指定 profile / 未保存草稿解码。 */
   serialFramesPreview: (opts: {
-    project: string;
-    id: string;
+    project?: string;
+    id?: string;
+    profile?: unknown;
     hex?: string;
     dataB64?: string;
   }) =>
@@ -500,9 +503,46 @@ export const api = {
       body: JSON.stringify({
         project: opts.project,
         id: opts.id,
+        profile: opts.profile,
         hex: opts.hex,
         data_b64: opts.dataB64,
       }),
+    }),
+
+  /** 反向组帧（P1）：字段值 → 字节；支持未保存草稿与 variant。 */
+  serialFramesEncode: (opts: {
+    project?: string;
+    id?: string;
+    profile?: unknown;
+    values?: Record<string, unknown>;
+    variant?: string | number;
+    lengthValue?: number;
+  }) =>
+    post<SerialFrameEncodeResult>("/api/serial/frames/encode", {
+      project: opts.project,
+      id: opts.id,
+      profile: opts.profile,
+      values: opts.values,
+      variant: opts.variant,
+      length_value: opts.lengthValue,
+    }),
+
+  /** 只读模板库（P1）：`templates/frames/*.json`，坏模板在 errors 里回报。 */
+  serialFrameTemplates: () =>
+    req<SerialFrameTemplatesResponse>("/api/serial/frames/templates"),
+
+  /** 模板 → 工程 profile（走 rev 乐观锁，不覆盖冲突）。 */
+  serialFrameTemplateImport: (opts: {
+    project: string;
+    rev: number;
+    template: string;
+    newId?: string;
+  }) =>
+    post<SerialFramesResponse>("/api/serial/frames/templates/import", {
+      project: opts.project,
+      rev: opts.rev,
+      template: opts.template,
+      new_id: opts.newId,
     }),
 
   /**
@@ -751,6 +791,8 @@ export const api = {
     addr?: string;
     name?: string;
     value: string;
+    /** 内核要求写操作显式确认（require_write 的第二道闸门） */
+    confirm?: boolean;
   }) => post<{ ok: boolean; written?: number; name?: string; addr?: string }>(
     "/api/debug/write", opts),
 

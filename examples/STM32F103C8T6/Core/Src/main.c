@@ -39,6 +39,8 @@
 /* USER CODE BEGIN PD */
 /* 心跳与 LED 同源：500ms 节拍翻转 LED，每 2 次翻转打一条 1Hz 心跳 */
 #define LED_HALF_PERIOD_MS 500u
+/* 帧协议演示节拍：每 100ms 依次发三帧（位域 / 变长 / 多 ID） */
+#define FRAME_PERIOD_MS 100u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -64,6 +66,10 @@ static char g_cmd_buf[64];
 static volatile size_t g_cmd_len = 0;
 static char g_ready_line[64];
 static volatile int g_cmd_ready = 0;
+
+/* ── 串口帧协议演示（P0：位域 / 变长 / 多 ID）────────────────── */
+static uint32_t g_frame_seq = 0;
+static uint32_t g_last_frame = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,6 +89,102 @@ int __io_putchar(int ch)
   uint8_t byte = (uint8_t)ch;
   (void)HAL_UART_Transmit(&huart1, &byte, 1, 10);
   return ch;
+}
+
+static void uart_send_raw(const uint8_t *buf, size_t len)
+{
+  (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 20);
+}
+
+static uint16_t crc16_modbus(const uint8_t *buf, size_t len)
+{
+  uint16_t crc = 0xFFFFu;
+  for (size_t i = 0; i < len; i++)
+  {
+    crc ^= buf[i];
+    for (int b = 0; b < 8; b++)
+    {
+      crc = (crc & 1u) ? (uint16_t)((crc >> 1) ^ 0xA001u) : (uint16_t)(crc >> 1);
+    }
+  }
+  return crc;
+}
+
+/*
+ * 演示 1｜位域：AA55 头 + u16 转速 + i16 温度 + mode + flags(bit0..2) + u16 电压
+ * 布局与 templates/frames/telemetry_u16.json 完全一致（14 字节，CRC16 + 0D0A 尾）。
+ */
+static void send_frame_telemetry(uint32_t seq)
+{
+  uint8_t f[14];
+  uint16_t rpm = (uint16_t)(1000u + (seq * 7u) % 400u);
+  int16_t temp = (int16_t)(250u + (seq * 3u) % 100u);   /* 25.0 .. 34.9 C */
+  uint16_t bat = (uint16_t)(1234u - (seq % 50u));       /* 12.34 .. 11.85 V */
+  uint16_t crc;
+
+  f[0] = 0xAA; f[1] = 0x55;
+  f[2] = (uint8_t)(rpm & 0xFFu); f[3] = (uint8_t)(rpm >> 8);
+  f[4] = (uint8_t)((uint16_t)temp & 0xFFu); f[5] = (uint8_t)((uint16_t)temp >> 8);
+  f[6] = 1;      /* mode = RUN */
+  f[7] = 1;      /* flags 位域 = READY（bit0..2） */
+  f[8] = (uint8_t)(bat & 0xFFu); f[9] = (uint8_t)(bat >> 8);
+  crc = crc16_modbus(f, 10);
+  f[10] = (uint8_t)(crc & 0xFFu); f[11] = (uint8_t)(crc >> 8);
+  f[12] = 0x0D; f[13] = 0x0A;
+  uart_send_raw(f, sizeof(f));
+}
+
+/*
+ * 演示 2｜变长：FE 头 + 帧内长度字段（offset1）+ msgid（offset5）
+ * 总长 = len + 8（布局与 templates/frames/mavlink_v1.json 一致）。
+ */
+static void send_frame_mavlink(uint32_t seq)
+{
+  uint8_t f[10];
+  f[0] = 0xFE;
+  f[1] = 2;      /* payload 字节数 */
+  f[2] = 1;      /* type */
+  f[3] = 1;      /* sysid */
+  f[4] = 1;      /* compid */
+  f[5] = 30;     /* msgid */
+  f[6] = (uint8_t)(seq & 0xFFu);
+  f[7] = (uint8_t)((seq >> 8) & 0xFFu);
+  f[8] = 0; f[9] = 0;   /* CRC 占位（模板 checksum=none，不校验） */
+  uart_send_raw(f, sizeof(f));
+}
+
+/*
+ * 演示 3｜多 ID：7E7E 头 + id + 4 字节负载（固定 7 字节）
+ * id=1 → speed/aux；id=2 → temp/hum。同一 profile 用 variants 分发字段。
+ */
+static void send_frame_multi(uint32_t seq)
+{
+  uint8_t f[7];
+  f[0] = 0x7E; f[1] = 0x7E;
+  if (seq & 1u)
+  {
+    uint16_t speed = (uint16_t)(1000u + (seq % 500u));
+    uint16_t aux = (uint16_t)(seq % 100u);
+    f[2] = 1;
+    f[3] = (uint8_t)(speed & 0xFFu); f[4] = (uint8_t)(speed >> 8);
+    f[5] = (uint8_t)(aux & 0xFFu);   f[6] = (uint8_t)(aux >> 8);
+  }
+  else
+  {
+    int16_t temp = (int16_t)(-1000 - (int16_t)(seq % 500u));   /* -10.00 .. -14.99 C */
+    uint16_t hum = (uint16_t)(4000u + (seq % 500u));            /* 40.00 .. 44.99 % */
+    f[2] = 2;
+    f[3] = (uint8_t)((uint16_t)temp & 0xFFu); f[4] = (uint8_t)((uint16_t)temp >> 8);
+    f[5] = (uint8_t)(hum & 0xFFu);            f[6] = (uint8_t)(hum >> 8);
+  }
+  uart_send_raw(f, sizeof(f));
+}
+
+static void send_frame_bundle(uint32_t seq)
+{
+  send_frame_telemetry(seq);
+  send_frame_mavlink(seq);
+  send_frame_multi(seq);
 }
 
 static void handle_line(char *line)
@@ -173,6 +275,7 @@ int main(void)
   printf("[log] GPIO      : ok (LED=PC13 active-low, KEY1..4=PA0..3)\r\n");
   printf("[log] DMA       : ok (USART1 RX=DMA1_Ch5, TX=DMA1_Ch4)\r\n");
   printf("[log] UART1     : ok (115200 8N1, TX=PA9, RX=PA10, IRQ=on)\r\n");
+  printf("[log] frames    : telemetry(bitfield) + mavlink(length) + multi(id) @10Hz\r\n");
 
   /* 逐字节中断接收：配合 HAL_UART_RxCpltCallback 做命令回显 */
   HAL_UART_Receive_IT(&huart1, (uint8_t *)&g_rx_byte, 1);
@@ -221,6 +324,17 @@ int main(void)
       {
         last_tick = HAL_GetTick();   /* 长阻塞后重新对齐，不补闪、不补心跳 */
       }
+    }
+
+    /* 帧协议演示：100ms 一组，三帧各自演示位域 / 变长 / 多 ID。 */
+    if (HAL_GetTick() - g_last_frame >= FRAME_PERIOD_MS)
+    {
+      g_last_frame += FRAME_PERIOD_MS;
+      if (HAL_GetTick() - g_last_frame >= FRAME_PERIOD_MS)
+      {
+        g_last_frame = HAL_GetTick();
+      }
+      send_frame_bundle(g_frame_seq++);
     }
   }
   /* USER CODE END 3 */

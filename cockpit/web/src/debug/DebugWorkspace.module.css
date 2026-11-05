@@ -159,12 +159,19 @@ button.row { cursor: default; }
 .mono { font-family: var(--elab-font-mono, ui-monospace, monospace); }
 .dimText { color: var(--elab-fg-faint); }
 .value { margin-left: auto; font-family: var(--elab-font-mono, ui-monospace, monospace); color: var(--elab-fg); }
+button.group {
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
 .group {
   font-size: var(--elab-fs-xs);
   color: var(--elab-fg-muted);
   font-weight: 600;
   padding: 8px 4px 2px;
 }
+button.group:hover { color: var(--elab-accent, #4c8bf5); }
 
 .badge {
   font-size: 10px;
@@ -188,8 +195,88 @@ button.row { cursor: default; }
 }
 .linkDanger { color: var(--elab-danger, #d64545); }
 
+.toast {
+  flex: 0 0 auto;
+  margin: 4px var(--elab-space-3) 0;
+  padding: 5px 10px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg);
+  border: 1px solid var(--elab-accent, #4c8bf5);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--elab-accent, #4c8bf5) 12%, transparent);
+}
+
 .memWrap { display: flex; gap: var(--elab-space-3); overflow: auto; padding-top: 6px; }
-.mem, .ascii, .pre {
+.mem { display: flex; flex-direction: column; gap: 1px; }
+.memRow { display: flex; align-items: center; }
+.memAddr {
+  margin-right: 6px;
+  color: var(--elab-fg-faint);
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.45;
+  white-space: pre;
+}
+.memCell {
+  min-width: 17px;
+  padding: 0 1px;
+  border: none;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--elab-fg);
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.45;
+  text-align: center;
+}
+button.memCell { cursor: pointer; }
+button.memCell:hover { background: var(--elab-bg-hover); color: var(--elab-accent, #4c8bf5); }
+.memCellInput {
+  width: 22px;
+  padding: 0;
+  border: 1px solid var(--elab-accent, #4c8bf5);
+  border-radius: 2px;
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg);
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  font-size: var(--elab-fs-xs);
+  line-height: 1.45;
+  text-align: center;
+}
+.valueInput {
+  margin-left: auto;
+  width: 96px;
+  padding: 0 4px;
+  border: 1px solid var(--elab-accent, #4c8bf5);
+  border-radius: 3px;
+  background: var(--elab-bg-surface);
+  color: var(--elab-fg);
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  font-size: var(--elab-fs-xs);
+}
+.valueEdit {
+  margin-left: auto;
+  padding: 0 2px;
+  border: 1px dashed transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--elab-fg);
+  font: inherit;
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  cursor: pointer;
+}
+.valueEdit:hover { border-color: var(--elab-accent, #4c8bf5); color: var(--elab-accent, #4c8bf5); }
+.addrLink {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--elab-fg-faint);
+  font: inherit;
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  cursor: pointer;
+}
+.addrLink:hover { color: var(--elab-accent, #4c8bf5); text-decoration: underline; }
+.ascii, .pre {
   margin: 0;
   font-family: var(--elab-font-mono, ui-monospace, monospace);
   font-size: var(--elab-fs-xs);

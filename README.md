@@ -120,6 +120,23 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 - 解码器是**会话属性**：agent 用 `elab_serial_monitor` / `elab_serial_decode` 选定后，面板波形页标「agent 选定」，读的是内核帧环的同一份帧。
 - 监视是"看"不是证据：实时流只活环形缓冲；可复核判定走闭环 `monitor`。串口监视与闭环 run **双向 409 互斥**，agent 会话带租约到期自动释放端口。
 
+**帧协议增强（2026-11-05，STM32F103C8T6 实机）**：工程 profile 现在支持**位域**
+（`bit_offset` / `bit_length` / `bit_order`）、**变长切帧**（`frame.length_field`）与
+**多 ID 分发**（`frame.id_field` + `variants`）；`帧协议` 抽屉内置 4 份只读模板
+（遥测 / MAVLink / Modbus RTU / DL/T 645），支持**未保存草稿预览**和**字段值反向组帧**
+（成功后 HEX 直接填入发送框）。Agent 通过 `elab_frame_profile` 只写声明式 JSON，
+写操作受 `allowAgentWrite` + `rev` 乐观锁保护。
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/serial-frames/02-wave-telemetry.png" width="420" alt="位域遥测 profile 实时波形"><br><sub>位域遥测：<code>AA55</code> 头 + CRC16，同一字节拆 mode/flags</sub></td>
+<td><img src="docs/tutorials/assets/serial-frames/10-preview-multi.png" width="420" alt="多 ID 草稿预览"><br><sub>多 ID：一个 profile 按 <code>id_field</code> 分发 speed/aux 与 temp/hum</sub></td>
+</tr>
+</table>
+</div>
+
+
 ### ⑤ 适配包与社区市场：芯片知识只住在数据层
 
 骨架仓本身零芯片。芯片参数、厂商指纹、平台坑位全部来自适配包；包之间互不依赖，改包后 `elab pkg index` 重生成索引，CI 用 `--check` 拦漂移。
@@ -309,7 +326,7 @@ HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
 | 闭环 | `elab_build` · `elab_triple` · `elab_loop` · `elab_step` · `elab_cancel` |
 | 工程与包 | `elab_adapt`（`write=false` 先看只读报告）· `elab_pkg` |
 | 调试 | `elab_debug_open / control / inspect / breakpoint / wait / close` |
-| 串口 | `elab_serial` · `_monitor` · `_read` · `_wait` · `_decode` · `_decoded` · `_capture` · `_widget` |
+| 串口 | `elab_serial` · `_monitor` · `_read` · `_wait` · `_decode` · `_decoded` · `_capture` · `_widget` · `_frame_profile` |
 
 <a id="quickstart"></a>
 

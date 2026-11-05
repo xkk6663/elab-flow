@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "rev": 1,
+  "profiles": [
+    {
+      "id": "hw_telemetry",
+      "label": "实机·位域遥测（AA55/CRC16）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "aa55",
+        "tail_hex": "0d0a",
+        "length": 14,
+        "max_bytes": 64
+      },
+      "checksum": {
+        "kind": "crc16modbus",
+        "at": "tail"
+      },
+      "fields": [
+        {
+          "name": "rpm",
+          "unit": "rpm",
+          "offset": 2,
+          "type": "u16",
+          "endian": "le"
+        },
+        {
+          "name": "temp",
+          "unit": "C",
+          "offset": 4,
+          "type": "i16",
+          "endian": "le",
+          "scale": 0.1
+        },
+        {
+          "name": "mode",
+          "offset": 6,
+          "type": "u8",
+          "plot": false,
+          "enum": {
+            "0": "IDLE",
+            "1": "RUN",
+            "2": "FAULT"
+          }
+        },
+        {
+          "name": "flags",
+          "offset": 7,
+          "type": "u8",
+          "bit_offset": 0,
+          "bit_length": 3,
+          "bit_order": "lsb0",
+          "plot": false,
+          "enum": {
+            "0": "NONE",
+            "1": "READY",
+            "2": "BUSY",
+            "4": "ERR"
+          }
+        },
+        {
+          "name": "bat",
+          "unit": "V",
+          "offset": 8,
+          "type": "u16",
+          "endian": "le",
+          "scale": 0.01
+        }
+      ]
+    },
+    {
+      "id": "hw_mavlink",
+      "label": "实机·变长（length_field）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "fe",
+        "max_bytes": 64,
+        "length_field": {
+          "offset": 1,
+          "type": "u8",
+          "mul": 1,
+          "add": 8
+        },
+        "id_field": {
+          "offset": 5,
+          "type": "u8"
+        }
+      },
+      "checksum": {
+        "kind": "none"
+      },
+      "fields": [
+        {
+          "name": "sysid",
+          "offset": 3,
+          "type": "u8",
+          "plot": false
+        },
+        {
+          "name": "compid",
+          "offset": 4,
+          "type": "u8",
+          "plot": false
+        },
+        {
+          "name": "msgid",
+          "offset": 5,
+          "type": "u8",
+          "plot": false
+        },
+        {
+          "name": "seq",
+          "offset": 6,
+          "type": "u16",
+          "endian": "le",
+          "plot": true,
+          "unit": "frame"
+        }
+      ]
+    },
+    {
+      "id": "hw_multi",
+      "label": "实机·多 ID（variants）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "7e7e",
+        "length": 7,
+        "max_bytes": 32,
+        "id_field": {
+          "offset": 2,
+          "type": "u8"
+        }
+      },
+      "checksum": {
+        "kind": "none"
+      },
+      "variants": [
+        {
+          "id": 1,
+          "label": "speed",
+          "fields": [
+            {
+              "name": "speed",
+              "unit": "rpm",
+              "offset": 3,
+              "type": "u16",
+              "endian": "le"
+            },
+            {
+              "name": "aux",
+              "offset": 5,
+              "type": "u16",
+              "endian": "le"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "label": "env",
+          "fields": [
+            {
+              "name": "temp",
+              "unit": "C",
+              "offset": 3,
+              "type": "i16",
+              "endian": "le",
+              "scale": 0.01
+            },
+            {
+              "name": "hum",
+              "unit": "%",
+              "offset": 5,
+              "type": "u16",
+              "endian": "le",
+              "scale": 0.01
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

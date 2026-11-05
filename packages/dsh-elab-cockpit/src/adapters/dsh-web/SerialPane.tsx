@@ -2090,19 +2090,22 @@ function WaveChart(props: {
 
   // follow → 跳尾
   const lastFramesLen = useRef(0)
+  /**
+   * 视口帧数：以「当前全部帧」为基准按倍率切分（×1 = 全部可见，×2 = 一半）。
+   * ★ 不能再用 canvas 宽度 / scaleX 作为槽位数：刚连上时只有几十帧，
+   *   槽位数远大于帧数，slice 永远被拉伸到满宽 —— 点 +/− 或滚轮都看不出变化，
+   *   表现为「缩放按钮/滚轮失灵」。
+   */
+  const visibleFrames = (scale: number): number => Math.max(2, Math.round(shown.length / scale))
   useEffect(() => {
     if (shown.length === 0) { onView(scaleX, 0); return }
     const prev = lastFramesLen.current
     lastFramesLen.current = shown.length
     if (follow) {
-      const canvas = canvasRef.current
-      const w = canvas?.clientWidth ?? 480
-      const visible = Math.max(20, Math.ceil(w / scaleX))
+      const visible = visibleFrames(scaleX)
       onView(scaleX, Math.max(0, shown.length - visible))
     } else if (prev === 0) {
-      const canvas = canvasRef.current
-      const w = canvas?.clientWidth ?? 480
-      const visible = Math.max(20, Math.ceil(w / scaleX))
+      const visible = visibleFrames(scaleX)
       onView(scaleX, Math.min(offsetX, Math.max(0, shown.length - visible)))
     }
     // onView/offsetX 故意不进依赖：只在帧数或缩放/跟随变化时重算
@@ -2135,7 +2138,7 @@ function WaveChart(props: {
     if (plotW <= 4 || plotH <= 4) return
     const plotTop = padT, plotBottom = padT + plotH
 
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    const visibleCount = visibleFrames(scaleX)
     const startIdx = Math.max(0, Math.min(offsetX, shown.length - 1))
     const endIdx = Math.min(shown.length, startIdx + visibleCount)
     const slice = shown.slice(startIdx, endIdx)
@@ -2213,22 +2216,48 @@ function WaveChart(props: {
     ctx.textAlign = 'right'; ctx.fillText(`共 ${shown.length} 帧 · 窗口 ${endIdx - startIdx} · ×${scaleX.toFixed(1)}`, w - padR, 2)
   }, [shown, scaleX, offsetX, shownCh, axis, cursor])
 
-  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault()
+  // 滚轮缩放：必须用原生监听（`passive: false`）——React 17+ 在根节点把 wheel 注册成
+  // passive，`preventDefault` 无效，滚轮会先滚动外层页面，看起来像「缩放没反应」。
+  useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const xInCanvas = e.clientX - rect.left
-    const padL = 8
-    const plotW = rect.width - padL - 8
-    const frameAtCursor = Math.round(offsetX + Math.max(0, xInCanvas - padL) / scaleX)
-    const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2))
-    const visibleCount = Math.max(2, Math.round(plotW / newScale))
-    let newOffset = frameAtCursor - Math.round((xInCanvas - padL) / newScale)
-    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)))
-    onView(newScale, newOffset)
-    if (follow) onFollowChange(false)
-  }
+    if (canvas === null) return
+    const onWheel = (e: WheelEvent): void => {
+      if (shown.length === 0) return
+      e.preventDefault()
+      // Shift+滚轮 = 纵向增益（所有已显示通道一起缩放），普通滚轮仍横向缩放
+      if (e.shiftKey) {
+        const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2
+        const chs = resolvedChannelsDsh(channels, frameChannels)
+        setAxis((prev) => {
+          const next = { ...prev }
+          for (const ch of chs) {
+            const cur = next[ch] ?? { gain: 1, offset: 0 }
+            next[ch] = {
+              gain: Math.min(10, Math.max(0.1, cur.gain * factor)),
+              offset: cur.offset,
+            }
+          }
+          return next
+        })
+        return
+      }
+      const rect = canvas.getBoundingClientRect()
+      const padL = 8
+      const plotW = Math.max(1, rect.width - padL - 8)
+      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left - padL) / plotW))
+      const span = visibleFrames(scaleX)
+      const frameAtCursor = Math.round(offsetX + frac * span)
+      const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2))
+      if (newScale === scaleX) return
+      const newSpan = visibleFrames(newScale)
+      const maxOffset = Math.max(0, shown.length - newSpan)
+      const newOffset = Math.max(0, Math.min(maxOffset, frameAtCursor - Math.round(frac * newSpan)))
+      onView(newScale, newOffset)
+      if (follow) onFollowChange(false)
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [shown.length, scaleX, offsetX, follow, onView, onFollowChange, channels, frameChannels, setAxis])
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     dragRef.current = { startClientX: e.clientX, startOffset: offsetX }
     downRef.current = { x: e.clientX, y: e.clientY, shift: e.shiftKey }
@@ -2240,8 +2269,8 @@ function WaveChart(props: {
     const rect = canvas.getBoundingClientRect()
     const plotW = rect.width - 44 - 8
     const dx = e.clientX - dragRef.current.startClientX
-    // 与绘制同源：帧数少于视口槽位时，一屏实际帧跨度是 min(槽位, 剩余帧)。
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
+    // 与绘制同源：一屏帧跨度 = 当前总帧数 / 倍率，且不超过剩余帧。
+    const visibleCount = visibleFrames(scaleX)
     const startOffset = dragRef.current.startOffset
     const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(startOffset, shown.length - 1)))
     const offsetDelta = Math.round(-dx * span / plotW)
@@ -2266,8 +2295,8 @@ function WaveChart(props: {
     const padL = 8
     const plotW = rect.width - padL - 8
     if (plotW <= 4) return
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX))
-    // 与绘制同源：slice 铺满整宽时，一屏的真实帧数是 min(槽位, 剩余帧)。
+    const visibleCount = visibleFrames(scaleX)
+    // 与绘制同源：一屏真实帧数是 min(视口帧数, 剩余帧)。
     const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(offsetX, shown.length - 1)))
     const within = nearestFrameIndex((e.clientX - rect.left - padL) / plotW, span)
     const idx = Math.max(0, Math.min(shown.length - 1, offsetX + within))
@@ -2379,7 +2408,6 @@ function WaveChart(props: {
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '220px', display: 'block', background: 'var(--elab-bg-surface)', border: '1px solid var(--elab-border)', borderRadius: 'var(--elab-radius-sm)', cursor: canvasReady ? (dragActive.current ? 'grabbing' : 'crosshair') : 'default' }}
-        onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={endDrag}

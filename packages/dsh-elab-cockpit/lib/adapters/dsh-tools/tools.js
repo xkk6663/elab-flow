@@ -448,6 +448,9 @@ export function agentGuidePayload() {
             { name: 'elab_serial_wait', use: '等匹配正则的串口行（判心跳 / 等日志）' },
             { name: 'elab_serial', use: '向串口写数据（需要 allowAgentWrite）' },
             { name: 'elab_serial_capture', use: '录制 start / stop / status（写盘需 allowAgentWrite）' },
+            { name: 'elab_serial_decode', use: '无状态解码 justfloat / firewater / profile（profile 可传草稿）' },
+            { name: 'elab_serial_decoded', use: '增量读会话级共享解码帧（与面板波形同源）' },
+            { name: 'elab_frame_profile', use: '帧协议 profile：list/get/preview/save/delete/encode/templates/import（支持位域/变长/多 ID）' },
             { name: 'elab_debug_open', use: '起 openocd + gdb，停在 main（需内核 meta.debug）' },
             { name: 'elab_debug_control', use: 'continue / pause / step / reset / run_to' },
             { name: 'elab_debug_inspect', use: '栈 / 变量 / 寄存器 / 断点 / 内存等只读视图' },
@@ -764,7 +767,7 @@ export function registerElabTools(register, deps) {
             lease_s: { type: 'number', description: '租约秒数（open 时默认 120；0 = 无租约）' },
             decoder: {
                 type: 'string',
-                description: 'decoder 动作时：justfloat / firewater；传空串 = 关闭共享解码',
+                description: 'decoder 动作时：justfloat / firewater / profile（帧协议，配合 project+profile_id）；传空串 = 关闭共享解码',
             },
         },
         output: jsonOutput,
@@ -905,11 +908,15 @@ export function registerElabTools(register, deps) {
     }));
     add(makeTool({
         name: 'elab_serial_decode',
-        description: '无状态协议解码（justfloat / firewater）。justfloat = N×4 小端 float + 尾 00 00 80 7F；' +
-            'firewater = ASCII 逗号分隔 float + 换行。半帧以 pending_b64 原样带回，拼下一批再解。' +
-            'apply=true 时同一 decoder 会写入会话——面板波形页随之人机同图（人看到的就是这份帧）。',
+        description: '无状态协议解码（justfloat / firewater / profile）。justfloat = N×4 小端 float + 尾 00 00 80 7F；' +
+            'firewater = ASCII 逗号分隔 float + 换行；profile = 帧协议（decoder="profile:<id>"，或 ' +
+            'decoder="profile" + profile 草稿 JSON）。半帧以 pending_b64 原样带回，拼下一批再解。' +
+            'profile 支持位域、变长 length_field、多 ID variants；apply=true 时同一 decoder 会写入会话——' +
+            '面板波形页随之人机同图（人看到的就是这份帧）。',
         parameters: {
-            decoder: { type: 'string', required: true, description: 'justfloat / firewater' },
+            decoder: { type: 'string', required: true, description: 'justfloat / firewater / profile / profile:<id>' },
+            project: { type: 'string', description: '工程名（decoder=profile:<id> 时用于定位 projects/<name>.frames.json）' },
+            profile: { type: 'string', description: 'profile 草稿 JSON（字符串；可解码未保存配置）' },
             hex: { type: 'string', description: '十六进制字节串（与 data_b64 二选一）' },
             data_b64: { type: 'string', description: 'base64 字节串（与 hex 二选一）' },
             channels: { type: 'number', description: '显式通道数（缺省自动推断）' },
@@ -921,8 +928,19 @@ export function registerElabTools(register, deps) {
         output: jsonOutput,
         presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 串口解码' }),
         async execute(args) {
+            let draft;
+            if (args.profile !== undefined && args.profile !== '') {
+                try {
+                    draft = JSON.parse(args.profile);
+                }
+                catch {
+                    return { ok: false, code: 'bad-profile', note: 'profile 必须是合法 JSON 字符串' };
+                }
+            }
             const payload = {
                 decoder: args.decoder,
+                ...(args.project !== undefined ? { project: args.project } : {}),
+                ...(draft !== undefined ? { profile: draft } : {}),
                 ...(args.hex !== undefined ? { hex: args.hex } : {}),
                 ...(args.data_b64 !== undefined ? { data_b64: args.data_b64 } : {}),
                 ...(args.channels !== undefined ? { channels: args.channels } : {}),
@@ -934,6 +952,13 @@ export function registerElabTools(register, deps) {
             });
             if (args.apply !== true)
                 return result;
+            if (draft !== undefined && !args.decoder.startsWith('profile:')) {
+                return {
+                    ...result,
+                    applied: false,
+                    note: '草稿 profile 未落盘，不能写入会话；先用 elab_frame_profile action=save，再用 decoder=profile:<id>',
+                };
+            }
             // 落会话：人看到的波形页与本次解码同源（同一 decoder + 同一帧环）
             try {
                 const applied = await cockpit(deps, '/api/serial/monitor', {
@@ -992,6 +1017,174 @@ export function registerElabTools(register, deps) {
                 gap: tail.gap ?? 0,
                 frames,
             };
+        },
+    }));
+    add(makeTool({
+        name: 'elab_frame_profile',
+        description: '帧协议 profile 一等能力（Agent 只写**声明式 JSON**，不生成可执行解码器）：' +
+            'list/get 读工程配置；preview 无硬件试解字节（支持未保存草稿）；encode 字段值→字节；' +
+            'templates 列只读模板库；save/delete/import 改配置（需要 allowAgentWrite，rev 乐观锁）。' +
+            'profile 支持位域（bit_offset/bit_length/bit_order=lsb0|msb0）、变长（frame.length_field）、' +
+            '多 ID（frame.id_field + variants）。实时解码用 elab_serial_decode / elab_serial_monitor。' +
+            'schema 的权威定义在 GET /api/serial/meta 的 SERIAL_META.frames.schema。',
+        parameters: {
+            action: {
+                type: 'string',
+                required: true,
+                description: 'list / get / preview / save / delete / encode / templates / import',
+            },
+            project: { type: 'string', description: '工程名（templates 外基本都必填）' },
+            id: { type: 'string', description: 'profile id（get/preview/delete/encode 用）' },
+            rev: { type: 'number', description: 'save/delete/import 的乐观锁版本（来自 list 的 rev）' },
+            profile: { type: 'string', description: 'profile JSON（字符串；preview/save/encode 可传未保存草稿）' },
+            values: { type: 'string', description: 'encode 的字段值 JSON（字符串），如 {"rpm":100,"mode":"RUN"}' },
+            variant: { type: 'string', description: 'encode 的 variant id（"1" 或 "0x03"；多 variant 必填）' },
+            length_value: { type: 'number', description: 'encode 时显式覆盖 length_field 原始值（须与帧长一致）' },
+            hex: { type: 'string', description: 'preview 的十六进制字节串（与 b64 二选一）' },
+            b64: { type: 'string', description: 'preview 的 base64 字节串（与 hex 二选一）' },
+            template: { type: 'string', description: 'templates 时可筛选模板 id；import 时必填' },
+            new_id: { type: 'string', description: 'import 时新 profile id（缺省沿用模板 id）' },
+        },
+        output: jsonOutput,
+        presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 帧协议 profile' }),
+        async execute(args) {
+            const parse = (text, what) => {
+                if (text === undefined || text === '')
+                    return { ok: true, value: undefined };
+                try {
+                    return { ok: true, value: JSON.parse(text) };
+                }
+                catch {
+                    return { ok: false, error: `${what} 必须是合法 JSON 字符串` };
+                }
+            };
+            const draft = parse(args.profile, 'profile');
+            if (!draft.ok)
+                return { ok: false, code: 'bad-json', note: draft.error };
+            const vals = parse(args.values, 'values');
+            if (!vals.ok)
+                return { ok: false, code: 'bad-json', note: vals.error };
+            const project = args.project ?? '';
+            const action = args.action;
+            const needProject = () => {
+                if (!project)
+                    throw new Error('该 action 需要 project');
+            };
+            try {
+                if (action === 'list' || action === 'get') {
+                    needProject();
+                    const res = await cockpit(deps, `/api/serial/frames?project=${encodeURIComponent(project)}`);
+                    if (action === 'list')
+                        return res;
+                    if (!args.id)
+                        throw new Error('get 需要 id');
+                    const profiles = res.profiles ?? [];
+                    const hit = profiles.find((p) => p.id === args.id);
+                    if (!hit) {
+                        return { ok: false, code: 'not-found', note: `没有 profile：${args.id}`, profiles: profiles.map((p) => p.id) };
+                    }
+                    return { ...res, profile: hit };
+                }
+                if (action === 'templates') {
+                    const res = await cockpit(deps, '/api/serial/frames/templates');
+                    if (!args.template)
+                        return res;
+                    const list = res.templates ?? [];
+                    const hit = list.find((t) => t.id === args.template);
+                    if (!hit) {
+                        return { ok: false, code: 'not-found', note: `没有模板：${args.template}`, templates: list.map((t) => t.id) };
+                    }
+                    return { ...res, template: hit, profile: hit.profile };
+                }
+                if (action === 'preview') {
+                    if (!draft.value && (!project || !args.id)) {
+                        throw new Error('preview 需要 project+id，或 profile 草稿');
+                    }
+                    const body = {
+                        ...(draft.value
+                            ? { profile: draft.value }
+                            : { project, id: args.id }),
+                        ...(args.hex !== undefined ? { hex: args.hex } : {}),
+                        ...(args.b64 !== undefined ? { b64: args.b64 } : {}),
+                    };
+                    return await cockpit(deps, '/api/serial/frames/preview', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                }
+                if (action === 'encode') {
+                    if (!draft.value && (!project || !args.id)) {
+                        throw new Error('encode 需要 project+id，或 profile 草稿');
+                    }
+                    const body = {
+                        ...(draft.value
+                            ? { profile: draft.value }
+                            : { project, id: args.id }),
+                        values: vals.value ?? {},
+                        ...(args.variant !== undefined ? { variant: args.variant } : {}),
+                        ...(args.length_value !== undefined ? { length_value: args.length_value } : {}),
+                    };
+                    return await cockpit(deps, '/api/serial/frames/encode', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                }
+                if (action === 'save' || action === 'delete' || action === 'import') {
+                    if (!deps.allowAgentWrite()) {
+                        return {
+                            ok: false,
+                            code: 'agent-write-disabled',
+                            note: '改 profile 会写盘：需要用户在设置里开启 allowAgentWrite',
+                        };
+                    }
+                    if (args.rev === undefined) {
+                        throw new Error('写操作需要 rev（先 action=list 取 rev 再重试）');
+                    }
+                    if (action === 'save') {
+                        if (!draft.value)
+                            throw new Error('save 需要 profile JSON');
+                        needProject();
+                        return await cockpit(deps, '/api/serial/frames', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'save', project, rev: args.rev, profile: draft.value }),
+                        });
+                    }
+                    if (action === 'delete') {
+                        needProject();
+                        if (!args.id)
+                            throw new Error('delete 需要 id');
+                        return await cockpit(deps, '/api/serial/frames', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'delete', project, rev: args.rev, id: args.id }),
+                        });
+                    }
+                    needProject();
+                    if (!args.template)
+                        throw new Error('import 需要 template');
+                    return await cockpit(deps, '/api/serial/frames/templates/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            project,
+                            rev: args.rev,
+                            template: args.template,
+                            ...(args.new_id !== undefined ? { new_id: args.new_id } : {}),
+                        }),
+                    });
+                }
+                return { ok: false, code: 'bad-action', note: `未知 action：${action}` };
+            }
+            catch (error) {
+                return {
+                    ok: false,
+                    code: 'frame-profile-failed',
+                    note: error instanceof Error ? error.message : String(error),
+                };
+            }
         },
     }));
     add(makeTool({

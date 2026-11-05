@@ -50,6 +50,22 @@ DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页
 窄栏没有源码 gutter，用**函数 / 地址断点**（可加条件）；调用栈、寄存器、变量、内存等子页签按内核
 `meta.debug.features` 出现；「关闭」= `monitor reset run`（目标复位并继续跑）。
 
+### 2026-11-05 新增：帧协议 P0/P1（位域 / 变长 / 多 ID / 组帧，STM32F103C8T6 实机）
+
+`projects/<name>.frames.json` 的 profile 扩展了三类切帧/取字段能力：
+
+- **位域**：字段加 `bit_offset` / `bit_length` / `bit_order`（`lsb0` 默认、`msb0` 线性大端位流）；
+- **变长**：`frame.length_field` 按帧内长度字段 `total = raw*mul + add` 切帧；
+- **多 ID**：`frame.id_field` + `variants`，按 id 分发字段，通道取并集、缺失为 `null`。
+
+驾驶舱 `帧协议` 抽屉提供 4 份只读模板、**未保存草稿预览**和**字段值 → HEX 反向组帧**。
+Agent 侧新增 `elab_frame_profile`（list/get/preview/save/delete/encode/templates/import）：
+只写声明式 JSON，写操作需要 `allowAgentWrite` + `rev`。窄栏仍只读选 profile。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/serial-frames/02-wave-telemetry.png" width="330" alt="右栏：位域遥测 profile 实时波形">
+
+完整演示与验收见 [串口面板教程 §5.6](../../docs/tutorials/07-串口面板使用.md)。
+
 ### 2026-11-04 新增：三条链路 / 帧协议 / 日志诊断 / 波形测量（ESP32-S31 实机）
 
 新固件 [`examples/ESP32S31_Wave`](../../examples/ESP32S31_Wave) 专为教学做的「一眼能看懂」数据源：
@@ -207,6 +223,7 @@ agent：elab_status（拿工程名）→ elab_triple → elab_log
 | 编译 + 烧录 + 调试校验 | `elab_status` → `elab_triple` → `elab_log` |
 | 完整体检 + 串口闭环 | `elab_status` → `elab_loop` → `elab_log` |
 | 看运行日志 / 判活 | `elab_serial_monitor(open)` → `elab_serial_wait`（等 `[alive]`）→ `elab_serial_read` |
+| 解协议帧 / 改 profile / 组帧 | `elab_frame_profile(list)` → `preview`（可传草稿）→ `encode` → `save`（`rev` + `allowAgentWrite`） |
 | 单步 / 断点 / 寄存器 | `elab_debug_open` → `elab_debug_control` → `elab_debug_inspect` → `elab_debug_close` |
 | 接新工程 / 换芯片包 | `elab_adapt`（`write=false` 先探测）→ `elab_pkg(install/activate)` |
 

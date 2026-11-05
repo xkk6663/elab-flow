@@ -1,0 +1,42 @@
+{
+  "id": "mavlink_v1",
+  "label": "MAVLink v1（长度字段驱动）",
+  "desc": "FE 头 + 帧内长度字段 + msgid；不同消息长度共用一个 profile，帧长 = payload + 8。",
+  "frame": {
+    "head_hex": "fe",
+    "max_bytes": 256,
+    "length_field": {
+      "offset": 1,
+      "type": "u8",
+      "mul": 1,
+      "add": 8
+    },
+    "id_field": {
+      "offset": 5,
+      "type": "u8"
+    }
+  },
+  "checksum": {
+    "kind": "none"
+  },
+  "fields": [
+    {
+      "name": "sysid",
+      "offset": 3,
+      "type": "u8",
+      "plot": false
+    },
+    {
+      "name": "compid",
+      "offset": 4,
+      "type": "u8",
+      "plot": false
+    },
+    {
+      "name": "msgid",
+      "offset": 5,
+      "type": "u8",
+      "plot": false
+    }
+  ]
+}

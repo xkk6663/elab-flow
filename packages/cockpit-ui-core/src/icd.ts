@@ -833,8 +833,8 @@ export interface SerialDecodeResult {
   ok: boolean;
   decoder: string;
   channels: number;
-  /** 每帧的通道值（顺序 = 通道号） */
-  frames: number[][];
+  /** 每帧的通道值（顺序 = 通道号）；多 ID 时按字段并集对齐，当前 variant 缺的通道为 null */
+  frames: Array<Array<number | null>>;
   total_frames: number;
   skipped: number;
   /** 半帧字节数（尾标记缺失/最后一行没换行），由调用方拼进下一批 */
@@ -843,13 +843,32 @@ export interface SerialDecodeResult {
   input_bytes: number;
   error?: string;
   /** 帧协议（M5）：每帧的字段值（name → 数值/文本/hex） */
-  records?: Array<{ fields: Record<string, number | string | null>; values: number[] }>;
+  records?: Array<{
+    fields: Record<string, number | string | null>;
+    values: Array<number | null>;
+    /** 多 ID：命中的消息 id / variant 标签（单 profile 旧内核可能缺） */
+    id?: number | null;
+    variant?: string | null;
+  }>;
   /** 帧协议（M5）：字段元数据（波形通道名/单位来自这里） */
-  fields?: Array<{ name: string; unit: string; type: string; plot: boolean }>;
+  fields?: SerialFrameFieldMeta[];
   /** 帧协议（M5）：校验失败帧数（失败帧计入 skipped，不静默丢） */
   checksum_fail?: number;
+  /** 多 ID：id_field 未命中任何 variant 且无兜底字段的帧数 */
+  unknown_id?: number;
   /** 最近若干条解码错误（字段越界/校验失败原因） */
   errors?: string[];
+}
+
+/** 波形通道元数据（frame.fields 的投影）。 */
+export interface SerialFrameFieldMeta {
+  name: string;
+  unit: string;
+  type: string;
+  plot: boolean;
+  bit_offset?: number;
+  bit_length?: number;
+  bit_order?: "lsb0" | "msb0";
 }
 
 // ── 帧协议 profile（M5）──────────────────────────────────────────
@@ -866,6 +885,37 @@ export interface SerialFrameField {
   enum?: Record<string, string> | null;
   /** 是否作为波形通道（enum/ascii/bytes 恒为 false） */
   plot: boolean;
+  /** 位域（P0）：从 offset 字节的 bit_offset 位起取 bit_length 位 */
+  bit_offset?: number;
+  bit_length?: number;
+  bit_order?: "lsb0" | "msb0";
+}
+
+/** 变长切帧（P0）：总长 = raw * mul + add，raw 从帧首 offset 读取。 */
+export interface SerialFrameLengthField {
+  offset: number;
+  type: "u8" | "u16";
+  endian: "le" | "be";
+  mul: number;
+  add: number;
+}
+
+/** 多 ID（P0）：从帧内读消息 id，再按 variants 分发字段。 */
+export interface SerialFrameIdField {
+  offset: number;
+  type: string;
+  endian: "le" | "be";
+  bit_offset?: number;
+  bit_length?: number;
+  bit_order?: "lsb0" | "msb0";
+}
+
+/** 多 ID 的一个分支：id 命中时用它的字段（checksum 可覆盖 profile 级）。 */
+export interface SerialFrameVariant {
+  id: number;
+  label: string;
+  fields: SerialFrameField[];
+  checksum?: { kind: "none" | "sum8" | "xor8" | "crc16modbus"; at: "tail" | "head" };
 }
 
 /** 工程帧协议（`projects/<name>.frames.json` 的一份 profile）。 */
@@ -878,9 +928,45 @@ export interface SerialFrameProfile {
     tail_hex: string;
     length: number | null;
     max_bytes: number;
+    /** 变长切帧（P0） */
+    length_field?: SerialFrameLengthField | null;
+    /** 多 ID（P0） */
+    id_field?: SerialFrameIdField | null;
   };
   checksum: { kind: "none" | "sum8" | "xor8" | "crc16modbus"; at: "tail" | "head" };
   fields: SerialFrameField[];
+  /** 多 ID 分支（P0） */
+  variants?: SerialFrameVariant[];
+}
+
+/** 只读模板库的一项（P1）：`templates/frames/*.json` 的已校验投影。 */
+export interface SerialFrameTemplate {
+  id: string;
+  label: string;
+  desc: string;
+  file: string;
+  profile: SerialFrameProfile;
+}
+
+/** GET `/api/serial/frames/templates` 的结果。 */
+export interface SerialFrameTemplatesResponse {
+  ok: boolean;
+  templates: SerialFrameTemplate[];
+  errors?: string[];
+  path?: string;
+}
+
+/** POST `/api/serial/frames/encode` 的结果（字段值 → 字节）。 */
+export interface SerialFrameEncodeResult {
+  ok: boolean;
+  id?: string;
+  variant?: string | null;
+  variant_id?: number;
+  hex?: string;
+  bytes?: number;
+  length_field?: number | null;
+  checksum?: string | null;
+  error?: string;
 }
 
 /** GET/POST `/api/serial/frames` 的结果（rev 乐观锁）。 */

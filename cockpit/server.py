@@ -107,11 +107,75 @@ SERIAL_META = {
     # 帧协议配置（M5）：限制与校验目标由内核给出，面板不写死
     "frames": {"max_profiles": sf.MAX_PROFILES, "max_fields": sf.MAX_FIELDS,
                "max_frame_bytes": sf.MAX_FRAME, "max_file_bytes": sf.MAX_FILE,
+               "max_variants": sf.MAX_VARIANTS,
                "types": list(sf.TYPES), "endians": list(sf.ENDIANS),
                "checksums": list(sf.CHECKS),
+               "bit_orders": list(sf.BIT_ORDERS),
+               "length_field_types": list(sf.LENGTH_FIELD_TYPES),
+               # 声明式 schema：Agent/前端按此自行构造 profile，不猜字段
+               "schema": {
+                   "profile": {
+                       "id": "[a-z0-9_-]{1,32}",
+                       "label": "string",
+                       "kind": "binary",
+                       "frame": "frame（见下）",
+                       "checksum": "{kind: none|sum8|xor8|crc16modbus, at: tail|head}",
+                       "fields": "[field]（可选，variant 未命中时的兜底）",
+                       "variants": "[variant]（可选，最多 max_variants）",
+                   },
+                   "frame": {
+                       "head_hex": "hex（可选）",
+                       "tail_hex": "hex（可选）",
+                       "length": "int|null（固定帧长，与 length_field 互斥）",
+                       "max_bytes": "int（默认 256）",
+                       "length_field": {
+                           "offset": "int（从帧首字节算）",
+                           "type": "u8|u16",
+                           "endian": "le|be",
+                           "mul": "number=1（总长 = raw * mul + add）",
+                           "add": "number=0（可为负）",
+                       },
+                       "id_field": {
+                           "offset": "int",
+                           "type": "整数类型",
+                           "endian": "le|be",
+                           "bit_offset": "0..7（可选）",
+                           "bit_length": "1..32（可选）",
+                           "bit_order": "lsb0|msb0（可选）",
+                       },
+                   },
+                   "field": {
+                       "name": "string（profile 内唯一）",
+                       "type": "u8|u16|u24|u32|i8|i16|i24|i32|f32|f64|ascii|bytes",
+                       "offset": "int",
+                       "endian": "le|be",
+                       "length": "ascii/bytes 必填",
+                       "scale": "number=1",
+                       "bias": "number=0",
+                       "unit": "string",
+                       "enum": "{raw: label}（可选；有 enum 时不做波形通道）",
+                       "plot": "bool",
+                       "bit_offset": "0..7（可选，需同时给 bit_length）",
+                       "bit_length": "1..32（可选；只对整型）",
+                       "bit_order": "lsb0|msb0（默认 lsb0）",
+                   },
+                   "variant": {
+                       "id": "int 或 0x 十六进制字符串",
+                       "label": "string",
+                       "fields": "[field]",
+                       "checksum": "可选；不写则用 profile.checksum",
+                   },
+               },
+               "templates": {"path": str(sf.TEMPLATE_SUBDIR),
+                             "list": "/api/serial/frames/templates",
+                             "import": "/api/serial/frames/templates/import"},
                "endpoints": {"load": "/api/serial/frames",
                              "save": "/api/serial/frames",
-                             "preview": "/api/serial/frames/preview"}},
+                             "preview": "/api/serial/frames/preview",
+                             "encode": "/api/serial/frames/encode",
+                             "templates": "/api/serial/frames/templates",
+                             "template_import":
+                                 "/api/serial/frames/templates/import"}},
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
                  "capture", "capture_export", "waveform",
                  # 通用发送面板（P1）：自动格式识别 + 服务端字节预览
@@ -134,6 +198,9 @@ SERIAL_META = {
                  "log_profiles", "panic_issues", "symbolize",
                  # 帧协议（M5）：配置读写 + 无硬件预览 + 实时字段表
                  "frame_profiles", "frame_preview", "frame_fields",
+                 # 帧协议增强（P0/P1）：位域 / 变长 / 多 ID / 反向组帧 / 模板
+                 "frame_bitfields", "frame_length_field", "frame_variants",
+                 "frame_encode", "frame_templates", "agent_frame_edit",
                  # 网络传输（M4）：TCP 客户端/服务端 + UDP，默认只绑回环
                  "net_transport", "udp", "allow_remote"],
     # 传输种类（M4，内核自描述）：面板按此渲染「连接方式」，不写死业务名词
@@ -188,6 +255,25 @@ SERIAL_META = {
 }
 
 COCKPIT_VERSION = "3.1.0"
+
+
+def _sync_serial_decoder(cfg, project: str, pid: str, deleted: bool) -> None:
+    """profile 保存/删除后热更新会话解码器（只动正在用该 profile 的会话）。"""
+    snap = serialmon_mod.status()
+    if not snap.get("active"):
+        return
+    cur = str(snap.get("decoder") or "")
+    if not (cur == "profile" or cur.startswith("profile:")):
+        return
+    cur_id = cur.split(":", 1)[1].strip() if ":" in cur else ""
+    if cur_id != pid:
+        return
+    if deleted:
+        serialmon_mod.set_decoder("", actor="profile-sync", cfg=cfg,
+                                  project=project)
+    else:
+        serialmon_mod.set_decoder(cur, actor="profile-sync", cfg=cfg,
+                                  project=project)
 
 DEBUG_LEASE_DEFAULT_S = 600
 DEBUG_LEASE_MIN_S = 60
@@ -1712,6 +1798,9 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 if not project:
                     raise ElabError("frames 需要 project 参数")
                 return self._json(sf.load(self.cfg, project))
+            if path == "/api/serial/frames/templates":
+                # 只读模板库（P1）：协议数据，不是可执行代码。
+                return self._json(sf.list_templates(self.cfg))
             if path == "/api/serial/monitor/issues":
                 # 结构化 issue 增量读回（panic / hardfault / 复位；M6）。
                 raw = (qs.get("after") or ["0"])[0]
@@ -2215,13 +2304,65 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     raise ElabError("action 必须是 save/delete")
                 if res.get("conflict"):
                     return self._json(res, 409)
+                if res.get("ok"):
+                    pid = (str(body.get("id") or "") if action == "delete"
+                           else str((body.get("profile") or {}).get("id") or ""))
+                    if pid:
+                        _sync_serial_decoder(self.cfg, project, pid,
+                                             action == "delete")
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/templates/import":
+                # 模板 → 工程 profile（仍走 save：rev 乐观锁，不覆盖冲突）。
+                body = self._body()
+                project = str(body.get("project") or "")
+                if not project:
+                    raise ElabError("模板导入需要 project")
+                try:
+                    rev = int(body.get("rev") or 0)
+                except (TypeError, ValueError):
+                    raise ElabError("rev 必须是整数")
+                res = sf.import_template(
+                    self.cfg, project, rev,
+                    str(body.get("template") or ""),
+                    str(body.get("new_id") or ""))
+                if res.get("conflict"):
+                    return self._json(res, 409)
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/encode":
+                # 反向组帧（P1）：字段值 → 字节；支持未保存草稿。
+                body = self._body()
+                prof = None
+                if isinstance(body.get("profile"), dict):
+                    try:
+                        prof = sf.normalize_profile(body["profile"])
+                    except ValueError as exc:
+                        raise ElabError(str(exc))
+                else:
+                    project = str(body.get("project") or "")
+                    pid = str(body.get("id") or "")
+                    if not project or not pid:
+                        raise ElabError("encode 需要 project+id 或 profile 草稿")
+                    prof = sf.get(self.cfg, project, pid)
+                    if prof is None:
+                        raise ElabError(f"未找到帧协议 profile：{pid!r}")
+                res = serialcodec_mod.encode(
+                    prof, body.get("values") or {}, body.get("variant"),
+                    body.get("length_value"))
                 return self._json(res, 200 if res.get("ok") else 400)
             if u.path == "/api/serial/frames/preview":
                 # 帧解析预览（M5）：不需要开串口/会话，改配置立即验证。
                 body = self._body()
                 project = str(body.get("project") or "")
                 pid = str(body.get("id") or "")
-                prof = sf.get(self.cfg, project, pid) if pid else None
+                if isinstance(body.get("profile"), dict):
+                    # 未保存草稿：校验后直接预览（Agent 先验证再落盘）
+                    try:
+                        prof = sf.normalize_profile(body["profile"])
+                    except ValueError as exc:
+                        raise ElabError(str(exc))
+                    pid = prof["id"]
+                else:
+                    prof = sf.get(self.cfg, project, pid) if pid else None
                 if prof is None:
                     raise ElabError(f"未找到帧协议 profile：{pid!r}")
                 if body.get("b64"):
@@ -2292,10 +2433,18 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 prof = None
                 pid = str(body.get("profile") or "")
                 if decoder == "profile" or decoder.startswith("profile:"):
-                    if not pid and ":" in decoder:
-                        pid = decoder.split(":", 1)[1]
-                    prof = sf.get(self.cfg, str(body.get("project") or ""), pid) \
-                        if pid else None
+                    if isinstance(body.get("profile"), dict):
+                        # 草稿 profile（Agent 不落盘也能解码）
+                        try:
+                            prof = sf.normalize_profile(body["profile"])
+                        except ValueError as exc:
+                            raise ElabError(str(exc))
+                        pid = prof["id"]
+                    else:
+                        if not pid and ":" in decoder:
+                            pid = decoder.split(":", 1)[1]
+                        prof = sf.get(self.cfg, str(body.get("project") or ""), pid) \
+                            if pid else None
                 res = serialcodec_mod.decode(data, decoder,
                                              channels=body.get("channels"),
                                              profile=prof)

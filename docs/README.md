@@ -27,6 +27,9 @@
 | [设计约束](design/设计约束.md) | C1–C36 硬约束，每条附「为什么」与事故来源 |
 | [技术方案_ESP32接入与工具链解耦](design/技术方案_ESP32接入与工具链解耦.md) | ESP32/ESP-IDF 首次接入记录（A 方案内联 `tools:`）；当前主路径已迁移到 Provider，内联写法仅作 `--no-provider` 兜底 |
 | [技术方案_Provider工具链架构](design/技术方案_Provider工具链架构.md) | 默认链/外带链同构的 Provider 架构契约：manifest、绑定优先级、缺步骤不回退、市场分发、`ctx.provide()` 边界（P1/P2 已实现，ESP32 实机闭环通过；P3 外带 GDB 搁置） |
+| [技术方案_调试面板复刻cortex-debug](design/技术方案_调试面板复刻cortex-debug.md) | 调试工作区 P0–P3：断点/单步、调用栈、变量、寄存器、内存、外设、RTOS 栈水位与审计 |
+| [执行计划_调试P3_源码单步与多会话与寄存器组](design/执行计划_调试P3_源码单步与多会话与寄存器组.md) | 调试 P3 落地：源码单步、多会话、寄存器组编辑、反汇编（已实现，F103 实机） |
+| [执行计划_帧协议P0P1与Agent编辑](design/执行计划_帧协议P0P1与Agent编辑.md) | 串口帧协议 P0/P1：位域、变长、多 ID、反向组帧、模板库与 `elab_frame_profile`（已实现，F103 实机） |
 
 ## reports/ —— 验证报告与可行性研究
 
@@ -48,7 +51,7 @@
 | [04-调试面板上手_STM32F103C8T6](tutorials/04-调试面板上手_STM32F103C8T6.md) | **调试工作区**（已实拍）：真实 HardFault 排错主线 —— 断点 → 调用栈 → 寄存器 → 监视 → 内存 → 外设（P2）→ RTOS 栈水位（P3）→ 审计 → 修复重烧 → 串口恢复 |
 | [05-DSH插件上手_STM32F103C8T6](tutorials/05-DSH插件上手_STM32F103C8T6.md) | D 篇（已实拍）：DSH 右侧栏四块 → 自动只读探测接入 → 三连 → 串口心跳判活/关闭监视 → 调试工作区（单步/断点/变量/寄存器/关闭恢复）；STM32F103C8T6 实机截图 |
 | [06-CLI终端闭环上手](tutorials/06-CLI终端闭环上手.md) | **终端闭环上手**（实机 F411）：一条 `elab loop` 跑完 5 阶段，终端按输出类型分色，含 doctor/build/flash/debug/monitor 逐步截图 |
-| [07-串口面板使用](tutorials/07-串口面板使用.md) | **串口面板上手**（实机 F103 + ESP32）：发送/历史/定时 → 四视图 → 波形多面板 → 断线重连 / 日志诊断 / 帧协议 / TCP-UDP |
+| [07-串口面板使用](tutorials/07-串口面板使用.md) | **串口面板上手**（实机 F103 + ESP32）：发送/历史/定时 → 四视图 → 波形多面板 → 断线重连 / 日志诊断 / 帧协议 / TCP-UDP；§5.6 为帧协议 P0/P1（位域/变长/多 ID/模板/组帧）实机演示 |
 | [08-串口压力测试报告_STM32F411CEU6](tutorials/08-串口压力测试报告_STM32F411CEU6.md) | **串口压力测试报告**（实机 F411）：高压收发下的丢包/挤出/时序统计与结论 |
 
 ## requirements/ —— 需求对照
@@ -59,7 +62,7 @@
 
 ## 其他
 
-- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 串口与波形面板、`serial-2/` 串口 M2/M4–M7（独立 WebUI）、`wave/` 同一批能力在 DSH 右栏的实拍、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
+- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 串口与波形面板、`serial-2/` 串口 M2/M4–M7（独立 WebUI）、`serial-frames/` 帧协议 P0/P1（位域/变长/多 ID/组帧）、`wave/` 同一批能力在 DSH 右栏的实拍、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
   README 首屏与调试/串口章节也直接引用其真机截图。
 - 实机验证截图在 `packages/dsh-elab-cockpit/docs/screenshots/`（插件 README 使用）。
 - 版本变更记录在仓库根 [CHANGELOG.md](../CHANGELOG.md)；工作规则见 [AGENTS.md](../AGENTS.md)。

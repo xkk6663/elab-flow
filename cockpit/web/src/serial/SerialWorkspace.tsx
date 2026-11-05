@@ -21,6 +21,8 @@ import type {
   SerialDecodeResult,
   SerialFormat,
   SerialFrameProfile,
+  SerialFrameTemplate,
+  SerialFrameEncodeResult,
   SerialIssue,
   SerialLogProfile,
   SerialSymbol,
@@ -275,6 +277,11 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [framePreview, setFramePreview] = useState<SerialDecodeResult | null>(null);
   const [frameNotice, setFrameNotice] = useState<string | null>(null);
   const [framesOpen, setFramesOpen] = useState(false);
+  const [frameTemplates, setFrameTemplates] = useState<SerialFrameTemplate[]>([]);
+  const [frameTpl, setFrameTpl] = useState("");
+  const [frameValues, setFrameValues] = useState("{}");
+  const [frameVariant, setFrameVariant] = useState("");
+  const [frameEncoded, setFrameEncoded] = useState<SerialFrameEncodeResult | null>(null);
 
   const loadFrames = useCallback(async (select = ""): Promise<void> => {
     if (!project) {
@@ -377,10 +384,57 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     }
   }, [project, frameSel, frameRev, loadFrames]);
 
+  const loadFrameTemplates = useCallback(async (): Promise<void> => {
+    try {
+      const r = await api.serialFrameTemplates();
+      setFrameTemplates(r.templates ?? []);
+      if (r.errors?.length) setFrameNotice(`模板库：${r.errors.join("；")}`);
+    } catch (e) {
+      setFrameNotice(`✗ 模板读取失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (framesOpen) void loadFrameTemplates();
+  }, [framesOpen, loadFrameTemplates]);
+
+  const importFrameTemplate = useCallback(async (): Promise<void> => {
+    if (!project || !frameTpl) return;
+    try {
+      const r = await api.serialFrameTemplateImport({
+        project, rev: frameRev, template: frameTpl,
+      });
+      if (!r.ok) {
+        setFrameNotice(`✗ ${r.error ?? "模板导入失败"}`);
+        if (r.conflict) void loadFrames();
+        return;
+      }
+      const importedId = (r as { imported?: string }).imported ?? frameTpl;
+      setFrameRev(r.rev);
+      setFrameProfiles(r.profiles ?? []);
+      setFrameWarns(r.warnings ?? []);
+      const hit = (r.profiles ?? []).find((p) => p.id === importedId)
+        ?? (r.profiles ?? [])[0];
+      if (hit) {
+        setFrameSel(hit.id);
+        setFrameDoc(JSON.stringify(hit, null, 2));
+      }
+      setFrameNotice(`✓ 已从模板导入 ${hit?.id ?? importedId}（rev ${r.rev}）`);
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [project, frameTpl, frameRev, loadFrames]);
+
   const previewFrameProfile = useCallback(async (): Promise<void> => {
-    if (!project) return;
-    if (!frameSel) {
-      setFrameNotice("✗ 先保存 profile 再预览（预览按已保存配置解码）");
+    if (!frameDoc.trim()) {
+      setFrameNotice("✗ 先选择/新建并编辑 profile（预览支持未保存草稿）");
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(frameDoc);
+    } catch (e) {
+      setFrameNotice(`✗ JSON 语法错误：${e instanceof Error ? e.message : String(e)}`);
       return;
     }
     const hex = frameHex.trim();
@@ -389,15 +443,56 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       return;
     }
     try {
-      const r = await api.serialFramesPreview({ project, id: frameSel, hex });
+      const r = await api.serialFramesPreview({ profile: raw, hex });
       setFramePreview(r);
       setFrameNotice(r.ok
-        ? `✓ 解出 ${r.total_frames} 帧（跳过 ${r.skipped}，校验失败 ${r.checksum_fail ?? 0}）`
+        ? `✓ 解出 ${r.total_frames} 帧（跳过 ${r.skipped}，校验失败 ${r.checksum_fail ?? 0}` +
+          `${r.unknown_id ? `，未知 ID ${r.unknown_id}` : ""}）`
         : `✗ ${r.error ?? "预览失败"}`);
     } catch (e) {
       setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [project, frameSel, frameHex]);
+  }, [frameDoc, frameHex]);
+
+  const encodeFrameProfile = useCallback(async (): Promise<void> => {
+    if (!frameDoc.trim()) {
+      setFrameNotice("✗ 先选择/新建 profile");
+      return;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(frameDoc);
+    } catch (e) {
+      setFrameNotice(`✗ profile JSON 语法错误：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    let values: Record<string, unknown>;
+    try {
+      values = JSON.parse(frameValues || "{}") as Record<string, unknown>;
+    } catch (e) {
+      setFrameNotice(`✗ 字段值 JSON 语法错误：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    try {
+      const r = await api.serialFramesEncode({
+        profile: raw,
+        values,
+        ...(frameVariant.trim() ? { variant: frameVariant.trim() } : {}),
+      });
+      setFrameEncoded(r);
+      if (!r.ok) {
+        setFrameNotice(`✗ ${r.error ?? "组帧失败"}`);
+        return;
+      }
+      setDraft(r.hex ?? "");
+      setSendFormat("hex");
+      setFrameNotice(
+        `✓ 组帧 ${r.bytes ?? 0} B${r.variant ? `（${r.variant}）` : ""}` +
+        `${r.checksum ? ` · ${r.checksum}` : ""} —— 已填到发送框，回车即发`);
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [frameDoc, frameValues, frameVariant]);
 
   // ── DTR/RTS + 复位预设（M1）───────────────────────────────
   // 预设清单来自适配包 `pack.yaml`（内核只执行，不判断厂商）；没有预设时
@@ -646,7 +741,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   // ── 波形：对最近一段字节调用内核解码，Canvas 画多通道 ────────
   // ★ 会话开着且共享解码器 = 当前选择时，改用**会话共享帧**（带 t_us）：
   //   既与 agent/插件同图，也让游标 Δt 有真实时间源（M7）。离线才退回无状态解码。
-  const [localFrames, setLocalFrames] = useState<number[][]>([]);
+  const [localFrames, setLocalFrames] = useState<Array<Array<number | null>>>([]);
   const [decodeMeta, setDecodeMeta] = useState<{
     channels: number;
     skipped: number;
@@ -731,10 +826,14 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const frames = sharedLane ? stream.decoded.map((f) => f.values) : localFrames;
   /** 每帧时间戳（微秒）；null = 无时间源（Δt 显示 —，不编造） */
   const frameTimes = sharedLane ? stream.decoded.map((f) => f.t_us) : null;
-  /** 通道名/单位：帧协议 profile 才有；其余显示 CHn */
-  const frameFields = sharedLane
-    ? stream.decodedSnap?.fields ?? []
-    : decodeMeta?.fields ?? [];
+  /**
+   * 通道名/单位：帧协议 profile 才有；其余显示 CHn。
+   * ★ 只留 plot 字段 —— 服务端 fields 是**全量字段表**（含 mode/flags 等元数据），
+   *   而 frames.values 只包含可绘制的通道；不过滤会把 mode 标到 bat 的曲线上。
+   */
+  const frameFields = (
+    sharedLane ? stream.decodedSnap?.fields ?? [] : decodeMeta?.fields ?? []
+  ).filter((f) => f.plot);
 
   // ── 波形多面板 + 通道绑定 ──────────────────────────────────────
   interface WaveViewport {
@@ -1254,6 +1353,28 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
             </select>
             <Button size="sm" variant="outline" onClick={newFrameProfile}>新建</Button>
             <Button size="sm" variant="outline" onClick={() => void loadFrames(frameSel)}>刷新</Button>
+            <select
+              className={s.select}
+              value={frameTpl}
+              aria-label="帧协议模板"
+              title="只读模板库 templates/frames/*.json"
+              onChange={(e) => setFrameTpl(e.currentTarget.value)}
+            >
+              <option value="">（从模板导入…）</option>
+              {frameTemplates.map((t) => (
+                <option key={t.id} value={t.id} title={t.desc}>
+                  {t.label}（{t.id}）
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!project || !frameTpl}
+              onClick={() => void importFrameTemplate()}
+            >
+              导入
+            </Button>
             <span className={s.spacer} />
             <span className={s.meta} title={framePath}>rev {frameRev}</span>
           </div>
@@ -1279,10 +1400,38 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!frameSel}
+                  disabled={!frameDoc.trim()}
                   onClick={() => void previewFrameProfile()}
+                  title="支持未保存草稿：按左侧 JSON 直接解码"
                 >
                   预览
+                </Button>
+              </div>
+              <div className={s.framesRow}>
+                <Input
+                  mono
+                  size="sm"
+                  value={frameValues}
+                  placeholder='字段值 JSON（如 {"rpm":100,"mode":"RUN"}）'
+                  aria-label="组帧字段值"
+                  onChange={(e) => setFrameValues(e.currentTarget.value)}
+                />
+                <Input
+                  mono
+                  size="sm"
+                  value={frameVariant}
+                  placeholder="variant（可选，如 0x03）"
+                  aria-label="组帧 variant"
+                  onChange={(e) => setFrameVariant(e.currentTarget.value)}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!frameDoc.trim()}
+                  onClick={() => void encodeFrameProfile()}
+                  title="字段值 → 帧字节，填入下方发送框（HEX）"
+                >
+                  组帧
                 </Button>
               </div>
               <div className={s.framesRow}>
@@ -1321,15 +1470,21 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                   ) : null}
                   {framePreview.records?.length ? (() => {
                     const recs = framePreview.records ?? [];
-                    const keys = Object.keys(recs[0].fields);
+                    // 多 ID：字段集合取并集；当前 variant 缺的字段显示 —。
+                    const keys = Array.from(new Set(recs.flatMap((r) => Object.keys(r.fields))));
+                    const hasMeta = recs.some((r) => r.variant !== undefined || r.id !== undefined);
                     return (
                       <table className={s.framesTable}>
                         <thead>
-                          <tr>{keys.map((k) => <th key={k}>{k}</th>)}</tr>
+                          <tr>
+                            {hasMeta ? <th>ID</th> : null}
+                            {keys.map((k) => <th key={k}>{k}</th>)}
+                          </tr>
                         </thead>
                         <tbody>
                           {recs.slice(-10).map((rec, i) => (
                             <tr key={i}>
+                              {hasMeta ? <td>{rec.variant ?? rec.id ?? "—"}</td> : null}
                               {keys.map((k) => <td key={k}>{String(rec.fields[k] ?? "—")}</td>)}
                             </tr>
                           ))}
@@ -1342,9 +1497,15 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                   ) : null}
                 </div>
               ) : null}
+              {frameEncoded?.ok ? (
+                <div className={s.meta} title="组帧结果">
+                  {`${frameEncoded.bytes ?? 0} B · ${frameEncoded.hex ?? ""}`}
+                </div>
+              ) : null}
               <div className={s.meta}>
-                切帧：head 或 length 必备；offset 从帧首字节算（含 head）；checksum 不含帧尾标记。
-                保存后波形立即按新配置解码（预览按已保存配置）。
+                切帧：head / length / length_field 三选一；offset 从帧首字节算（含 head）；
+                位域用 bit_offset + bit_length（bit_order=lsb0/msb0）；多 ID 用 id_field + variants。
+                校验和不含帧尾标记。预览支持未保存草稿；保存后波形立即按新配置解码。
               </div>
             </div>
           </div>
@@ -1796,7 +1957,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
  * 拖拽的临时量仍是内部 ref；跟随状态也由父组件按 viewport 持有。
  */
 interface WaveChartProps {
-  frames: number[][];
+  frames: Array<Array<number | null>>;
   /** 每帧时间戳（微秒）；null/缺省 = 无时间源（Δt 显示 —，不编造） */
   times?: number[] | null;
   /** 通道名/单位（帧协议字段表；缺省显示 CHn） */
@@ -1843,7 +2004,7 @@ function WaveChart({
   // 波形是"最近 N 字节"的滚动解码窗口：只钉住 offsetX 没用 —— 窗口本身
   // 在滑，同一个 index 已经对应到新数据，曲线看起来就一直在走。
   // 所以 follow=false 时留下**这一刻的帧 + 时间戳快照**，恢复跟随才换回实时帧。
-  const [frozen, setFrozen] = useState<{ frames: number[][]; times: number[] | null } | null>(null);
+  const [frozen, setFrozen] = useState<{ frames: Array<Array<number | null>>; times: number[] | null } | null>(null);
   useEffect(() => {
     if (frames.length === 0) {
       setFrozen(null);
@@ -1873,6 +2034,12 @@ function WaveChart({
 
   // ── 当 frames 更新时自动 follow 到尾 ──────────────────────────
   const lastFramesLen = useRef(0);
+  /**
+   * 视口帧数：以「当前全部帧」为基准按倍率切分（×1 = 全部可见，×2 = 一半）。
+   * ★ 不能再用 canvas 宽度 / scaleX 当槽位数：刚连上只有几十帧时槽位远多于帧数，
+   *   slice 永远被拉伸到满宽 —— 点 +/− 或滚轮都看不出变化（缩放看起来失灵）。
+   */
+  const visibleFrames = (scale: number): number => Math.max(2, Math.round(shown.length / scale));
   useEffect(() => {
     if (shown.length === 0) {
       onView(scaleX, 0);
@@ -1882,17 +2049,12 @@ function WaveChart({
     lastFramesLen.current = shown.length;
     // 只有在 follow=true 且帧增加时才跳；帧清空（clear）也跳回 0
     if (follow) {
-      // 缩放后一屏可见的帧数
-      const canvas = canvasRef.current;
-      const w = canvas?.clientWidth ?? 480;
-      const visible = Math.max(20, Math.ceil(w / scaleX));
+      const visible = visibleFrames(scaleX);
       const maxOffset = Math.max(0, shown.length - visible);
       onView(scaleX, maxOffset);
     } else if (shown.length > 0 && prev === 0) {
       // 从空变成有帧，且 follow=false —— 保持 offsetX 合法
-      const canvas = canvasRef.current;
-      const w = canvas?.clientWidth ?? 480;
-      const visible = Math.max(20, Math.ceil(w / scaleX));
+      const visible = visibleFrames(scaleX);
       onView(scaleX, Math.min(offsetX, Math.max(0, shown.length - visible)));
     }
     // onView/offsetX 故意不进依赖：只在帧数或缩放/跟随变化时重算
@@ -1933,7 +2095,7 @@ function WaveChart({
     const plotBottom = padT + plotH;
 
     // ── 可视帧范围 ──
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    const visibleCount = visibleFrames(scaleX);
     const startIdx = Math.max(0, Math.min(offsetX, shown.length - 1));
     const endIdx = Math.min(shown.length, startIdx + visibleCount);
     const slice = shown.slice(startIdx, endIdx);
@@ -1986,9 +2148,10 @@ function WaveChart({
       ctx.beginPath();
       let started = false;
       for (let i = 0; i < values.length; i++) {
-        if (!Number.isFinite(values[i])) { started = false; continue; }
+        const v = values[i];
+        if (v === null || !Number.isFinite(v)) { started = false; continue; }
         const x = xOf(i);
-        const y = valueToY(values[i], range.lo, range.hi, plotH, gain, offset) + plotTop;
+        const y = valueToY(v, range.lo, range.hi, plotH, gain, offset) + plotTop;
         if (!started) { ctx.moveTo(x, y); started = true; }
         else ctx.lineTo(x, y);
       }
@@ -2012,7 +2175,7 @@ function WaveChart({
       for (const ch of shownCh) {
         const v = f[ch];
         const r = chRange[ch];
-        if (!r || !Number.isFinite(v)) continue;
+        if (!r || v === null || !Number.isFinite(v)) continue;
         const { gain, offset } = axisOf(ch);
         const y = valueToY(v, r.lo, r.hi, plotH, gain, offset) + plotTop;
         ctx.fillStyle = palette[ch % palette.length];
@@ -2039,23 +2202,47 @@ function WaveChart({
   }, [shown, shownTimes, scaleX, offsetX, shownCh, axis, cursor, fields]);
 
   // ── 交互事件 ──────────────────────────────────────────────────
-  const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
+  // 滚轮缩放：用原生监听（passive: false）。React 17+ 在根节点把 wheel 注册为 passive，
+  // preventDefault 无效，滚轮会先滚外层页面，表现为「缩放没反应」。
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const xInCanvas = e.clientX - rect.left;
-    const padL = 8;
-    const plotW = rect.width - padL - 8;
-    const frameAtCursor = Math.round(offsetX + Math.max(0, xInCanvas - padL) / scaleX);
-    // zoom
-    const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2));
-    const visibleCount = Math.max(2, Math.round(plotW / newScale));
-    let newOffset = frameAtCursor - Math.round((xInCanvas - padL) / newScale);
-    newOffset = Math.max(0, Math.min(newOffset, Math.max(0, shown.length - visibleCount)));
-    onView(newScale, newOffset);
-    if (follow) onFollowChange(false);
-  };
+    const onWheel = (e: WheelEvent): void => {
+      if (shown.length === 0) return;
+      e.preventDefault();
+      // Shift+滚轮 = 纵向增益（所有已显示通道一起缩放），普通滚轮仍横向缩放
+      if (e.shiftKey) {
+        const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+        setAxis((prev) => {
+          const next = { ...prev };
+          for (const ch of shownCh) {
+            const cur = next[ch] ?? { gain: 1, offset: 0 };
+            next[ch] = {
+              gain: Math.min(10, Math.max(0.1, cur.gain * factor)),
+              offset: cur.offset,
+            };
+          }
+          return next;
+        });
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const padL = 8;
+      const plotW = Math.max(1, rect.width - padL - 8);
+      const frac = Math.max(0, Math.min(1, (e.clientX - rect.left - padL) / plotW));
+      const span = visibleFrames(scaleX);
+      const frameAtCursor = Math.round(offsetX + frac * span);
+      const newScale = Math.min(20, Math.max(1, e.deltaY < 0 ? scaleX * 1.2 : scaleX / 1.2));
+      if (newScale === scaleX) return;
+      const newSpan = visibleFrames(newScale);
+      const maxOffset = Math.max(0, shown.length - newSpan);
+      const newOffset = Math.max(0, Math.min(maxOffset, frameAtCursor - Math.round(frac * newSpan)));
+      onView(newScale, newOffset);
+      if (follow) onFollowChange(false);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [shown.length, scaleX, offsetX, follow, onView, onFollowChange, shownCh, setAxis]);
 
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     dragRef.current = { startClientX: e.clientX, startOffset: offsetX };
@@ -2071,9 +2258,8 @@ function WaveChart({
     const padL = 8;
     const plotW = rect.width - padL - 8;
     const dx = e.clientX - dragRef.current.startClientX;
-    // 平移手感必须与**实际画出的帧跨度**一致：帧数少于视口槽位时（低频遥测常见），
-    // 绘制是把整个 slice 铺满宽度，而 `visibleCount` 仍按槽位算 → 用槽位会慢一个数量级。
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
+    // 平移手感必须与**实际画出的帧跨度**一致，视口帧数同样按「总帧数 / 倍率」计算。
+    const visibleCount = visibleFrames(scaleX);
     const startOffset = dragRef.current.startOffset;
     const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(startOffset, shown.length - 1)));
     const offsetDelta = Math.round(-dx * span / plotW);
@@ -2098,8 +2284,8 @@ function WaveChart({
     const padL = 8;
     const plotW = rect.width - padL - 8;
     if (plotW <= 4) return;
-    const visibleCount = Math.max(2, Math.round(plotW / scaleX));
-    // 与绘制同源：slice 铺满整宽时，一屏的真实帧数是 min(槽位, 剩余帧)。
+    const visibleCount = visibleFrames(scaleX);
+    // 与绘制同源：一屏真实帧数是 min(视口帧数, 剩余帧)。
     const span = Math.max(1, Math.min(visibleCount, shown.length - Math.min(offsetX, shown.length - 1)));
     const within = nearestFrameIndex((e.clientX - rect.left - padL) / plotW, span);
     const idx = Math.max(0, Math.min(shown.length - 1, offsetX + within));
@@ -2289,7 +2475,6 @@ function WaveChart({
         ref={canvasRef}
         className={s.canvas}
         style={{ cursor: canvasReady ? (dragActive.current ? "grabbing" : "crosshair") : "default" }}
-        onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={endDrag}

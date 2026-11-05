@@ -17,6 +17,7 @@
 | **数据层（适配包）** | `packs/official/**`、`packs/installed/**` | 芯片参数 / 厂商指纹 / 平台坑位 —— **芯片知识的唯一宿主**；骨架仓不内置任何芯片 |
 | **数据层（工具链 provider）** | `providers/official/**`、`providers/installed/**` | 声明式 `provider.yaml`（命令模板/env/产物/主机前提），**不是可执行插件**；`providers/installed/` 不入库 |
 | **数据层（市场）** | `market/index.json` | 零服务器社区市场索引（包内容留在作者仓库，索引只记 name/version/source/sha256/requires/license） |
+| **数据层（帧协议模板）** | `templates/frames/**` | 只读协议模板（telemetry/mavlink/modbus/dlt645）；导入时复制为工程 profile，**不是芯片包** |
 | **工具层** | `packages/dsh-elab-cockpit/**` | DSH 插件（开发工具整合器）：面板可视化、进程托管、`elab_*` agent 工具；源码在本仓。市场与 npm 都直接取自该子目录，无额外分发仓 |
 
 ## Agent 边界规则（硬）
