@@ -1,6 +1,6 @@
 # STM32-OTA-QT → F411CEU6 平台化移植技术方案
 
-> 工程：`examples/STM32F411CEU6`（APP，FreeRTOS）＋ 新建 `examples/F411CEU6_BOOT`（Bootloader）
+> 工程：`examples/STM32F411CEU6`（APP，FreeRTOS）＋ `examples/STM32F411CEU6/boot`（Bootloader）
 > 源工程：`C:/Users/xiao1/Desktop/STM32-OTA-QT`（STM32F103C8 IAP + PyQt6 上位机）
 > 组件真身：`C:/Users/xiao1/Desktop/AT32/AT32F421G8U7_WorkBench/ota/`（core 已双平台回归）
 > 目标：**0 功能阉割**移植，按 elab「一切皆组件」原则把 OTA 收进框架，上位机全功能复现。
@@ -224,7 +224,7 @@ APP 的 LED/按键/FreeRTOS 业务全部留在 F411 工程（组件只提供 `ot
 
 | 工程 | root | 说明 |
 |---|---|---|
-| `f411_boot`（新） | `examples/F411CEU6_BOOT/` | 精简 bare-metal CMake 工程（无 CubeMX）：startup（复用 APP 的 `startup_stm32f411xe.s`）+ `BOOT.ld`（32K）+ 薄 main.c（`Transport_Attach + OtaBootFlow_Run`，流程在组件 §3.5）+ 组件 `VARIANT boot` |
+| `f411_boot`（新） | `examples/STM32F411CEU6/boot/` | 精简 bare-metal CMake 工程（无 CubeMX）：startup（复用 APP 的 `startup_stm32f411xe.s`）+ `BOOT.ld`（32K）+ 薄 main.c（`Transport_Attach + OtaBootFlow_Run`，流程在组件 §3.5）+ 组件 `VARIANT boot` |
 | `f411`（现有） | `examples/STM32F411CEU6/` | APP：改 APP 布局 ld + VTOR + 组件 `VARIANT app`（FreeRTOS 侧集成） |
 
 - `f411_boot.yaml`：archetype=A（无 preset/无行内 include，elab `-D` 全接管）；产物 `411_boot.elf/bin`。
@@ -391,7 +391,7 @@ iap_host_tool/
    **验收**：`components/` 单独 configure 通过；`OtaFlashHal_*` 与 `ota_protocol.c` 编译零警告（-Wall -Wextra）；**准入扫描**（§3.5 规则 #5）grep 组件目录产品头文件命中数为 0。
 5. 生成 `host/capabilities.json`（组件注册表 → 上位机能力位图翻译，§6.1 单一数据源）。
 
-### M1 boot 工程（examples/F411CEU6_BOOT）
+### M1 boot 工程（examples/STM32F411CEU6/boot）
 1. 手写 CMake + `BOOT.ld`（32K）+ main.c + boot.c（F4 化：`HAL_RCC_DeInit` 跳转、`EraseRange`）。
 2. `projects/f411_boot.yaml` + `elab doctor -p f411_boot --deep`。
    **验收**：doctor 全绿（`deep.f411_boot.flag` 含 `-mfpu=fpv4-sp-d16`）；build 产物 `411_boot.bin ≤ 32K`。
@@ -573,7 +573,7 @@ iap_host_tool/
   每帧都陪主循环睡 1s。注意"缓冲非空才延时"的修法**无效**（停等下缓冲恒空）。
 - **修法**：HAL_GetTick 节拍——1s 最多一条心跳、仅空闲时打印、绝不阻塞收包。
 - **教训**：**任何**无条件/判空式 delay 都会与停等协议相乘；心跳必须基于时基节拍。
-- **落点**：`examples/F411CEU6_BOOT/main.c`。
+- **落点**：`examples/STM32F411CEU6/boot/main.c`。
 
 ### 10.8 升级后硬件复位与存活判定关键字平台化（M4，上位机）
 

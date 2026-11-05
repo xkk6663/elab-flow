@@ -1,0 +1,57 @@
+# projects/esp32s31_wave.yaml —— ESP32-S31 三链路波形演示工程
+#
+# 与 esp32s31_korvo 共用 espressif/esp32 包与 espressif/idf provider；
+# 这里只换 root/产物与日志诊断规则，用来演示 M4/M5/M6/M7。
+
+name: esp32s31_wave
+root: ${ELAB_ROOT}/examples/ESP32S31_Wave
+pack: espressif/esp32
+chip: esp32s31
+archetype: idf
+provider: espressif/idf@>=1 <2
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${root}/build
+
+artifacts:
+  elf: ${root}/build/esp32s31_wave.elf
+  bin: ${root}/build/esp32s31_wave.bin
+  map: ${root}/build/esp32s31_wave.map
+  flash_args: ${root}/build/flasher_args.json
+
+serial:
+  port: auto
+  baud: 115200
+  reconnect: { enabled: true, min_ms: 200, max_ms: 5000, max_attempts: 0 }
+  resume_after_run: open
+  # M6：ESP-IDF 日志/panic 结构化（规则是数据，内核只做通用解释）
+  log_profiles:
+    - id: esp-idf
+      label: ESP-IDF（panic / Guru Meditation）
+      panic_lines:
+        - 'Guru Meditation Error'
+        - 'panic: '
+        - 'assert failed'
+        - ' abort\(\)'
+      reset_lines:
+        - 'ESP-ROM:'
+        - '^rst:0x'
+      core_pattern: 'Core\s*(\d+)'
+      reason_pattern: 'Guru Meditation Error:\s*([^\r\n]+)'
+      backtrace_line: 'Backtrace:\s*(.*)'
+      addr_pattern: '0x[0-9a-fA-F]{8}'
+      symbolize:
+        tool_key: addr2line_esp32
+        args: ['-pfiaC']
+
+monitor:
+  close_on:
+    - { kind: regex, pattern: "^\\[usb\\]", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "Guru Meditation|panic|assert failed|abort" }
+  idle_timeout_s: 30
+
+step_labels:
+  debug_verify: 烧录校验

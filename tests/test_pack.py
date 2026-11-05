@@ -311,6 +311,34 @@ class TestActivePack(PackTestBase):
         self.assertEqual(st["active"], "acme/demo")
         self.assertEqual(st["chips"], ["acme/demo1"])
 
+    def _write_market(self, entries: list[dict]) -> None:
+        path = self.root / "market" / "index.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": 1, "packs": entries},
+                                   ensure_ascii=False), encoding="utf-8")
+
+    def test_status_exposes_market_latest_and_updatable(self):
+        self._install("acme/demo")
+        self._write_market([{"name": "acme/demo", "version": "0.2.0"}])
+        st = pkg.status(self.cfg)
+        rec = next(r for r in st["installed"] if r["name"] == "acme/demo")
+        self.assertEqual(rec["latest"], "0.2.0")
+        self.assertTrue(rec["updatable"])
+
+        for ver in ("0.1.0", "0.0.9"):
+            self._write_market([{"name": "acme/demo", "version": ver}])
+            st = pkg.status(self.cfg)
+            rec = next(r for r in st["installed"] if r["name"] == "acme/demo")
+            self.assertEqual(rec["latest"], ver)
+            self.assertFalse(rec["updatable"], ver)
+
+    def test_update_does_not_downgrade_without_force(self):
+        self._install("acme/demo")
+        self._write_market([{"name": "acme/demo", "version": "0.0.9"}])
+        logs: list[str] = []
+        self.assertEqual(pkg.update(self.cfg, "acme/demo", log=logs.append), [])
+        self.assertIn("高于市场", "\n".join(logs))
+
 
 class TestBootAndLiveMarket(PackTestBase):
     """开箱即用（自动装内置包）与"现场遍历市场"的本机缓存优先级。"""

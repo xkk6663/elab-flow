@@ -31,8 +31,11 @@ import type {
   SerialDecodeResult,
   SerialDecodedTail,
   SerialFramesResponse,
+  SerialIssuesTail,
+  SerialLogProfile,
   SerialMonitorTail,
   SerialPreviewResult,
+  SerialSymbolResult,
   SerialWidget,
   SerialWidgetRunResult,
   SerialWidgetsDoc,
@@ -245,6 +248,9 @@ export const elabApi = {
       allow_agent_write?: boolean
       /** action=decoder：justfloat / firewater（'' = 关闭共享解码） */
       decoder?: string
+      log_profile?: string
+      transport?: string
+      net?: Record<string, unknown>
       sessionId?: string
     },
   ) =>
@@ -275,6 +281,23 @@ export const elabApi = {
     request<SerialFramesResponse>(
       withSession(`/elab/api/serial/frames?project=${encodeURIComponent(project)}`, sessionId),
     ),
+  /** 日志诊断 profile 清单（M6）：只读，规则不写死在前端。 */
+  serialLogProfiles: (project: string, sessionId?: string) =>
+    request<{ profiles: SerialLogProfile[] }>(
+      withSession(`/elab/api/serial/log-profiles?project=${encodeURIComponent(project)}`, sessionId),
+    ),
+  /** 结构化异常增量读回（M6）：after = 已收到的 issue_total。 */
+  serialIssues: (after = 0, sessionId?: string) =>
+    request<SerialIssuesTail>(
+      withSession(`/elab/api/serial/monitor/issues?after=${after}`, sessionId),
+    ),
+  /** 地址 → 函数/文件:行（M6）：失败如实返回（ROM 地址标 note，不编造）。 */
+  serialSymbolize: (project: string, addrs: string[], profile = '', sessionId?: string) =>
+    post<SerialSymbolResult>(withSession('/elab/api/serial/symbolize', sessionId), {
+      project,
+      addrs,
+      profile,
+    }),
   /** K5 显式录制：字节写成有界 JSONL（证据，可回放）。 */
   serialCapture: (opts: {
     action: 'start' | 'stop' | 'status'

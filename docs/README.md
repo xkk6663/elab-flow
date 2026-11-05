@@ -19,7 +19,7 @@
 | [技术方案_闭环驾驶舱](design/技术方案_闭环驾驶舱.md) | 驾驶舱方案与实现记录（决策 D、约束 N、串口判据） |
 | [技术方案_插件独立上架与安装向导](design/技术方案_插件独立上架与安装向导.md) | 插件独立上架、安装引导与环境包 |
 | [技术迁移方案_串口监视与调试可视化](design/技术迁移方案_串口监视与调试可视化.md) | 串口 P1/P2/P3、数据面契约、Agent 工具 |
-| [技术方案_串口自定义发送组件](design/技术方案_串口自定义发送组件.md) | 参数化发送组件（模板 + 类型化参数 + send/delay/wait 序列）、存储与 ICD、Lissio 横向对比与未做功能清单（调研态，未动代码） |
+| [技术方案_串口自定义发送组件](design/技术方案_串口自定义发送组件.md) | 参数化发送组件（模板 + 类型化参数 + send/delay/wait 序列）、存储与 ICD；面板 UI 已下线，端点与 `elab_serial_widget` 保留给 agent |
 | [技术分析_侧边栏设置页与芯片插件市场](design/技术分析_侧边栏设置页与芯片插件市场.md) | 设置页与芯片市场交互分析 |
 | [技术方案_驾驶舱UI共享层迁移](design/技术方案_驾驶舱UI共享层迁移.md) | WebUI 与 DSH 面板的逻辑层 + 面板共享方案，含未来自研 harness 双宿主规划（待评审，未动代码） |
 | [ELAB_跨平台CI工作流架构设计](design/ELAB_跨平台CI工作流架构设计.md) | 跨平台 CI 工作流与矩阵设计 |
@@ -48,7 +48,7 @@
 | [04-调试面板上手_STM32F103C8T6](tutorials/04-调试面板上手_STM32F103C8T6.md) | **调试工作区**（已实拍）：真实 HardFault 排错主线 —— 断点 → 调用栈 → 寄存器 → 监视 → 内存 → 外设（P2）→ RTOS 栈水位（P3）→ 审计 → 修复重烧 → 串口恢复 |
 | [05-DSH插件上手_STM32F103C8T6](tutorials/05-DSH插件上手_STM32F103C8T6.md) | D 篇（已实拍）：DSH 右侧栏四块 → 自动只读探测接入 → 三连 → 串口心跳判活/关闭监视 → 调试工作区（单步/断点/变量/寄存器/关闭恢复）；STM32F103C8T6 实机截图 |
 | [06-CLI终端闭环上手](tutorials/06-CLI终端闭环上手.md) | **终端闭环上手**（实机 F411）：一条 `elab loop` 跑完 5 阶段，终端按输出类型分色，含 doctor/build/flash/debug/monitor 逐步截图 |
-| [07-波形面板使用](tutorials/07-波形面板使用.md) | **波形面板上手**（实机 F411）：选解码器 → 新建面板 → 通道绑定 → 缩放 → 暂停 |
+| [07-串口面板使用](tutorials/07-串口面板使用.md) | **串口面板上手**（实机 F103 + ESP32）：发送/历史/定时 → 四视图 → 波形多面板 → 断线重连 / 日志诊断 / 帧协议 / TCP-UDP |
 | [08-串口压力测试报告_STM32F411CEU6](tutorials/08-串口压力测试报告_STM32F411CEU6.md) | **串口压力测试报告**（实机 F411）：高压收发下的丢包/挤出/时序统计与结论 |
 
 ## requirements/ —— 需求对照
@@ -59,7 +59,7 @@
 
 ## 其他
 
-- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 波形面板、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
+- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 串口与波形面板、`serial-2/` 串口 M2/M4–M7（独立 WebUI）、`wave/` 同一批能力在 DSH 右栏的实拍、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
   README 首屏与调试/串口章节也直接引用其真机截图。
 - 实机验证截图在 `packages/dsh-elab-cockpit/docs/screenshots/`（插件 README 使用）。
 - 版本变更记录在仓库根 [CHANGELOG.md](../CHANGELOG.md)；工作规则见 [AGENTS.md](../AGENTS.md)。

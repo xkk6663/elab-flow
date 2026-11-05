@@ -126,16 +126,30 @@ class _FakeSerialMon:
         return {**self.state, "lines": [], "seq": self.state.get("seq", 0),
                 "gap": 0}
 
-    def open_session(self, cfg, project, *, port="", baud=0, log=print):
+    def open_session(self, cfg, project, *, port="", baud=0, opened_by="human",
+                     log=print, **kw):
         self.state.update({"active": True, "project": project,
-                           "port": "COM9", "baud": baud or 115200,
+                           "port": port or "COM9", "baud": baud or 115200,
                            "backend": "fake", "seq": 0, "covered": 0,
+                           "state": "live", "opened_by": opened_by,
                            "error": None})
         return {"ok": True, **self.status()}
 
     def close_session(self, *, log=print):
-        self.state = {"active": False}
+        self.state = {"active": False, "state": "closed"}
         return {"ok": True}
+
+    def suspend(self, reason="", *, by_run=False):
+        if not self.state.get("active"):
+            return {"ok": False, "error": "没有会话可挂起"}
+        self.state.update({"state": "suspended", "suspend_reason": reason})
+        return {"ok": True, **self.status()}
+
+    def resume(self):
+        if self.state.get("state") == "closed":
+            return {"ok": False, "error": "会话已关闭"}
+        self.state.update({"state": "live", "resume_error": None})
+        return {"ok": True, **self.status()}
 
     def write_through(self, data: bytes):
         if not self.state.get("active"):
@@ -961,22 +975,41 @@ class CockpitIntegration(unittest.TestCase):
                 cc.close()
         self.assertFalse(self.client.get_json("/api/serial/monitor")["active"])
 
-    def test_run_with_serial_steps_conflicts_with_monitor_409(self):
-        """★ 监视会话握着口 → 起含串口步骤的闭环必须 409 指名道姓（N5）。
-        不含串口步骤的步序不受影响（不在此重复跑真 run，那已有别的用例覆盖）。"""
+    def test_run_with_serial_steps_yields_monitor(self):
+        """★ 监视握着口 → 含串口步骤的闭环**自动让位**（不再 409），run 结束按策略回归。
+
+        设计见 M2 §4.3.6：互斥不变（不能让两个消费者同时开一口），但把"报错"
+        改成 suspend/resume。这里只验证让位/回归的**编排**，不 spawn 真 run
+        （那会真烧板子）。"""
         fake = _FakeSerialMon()
         fake.state = {"active": True, "project": PROJECT, "port": "COM9",
-                      "baud": 115200}
+                      "baud": 115200, "state": "live"}
         with unittest.mock.patch.object(srv_mod, "serialmon_mod", fake):
-            cc, r = self.client.post("/api/run",
-                                     {"project": PROJECT, "steps": ["flash"]})
-            try:
-                self.assertEqual(r.status, 409)
-                msg = json.loads(r.read().decode())["error"]
-            finally:
-                cc.close()
-        self.assertIn("串口监视正占用 COM9", msg)
-        self.assertIn("关闭监视", msg)
+            srv_mod._serial_yield_begin(self.cfg, PROJECT, policy="open")
+            self.assertEqual(fake.state.get("state"), "suspended")
+            srv_mod._serial_yield_end(self.cfg, log=lambda *a: None)
+            self.assertEqual(fake.state.get("state"), "live")
+
+    def test_run_end_auto_opens_when_no_session(self):
+        """原无会话 + `resume_after_run: open` → run 收尾内核自己开一个会话。
+
+        ★ 本用例守的是 M2 的设计选择（"跑完串口继续打印"）。由此带来的坑由
+        前端 resync / serialmon 幂等 open 兜住 —— 否则面板会停在"监视未启动"，
+        手动开又被"已在运行"挡住（"串口怎么也打不开"）。"""
+        fake = _FakeSerialMon()
+        opened: list[tuple[str, str]] = []
+        orig = fake.open_session
+
+        def _open(cfg, project, **kw):
+            opened.append((project, str(kw.get("opened_by") or "")))
+            return orig(cfg, project, **kw)
+
+        fake.open_session = _open
+        with unittest.mock.patch.object(srv_mod, "serialmon_mod", fake):
+            srv_mod._serial_yield_begin(self.cfg, PROJECT, policy="open")
+            srv_mod._serial_yield_end(self.cfg, log=lambda *a: None)
+        self.assertEqual(opened, [(PROJECT, "auto")])
+        self.assertEqual(fake.state.get("state"), "live")
 
     def test_serial_write_routes_through_active_monitor(self):
         """监视开着 → 写通道进会话（via=monitor、不重开口），TX 照落 console 留档。"""

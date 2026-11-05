@@ -69,23 +69,36 @@ function toneOf(text: string): TailLine['tone'] {
 
 /** 串口偏好（端口/波特率）：用户级 UI 偏好，与工程无关，宿主禁写时只在本次会话生效。 */
 const SERIAL_PREF_KEY = 'elab.serial.pref'
+/** 连接方式偏好（M4）：serial / tcp-client / tcp-server / udp */
+const TRANSPORT_PREF_KEY = 'elab.serial.transport'
+/** 网络配置偏好（M4）：{host, port, allow_remote} */
+const NET_PREF_KEY = 'elab.serial.net'
 
 interface SerialPref {
   port?: string
   baud?: number
   /** 上次选定的解码器（跨会话记忆；'' 或缺省 = 不启用共享解码）。 */
   decoder?: string
+  /** 上次选定的日志诊断 profile（M6） */
+  logProfile?: string
+}
+
+interface NetPref {
+  host: string
+  port: number
+  allow_remote: boolean
 }
 
 function readSerialPref(): SerialPref {
   try {
     const raw = window.localStorage.getItem(SERIAL_PREF_KEY)
     if (raw === null) return {}
-    const o = JSON.parse(raw) as { port?: unknown; baud?: unknown; decoder?: unknown }
+    const o = JSON.parse(raw) as { port?: unknown; baud?: unknown; decoder?: unknown; logProfile?: unknown }
     const out: SerialPref = {}
     if (typeof o.port === 'string' && o.port !== '') out.port = o.port
     if (typeof o.baud === 'number' && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud
     if (typeof o.decoder === 'string' && o.decoder !== '') out.decoder = o.decoder
+    if (typeof o.logProfile === 'string' && o.logProfile !== '') out.logProfile = o.logProfile
     return out
   } catch {
     return {}
@@ -97,6 +110,46 @@ function writeSerialPref(p: SerialPref): void {
     window.localStorage.setItem(SERIAL_PREF_KEY, JSON.stringify(p))
   } catch {
     /* 宿主禁写 localStorage：偏好仅本次会话有效 */
+  }
+}
+
+/** 连接方式偏好：'' = 跟随内核默认（serial）。 */
+function readTransportPref(): string {
+  try {
+    const raw = window.localStorage.getItem(TRANSPORT_PREF_KEY)
+    return raw === null || raw === 'serial' ? '' : raw
+  } catch {
+    return ''
+  }
+}
+
+function writeTransportPref(transport: string): void {
+  try {
+    if (transport === '' || transport === 'serial') window.localStorage.removeItem(TRANSPORT_PREF_KEY)
+    else window.localStorage.setItem(TRANSPORT_PREF_KEY, transport)
+  } catch {
+    /* 偏好仅本次会话有效 */
+  }
+}
+
+function readNetPref(): NetPref | null {
+  try {
+    const raw = window.localStorage.getItem(NET_PREF_KEY)
+    if (raw === null) return null
+    const j = JSON.parse(raw) as Partial<NetPref>
+    const port = Number(j.port)
+    if (!Number.isFinite(port) || port <= 0) return null
+    return { host: String(j.host ?? '127.0.0.1'), port, allow_remote: Boolean(j.allow_remote) }
+  } catch {
+    return null
+  }
+}
+
+function writeNetPref(net: NetPref): void {
+  try {
+    window.localStorage.setItem(NET_PREF_KEY, JSON.stringify(net))
+  } catch {
+    /* 偏好仅本次会话有效 */
   }
 }
 
@@ -416,14 +469,23 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     baud: number
     writable: boolean
     ports: SerialPortInfo[]
+    transportKinds: string[]
+    transportDefault: string
+    netDefaults: Record<string, Record<string, unknown>>
   }>({
     port: 'auto',
     baud: 115200,
     writable: false,
     ports: [],
+    transportKinds: ['serial', 'tcp-client', 'tcp-server', 'udp'],
+    transportDefault: 'serial',
+    netDefaults: {},
   })
   /** 用户显式选的端口/波特率（localStorage 持久化）；高优先级于工程/宿主默认。 */
   const [serialPref, setSerialPref] = useState<SerialPref>(readSerialPref)
+  /** 连接方式（M4）：'' = 跟随内核默认；网络配置一并持久化。 */
+  const [transportPref, setTransportPref] = useState<string>(readTransportPref)
+  const [netPref, setNetPref] = useState<NetPref | null>(readNetPref)
   /** capabilities 里的监视快照（别处已开的会话能立刻接上）。 */
   const [serialInitial, setSerialInitial] = useState<SerialMonitorSnapshot | null>(null)
   /** 协议解码器（caps.meta.serial.decoders；缺失时用内置两种）。 */
@@ -526,10 +588,20 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             ports?: Array<{ name?: string; kind?: string; desc?: string }>
             monitor?: SerialMonitorSnapshot
           }
-          meta?: { serial?: { decoders?: Array<{ id?: string; label?: string; desc?: string }> } }
+          meta?: {
+            serial?: {
+              decoders?: Array<{ id?: string; label?: string; desc?: string }>
+              transports?: {
+                kinds?: string[]
+                default?: string
+                net?: { defaults?: Record<string, Record<string, unknown>> }
+              }
+            }
+          }
         })
         const serial = s.serial
         if (serial !== undefined) {
+          const tr = s.meta?.serial?.transports
           setSerialMeta({
             port: serial.host_default || serial.ports?.[0]?.name || 'auto',
             baud: serial.host_baud ?? 115200,
@@ -541,6 +613,11 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                 ...(typeof p.kind === 'string' ? { kind: p.kind } : {}),
                 ...(typeof p.desc === 'string' ? { desc: p.desc } : {}),
               })),
+            transportKinds: Array.isArray(tr?.kinds) && tr.kinds.length > 0
+              ? tr.kinds.filter((k): k is string => typeof k === 'string' && k !== '')
+              : ['serial', 'tcp-client', 'tcp-server', 'udp'],
+            transportDefault: typeof tr?.default === 'string' && tr.default !== '' ? tr.default : 'serial',
+            netDefaults: tr?.net?.defaults ?? {},
           })
           // ★ 已有会话（别处打开/刷新前就在跑）：直接接上（游标由 hook 从 0 追起）。
           if (serial.monitor !== undefined) setSerialInitial(serial.monitor)
@@ -593,6 +670,21 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   // ── 串口数据面（行 + 字节批次）：只在串口通道可见时轮询 ──
   const serialPort = serialPref.port ?? serialMeta.port
   const serialBaud = serialPref.baud ?? serialMeta.baud
+  /** 连接方式（M4）：本页覆盖 → 内核自描述默认。 */
+  const transport = transportPref !== '' ? transportPref : serialMeta.transportDefault
+  const isNet = transport !== 'serial'
+  const netDefaults = serialMeta.netDefaults[transport] ?? {}
+  const netHost = netPref?.host
+    ?? String(netDefaults.host ?? netDefaults.bind ?? '127.0.0.1')
+  const netPort = netPref?.port ?? Number(netDefaults.port ?? 9000)
+  const netAllowRemote = netPref?.allow_remote ?? false
+  /** tcp-client 用 host，服务端/UDP 用 bind —— 同一份内核解析器的两个键。 */
+  const netPayload = useMemo(
+    () => (transport === 'tcp-client'
+      ? { host: netHost, port: netPort, allow_remote: netAllowRemote }
+      : { bind: netHost, port: netPort, allow_remote: netAllowRemote }),
+    [transport, netHost, netPort, netAllowRemote],
+  )
 
   /** 端口/波特率偏好：本地即时生效（打开监视时按新值解析），并持久化。 */
   const onSerialPort = useCallback((port: string) => {
@@ -622,6 +714,24 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
       return next
     })
   }, [])
+  /** 日志诊断 profile 偏好（M6）：下次打开监视时带上。 */
+  const onSerialLogProfile = useCallback((profile: string) => {
+    setSerialPref((prev) => {
+      const next: SerialPref = { ...prev }
+      if (profile === '') delete next.logProfile
+      else next.logProfile = profile
+      writeSerialPref(next)
+      return next
+    })
+  }, [])
+  const onSerialTransport = useCallback((next: string) => {
+    setTransportPref(next)
+    writeTransportPref(next)
+  }, [])
+  const onSerialNet = useCallback((net: { host: string; port: number; allow_remote: boolean }) => {
+    setNetPref(net)
+    writeNetPref(net)
+  }, [])
 
   const serialStream = useSerialStream({
     api: elabApi,
@@ -629,6 +739,9 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
     project: snap.project,
     port: serialPort,
     baud: serialBaud,
+    transport: isNet ? transport : '',
+    net: isNet ? netPayload : undefined,
+    logProfile: serialPref.logProfile ?? '',
     enabled: channel === 'serial' && visible === true && view === 'work',
     sessionId,
   })
@@ -636,8 +749,8 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   /**
    * 串口通道的启停**开关**：切到串口页；未开则打开常驻监视，已在跑则关闭并释放串口。
    *
-   * ★ 必须可关闭：监视占用串口时，含烧录/调试的闭环会被内核 409 拒绝（约束 N5），
-   *   而窄栏里没有别处能关（实测 2026-11-03：再次点击无反应 = 串口被永久占住）。
+   * ★ 必须可关闭：监视开着时点「关闭监视」得能真的关掉（内核随后可在 run 收尾
+   *   按 `serial.resume_after_run` 自己开回来，但人手动关就是关）。
    */
   const onSerialStart = useCallback(() => {
     setChannel('serial')
@@ -648,6 +761,26 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   // 阶梯数据：RunSnapshot.steps 与 LadderStep 同形（domain/run.ts 的 StepView）
   const steps: LadderStep[] = snap.run.steps
   const running = snap.run.status === 'running'
+
+  // 闭环结束 → 内核可能已按 `resume_after_run` 自动把会话开回来；这里只读接上，
+  // 否则面板停在「监视未启动」，手动开又被"已在运行"挡住（串口怎么都打不开）。
+  const runWasLive = useRef(running)
+  const resyncSerial = serialStream.resync
+  useEffect(() => {
+    if (runWasLive.current && !running) void resyncSerial()
+    runWasLive.current = running
+  }, [running, resyncSerial])
+  // 闭环跑到哪一步，通道就跟到哪一步：三连 构建→烧录→调试 时不会再停在
+  // 「构建」页看着像卡住（烧录/校验的输出在各自通道里）。
+  const runningStepId = useMemo(
+    () => steps.find((s) => s.state === 'running')?.id ?? null,
+    [steps],
+  )
+  useEffect(() => {
+    if (!running || runningStepId === null) return
+    const ch = channelOfStep(runningStepId)
+    setChannel((cur) => (cur === ch ? cur : ch))
+  }, [running, runningStepId])
   // 探针胶囊：当前值来自工程卡（debug.probe），选项/可用性来自内核 meta.probes
   const probeList = kernelProbes()?.list ?? []
   const currentProbe = snap.projects.find((p) => p.name === snap.project)?.probe ?? ''
@@ -781,7 +914,7 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           display: 'flex',
           alignItems: 'center',
           gap: '6px',
-          padding: '5px 8px',
+          padding: '6px 8px',
           borderBottom: '1px solid var(--elab-border)',
           fontSize: '12px',
         }}
@@ -793,9 +926,10 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
           style={{
             flex: '1 1 auto',
             minWidth: 0,
-            padding: '1px 4px',
+            height: '24px',
+            padding: '0 6px',
             fontSize: '12px',
-            borderRadius: '4px',
+            borderRadius: '6px',
             border: '1px solid var(--elab-border)',
             background: 'var(--elab-bg-surface)',
             color: 'var(--elab-fg-primary)',
@@ -917,8 +1051,17 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
         {snap.run.status !== 'idle' ? (
           <span
             style={{
+              flex: '0 0 auto',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '1px 6px',
+              borderRadius: '999px',
+              border: '1px solid currentColor',
               fontSize: '10px',
+              lineHeight: '14px',
               whiteSpace: 'nowrap',
+              background: 'color-mix(in srgb, currentColor 10%, transparent)',
               color:
                 snap.run.status === 'ok'
                   ? 'var(--elab-status-ok)'
@@ -930,7 +1073,25 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                       : 'var(--elab-accent)',
             }}
           >
-            {snap.run.status === 'inconclusive' ? '未验证' : snap.run.status}
+            <span
+              style={{
+                width: '5px',
+                height: '5px',
+                borderRadius: '50%',
+                background: 'currentColor',
+              }}
+            />
+            {snap.run.status === 'inconclusive'
+              ? '未验证'
+              : snap.run.status === 'running'
+                ? '运行中'
+                : snap.run.status === 'ok'
+                  ? '完成'
+                  : snap.run.status === 'failed'
+                    ? '失败'
+                    : snap.run.status === 'cancelled'
+                      ? '已取消'
+                      : snap.run.status}
           </span>
         ) : null}
 
@@ -1164,6 +1325,15 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
                   decoderPref={serialPref.decoder}
                   onDecoder={onSerialDecoder}
                   writable={serialMeta.writable}
+                  transport={isNet ? transport : 'serial'}
+                  transportKinds={serialMeta.transportKinds}
+                  netHost={netHost}
+                  netPort={netPort}
+                  netAllowRemote={netAllowRemote}
+                  onTransport={onSerialTransport}
+                  onNet={onSerialNet}
+                  logProfilePref={serialPref.logProfile}
+                  onLogProfile={onSerialLogProfile}
                   runLines={buffersRef.current.serial ?? []}
                   runLinesVersion={tailVersion}
                   sessionId={sessionId}

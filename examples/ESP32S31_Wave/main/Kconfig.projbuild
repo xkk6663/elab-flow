@@ -1,0 +1,25 @@
+menu "Wave 三链路演示"
+
+    config WAVE_WIFI_SSID
+        string "WiFi SSID（本地保密，写在 sdkconfig，不入库）"
+        default ""
+
+    config WAVE_WIFI_PASSWORD
+        string "WiFi 密码（本地保密，写在 sdkconfig，不入库）"
+        default ""
+
+    config WAVE_TCP_PORT
+        int "TCP 遥测服务端口（板子监听，等 PC 连入）"
+        range 1024 65535
+        default 9000
+
+    config WAVE_UDP_PORT
+        int "UDP 目标端口（板子主动发给 PC）"
+        range 1024 65535
+        default 9100
+
+    config WAVE_UDP_HOST
+        string "UDP 目标地址（PC 的局域网 IP；留空 = 不发 UDP）"
+        default ""
+
+endmenu

@@ -1,6 +1,6 @@
 # OTA 双槽回滚（A/B Bank）技术方案 —— F411CEU6 执行稿
 
-> 工程：`examples/STM32F411CEU6`（APP）＋ `examples/F411CEU6_BOOT`（Bootloader）
+> 工程：`examples/STM32F411CEU6`（APP）＋ `examples/STM32F411CEU6/boot`（Bootloader）
 > 组件：`components/ota`（core 芯片无关 / port 平台层）
 > 前置：**OTA_F411_移植技术方案 M0~M5 已全闭环**；分区表单源化（`ota_layout:` 节 →
 > `ota_layout_gen.h` → doctor 三方对账）已落地（技术方案_闭环驾驶舱 §22）

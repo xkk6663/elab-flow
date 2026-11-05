@@ -68,6 +68,8 @@ export interface SerialStream {
   setPaused(next: boolean): Promise<void>;
   /** M2：闭环让位后立即恢复（不必等 run 结束） */
   restore(): Promise<void>;
+  /** 闭环结束后接上内核**已自动重开**的会话（只读快照，不主动 open） */
+  resync(): Promise<void>;
   send(data: string, opts: SerialSendOpts): Promise<SerialWriteResult>;
   /** 只算字节、不碰串口（dry_run）：预览与发送共用服务端解析 */
   preview(data: string, opts: SerialSendOpts): Promise<SerialPreviewResult>;
@@ -387,6 +389,24 @@ export function useSerialStream({
     }
   }, [remember]);
 
+  /**
+   * 闭环结束后**接上内核已经自动重开的会话**。
+   *
+   * `resume_after_run: open` 时内核在 run 收尾会自己 open 一个会话（以防原会话
+   * 不存在时"跑完就断"），但前端并不知道 —— 界面停在"监视未启动"，此时再点
+   * 「打开监视」会被内核的"已在运行"挡住，表现就是**串口怎么也打不开**。
+   * 这里只读一次快照接上；绝不主动 open —— 回归策略归内核，前端不复制规则。
+   */
+  const resync = useCallback(async () => {
+    if (snapRef.current?.active) return;   // 已在跟踪（含 suspended），轮询会自己接上
+    try {
+      const st = await api.serialMonitor(0);
+      if (st.active) seedFromSnapshot(st);
+    } catch {
+      /* 内核没会话 / 没起来：什么都不做 */
+    }
+  }, [seedFromSnapshot]);
+
   const send = useCallback(
     (data: string, opts: SerialSendOpts) =>
       api.serial({
@@ -444,6 +464,7 @@ export function useSerialStream({
     clear,
     setPaused,
     restore,
+    resync,
     send,
     preview,
   };

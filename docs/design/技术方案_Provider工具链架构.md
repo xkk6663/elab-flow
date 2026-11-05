@@ -126,9 +126,14 @@ tests/fixtures/providers/<vendor>/<name>/provider.yaml # 测试夹具
 | `artifacts` | 可选 | 产物契约 |
 | `steps` | ✅ | 规范步骤 → 命令声明；至少一个键 |
 | `debug` | 可选 | `{backend, features}` |
+| `toolchain` | 可选 | 安装引导（**纯展示，永不执行**）：`name` / `version` / `docs` / `install`（平台 → 命令列表）/ `host_keys` |
 | `description` | 可选 | 人读描述 |
 
 未知顶层键 → **加载失败**（防拼写错静默变成 no-op）。扩展字段统一用 `x-` 前缀。
+
+`toolchain` 只被 `elab setup` 与装包后的自动自检读取：`requires.host` 缺失时把当前平台的
+安装命令原文、文档链接和要回填的 `host_keys` 打印给用户；内核不执行这些命令、
+不下载工具链、也不写 `elab.host.yaml`。
 
 ### 4.3 示例（ESP-IDF）
 

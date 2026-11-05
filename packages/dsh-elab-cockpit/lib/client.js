@@ -1850,6 +1850,20 @@ var elabApi = {
   serialFrames: (project, sessionId) => request(
     withSession(`/elab/api/serial/frames?project=${encodeURIComponent(project)}`, sessionId)
   ),
+  /** 日志诊断 profile 清单（M6）：只读，规则不写死在前端。 */
+  serialLogProfiles: (project, sessionId) => request(
+    withSession(`/elab/api/serial/log-profiles?project=${encodeURIComponent(project)}`, sessionId)
+  ),
+  /** 结构化异常增量读回（M6）：after = 已收到的 issue_total。 */
+  serialIssues: (after = 0, sessionId) => request(
+    withSession(`/elab/api/serial/monitor/issues?after=${after}`, sessionId)
+  ),
+  /** 地址 → 函数/文件:行（M6）：失败如实返回（ROM 地址标 note，不编造）。 */
+  serialSymbolize: (project, addrs, profile = "", sessionId) => post(withSession("/elab/api/serial/symbolize", sessionId), {
+    project,
+    addrs,
+    profile
+  }),
   /** K5 显式录制：字节写成有界 JSONL（证据，可回放）。 */
   serialCapture: (opts) => post(withSession("/elab/api/serial/capture", opts.sessionId), {
     action: opts.action,
@@ -2772,25 +2786,46 @@ var chipBase = {
   whiteSpace: "nowrap",
   lineHeight: "16px"
 };
+var chipPrimaryBig = {
+  ...chipBase,
+  padding: "5px 14px",
+  fontSize: "12px",
+  borderRadius: "8px",
+  fontWeight: 600,
+  background: "var(--elab-btn-primary-bg)",
+  borderColor: "var(--elab-btn-primary-border)",
+  color: "var(--elab-btn-primary-fg)"
+};
+var chipSmall = {
+  ...chipBase,
+  padding: "3px 8px",
+  fontSize: "10.5px",
+  lineHeight: "15px"
+};
 function chipFor(primary, disabled) {
   if (disabled) {
     return {
-      ...chipBase,
+      ...primary ? chipPrimaryBig : chipBase,
+      background: "transparent",
+      borderColor: "var(--elab-border)",
+      color: "var(--elab-fg-dimmed)",
+      boxShadow: "none",
+      cursor: "not-allowed"
+    };
+  }
+  if (primary) return chipPrimaryBig;
+  return chipBase;
+}
+function chipSmallFor(disabled) {
+  if (disabled) {
+    return {
+      ...chipSmall,
       background: "transparent",
       color: "var(--elab-fg-dimmed)",
       cursor: "not-allowed"
     };
   }
-  if (primary) {
-    return {
-      ...chipBase,
-      background: "var(--elab-btn-primary-bg)",
-      borderColor: "var(--elab-btn-primary-border)",
-      color: "var(--elab-btn-primary-fg)",
-      fontWeight: 600
-    };
-  }
-  return chipBase;
+  return chipSmall;
 }
 var STEP_BUTTONS = [
   { step: "build" },
@@ -2819,7 +2854,7 @@ function ManualBar(props) {
     if (planId !== null) fire(planId, true);
   };
   const cancelConfirm = () => setPending(null);
-  return /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", borderBottom: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "6px", padding: "6px 8px 4px", flexWrap: "wrap" } }, plans.filter((plan) => plan.id !== "basic").map((plan) => {
+  return /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", borderBottom: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "6px", padding: "8px 8px 6px", flexWrap: "wrap" } }, plans.filter((plan) => plan.id !== "basic").map((plan) => {
     const disabled = running || busy || !plan.enabled;
     const tip = plan.enabled ? describeSkipped(plan) || plan.hint : `\u4E0D\u53EF\u7528\uFF1A${plan.reason ?? "\u672A\u77E5\u539F\u56E0"}`;
     return /* @__PURE__ */ react_default.createElement(
@@ -2866,36 +2901,53 @@ function ManualBar(props) {
       style: { ...chipFor(false, false), marginLeft: "auto" }
     },
     "\u2699"
-  )), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "6px", padding: "0 8px 6px", flexWrap: "wrap" } }, STEP_BUTTONS.map((b) => {
-    const av = props.availability[b.step];
-    const disabled = running || busy || av?.ok === false;
-    const tip = av?.ok === false ? `\u4E0D\u53EF\u7528\uFF1A${av.reason ?? "\u672A\u77E5\u539F\u56E0"}` : `\u53EA\u8DD1\u8FD9\u4E00\u6B65\uFF1A${stepLabel(b.step)}`;
-    return /* @__PURE__ */ react_default.createElement(
-      "button",
-      {
-        key: b.step,
-        type: "button",
-        disabled,
-        title: tip,
-        onClick: () => props.onRunOne(b.step),
-        style: chipFor(false, disabled)
-      },
-      `\u25B6 ${stepLabel(b.step)}`
-    );
-  }), /* @__PURE__ */ react_default.createElement(
-    "button",
+  )), /* @__PURE__ */ react_default.createElement(
+    "div",
     {
-      type: "button",
-      disabled: running || busy,
-      title: props.serialActive ? "\u4E32\u53E3\u76D1\u89C6\u6B63\u5728\u8FD0\u884C\uFF1A\u70B9\u51FB\u5173\u95ED\u5E76\u91CA\u653E\u4E32\u53E3\uFF08\u95ED\u73AF\u70E7\u5F55/\u8C03\u8BD5\u9700\u8981\uFF09" : "\u542F\u52A8\u4E32\u53E3\u901A\u9053\uFF1A\u6253\u5F00\u5E38\u9A7B\u76D1\u89C6\u5E76\u5B9E\u65F6\u6536\u8BBE\u5907\u8F93\u51FA",
-      onClick: props.onSerial,
       style: {
-        ...chipFor(false, running || busy),
-        ...props.serialActive ? { borderColor: "var(--elab-status-ok)", color: "var(--elab-status-ok)" } : {}
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        padding: "4px 8px 7px",
+        flexWrap: "wrap",
+        borderTop: "1px dashed color-mix(in srgb, var(--elab-border) 70%, transparent)",
+        background: "color-mix(in srgb, var(--elab-bg-surface) 55%, transparent)"
       }
     },
-    props.serialActive ? "\u25A0 \u5173\u95ED\u76D1\u89C6" : "\u25B6 \u4E32\u53E3"
-  )), optsOpen ? /* @__PURE__ */ react_default.createElement(
+    /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", fontSize: "10px", color: "var(--elab-fg-faint)", letterSpacing: "0.04em" } }, "\u5355\u6B65"),
+    STEP_BUTTONS.map((b) => {
+      const av = props.availability[b.step];
+      const disabled = running || busy || av?.ok === false;
+      const tip = av?.ok === false ? `\u4E0D\u53EF\u7528\uFF1A${av.reason ?? "\u672A\u77E5\u539F\u56E0"}` : `\u53EA\u8DD1\u8FD9\u4E00\u6B65\uFF1A${stepLabel(b.step)}`;
+      return /* @__PURE__ */ react_default.createElement(
+        "button",
+        {
+          key: b.step,
+          type: "button",
+          disabled,
+          title: tip,
+          onClick: () => props.onRunOne(b.step),
+          style: chipSmallFor(disabled)
+        },
+        `\u25B6 ${stepLabel(b.step)}`
+      );
+    }),
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        disabled: running || busy,
+        title: props.serialActive ? "\u4E32\u53E3\u76D1\u89C6\u6B63\u5728\u8FD0\u884C\uFF1A\u70B9\u51FB\u5173\u95ED\u5E76\u91CA\u653E\u4E32\u53E3\uFF08\u95ED\u73AF\u70E7\u5F55/\u8C03\u8BD5\u9700\u8981\uFF09" : "\u542F\u52A8\u4E32\u53E3\u901A\u9053\uFF1A\u6253\u5F00\u5E38\u9A7B\u76D1\u89C6\u5E76\u5B9E\u65F6\u6536\u8BBE\u5907\u8F93\u51FA",
+        onClick: props.onSerial,
+        style: {
+          ...chipSmallFor(running || busy),
+          marginLeft: "auto",
+          ...props.serialActive ? { borderColor: "var(--elab-status-ok)", color: "var(--elab-status-ok)" } : {}
+        }
+      },
+      props.serialActive ? "\u25A0 \u5173\u95ED\u76D1\u89C6" : "\u25B6 \u6253\u5F00\u76D1\u89C6"
+    )
+  ), optsOpen ? /* @__PURE__ */ react_default.createElement(
     "div",
     {
       style: {
@@ -3420,6 +3472,12 @@ var EOLS = [
   { id: "crlf", label: "CRLF" },
   { id: "tab", label: "TAB" }
 ];
+var TRANSPORT_LABELS = {
+  serial: "\u4E32\u53E3",
+  "tcp-client": "TCP \u5BA2\u6237\u7AEF",
+  "tcp-server": "TCP \u670D\u52A1\u7AEF",
+  udp: "UDP"
+};
 var COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 function baudOptions(current2) {
   return COMMON_BAUDS.includes(current2) ? COMMON_BAUDS : [...COMMON_BAUDS, current2].sort((a, b) => a - b);
@@ -3620,7 +3678,7 @@ function termText(line) {
   return line.map((sp) => sp.text).join("");
 }
 function SerialPane(props) {
-  const { api, stream, decoders, project, running, port, baud, ports, writable } = props;
+  const { api, stream, decoders, project, running, port, baud, ports, writable, transport } = props;
   const [view, setView] = useState("lines");
   const [dir, setDir] = useState("all");
   const [repr, setRepr] = useState("hex");
@@ -3642,6 +3700,49 @@ function SerialPane(props) {
   const [job, setJob] = useState(null);
   const [jobId, setJobId] = useState("");
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? "justfloat");
+  const ISSUE_KIND_LABEL = {
+    panic: "panic",
+    assert: "assert",
+    hardfault: "hardfault",
+    reset: "\u590D\u4F4D"
+  };
+  const [logProfiles, setLogProfiles] = useState([]);
+  const [profileId, setProfileId] = useState(props.logProfilePref ?? "");
+  const [issuesOpen, setIssuesOpen] = useState(false);
+  const [symbols, setSymbols] = useState({});
+  useEffect(() => {
+    let dead = false;
+    if (!project) {
+      setLogProfiles([]);
+      return void 0;
+    }
+    void api.serialLogProfiles(project, props.sessionId).then((r) => {
+      if (!dead) setLogProfiles(r.profiles ?? []);
+    }).catch(() => {
+      if (!dead) setLogProfiles([]);
+    });
+    return () => {
+      dead = true;
+    };
+  }, [api, project, props.sessionId]);
+  useEffect(() => {
+    const active = stream.snap?.issues?.profile;
+    if (active) setProfileId(active);
+  }, [stream.snap?.issues?.profile]);
+  const symbolizeIssue = useCallback(async (issue) => {
+    try {
+      const r = await api.serialSymbolize(
+        project,
+        issue.backtrace,
+        stream.snap?.issues?.profile ?? "",
+        props.sessionId
+      );
+      setSymbols((prev) => ({ ...prev, [issue.seq]: r.symbols ?? [] }));
+      if (!r.ok) setNotice(`\u7B26\u53F7\u5316\u672A\u5B8C\u5168\u6210\u529F\uFF1A${r.error ?? "\u672A\u77E5\u539F\u56E0"}`);
+    } catch (e) {
+      setNotice(`\u7B26\u53F7\u5316\u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [api, project, props.sessionId, stream.snap?.issues?.profile]);
   const [frameProfiles, setFrameProfiles] = useState([]);
   useEffect(() => {
     let dead = false;
@@ -4180,6 +4281,18 @@ function SerialPane(props) {
     /* @__PURE__ */ react_default.createElement(
       "select",
       {
+        value: transport,
+        onChange: (e) => props.onTransport?.(e.currentTarget.value),
+        "aria-label": "\u8FDE\u63A5\u65B9\u5F0F",
+        title: portLocked ? "\u76D1\u89C6\u8FDB\u884C\u4E2D\uFF1A\u5148\u5173\u95ED\u76D1\u89C6\u518D\u6362\u8FDE\u63A5\u65B9\u5F0F\uFF08\u6362\u94FE\u8DEF\u4F1A\u91CD\u5F00\u4F1A\u8BDD\uFF09" : "\u8FDE\u63A5\u65B9\u5F0F\uFF1A\u4E32\u53E3 = \u672C\u5730 COM\uFF1BTCP \u5BA2\u6237\u7AEF = \u8FDE\u677F\u5B50/\u670D\u52A1\u5668\uFF1BTCP \u670D\u52A1\u7AEF = \u672C\u673A\u76D1\u542C\u7B49\u677F\u5B50\u8FDE\u5165\uFF1BUDP = \u672C\u673A\u76D1\u542C\u7B49\u8BBE\u5907\u53D1\u5305",
+        style: { ...selectStyle, opacity: portLocked ? 0.5 : 1, cursor: portLocked ? "not-allowed" : "pointer" },
+        disabled: portLocked || props.onTransport === void 0
+      },
+      props.transportKinds.map((k) => /* @__PURE__ */ react_default.createElement("option", { key: k, value: k }, TRANSPORT_LABELS[k] ?? k))
+    ),
+    transport === "serial" ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
+      "select",
+      {
         value: port || "auto",
         onChange: (e) => props.onPort?.(e.currentTarget.value),
         "aria-label": "\u4E32\u53E3\u7AEF\u53E3",
@@ -4189,8 +4302,7 @@ function SerialPane(props) {
       },
       /* @__PURE__ */ react_default.createElement("option", { value: "auto" }, "auto\uFF08\u81EA\u52A8\u9009\u53E3\uFF09"),
       portOptions.map((p) => /* @__PURE__ */ react_default.createElement("option", { key: p.name, value: p.name, title: p.label }, p.label))
-    ),
-    /* @__PURE__ */ react_default.createElement(
+    ), /* @__PURE__ */ react_default.createElement(
       "select",
       {
         value: baud,
@@ -4201,16 +4313,87 @@ function SerialPane(props) {
         disabled: portLocked || props.onBaud === void 0
       },
       baudOptions(baud).map((b) => /* @__PURE__ */ react_default.createElement("option", { key: b, value: b }, b))
-    ),
+    )) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        value: props.netHost,
+        onChange: (e) => props.onNet?.({ host: e.currentTarget.value, port: props.netPort, allow_remote: props.netAllowRemote }),
+        "aria-label": transport === "tcp-client" ? "\u76EE\u6807\u5730\u5740" : "\u7ED1\u5B9A\u5730\u5740",
+        title: transport === "tcp-client" ? "\u677F\u5B50/\u670D\u52A1\u5668\u7684\u5730\u5740\uFF08\u8DE8\u673A\u9700\u52FE\u9009\u300C\u5141\u8BB8\u975E\u56DE\u73AF\u300D\uFF09" : "\u672C\u673A\u7ED1\u5B9A\u5730\u5740\uFF1A127.0.0.1 \u53EA\u7ED9\u672C\u673A\uFF1B0.0.0.0 \u76D1\u542C\u5C40\u57DF\u7F51\uFF08\u9700\u52FE\u9009\u300C\u5141\u8BB8\u975E\u56DE\u73AF\u300D\uFF09",
+        style: { ...selectStyle, width: "120px", opacity: portLocked ? 0.5 : 1 },
+        disabled: portLocked
+      }
+    ), /* @__PURE__ */ react_default.createElement(
+      "input",
+      {
+        value: String(props.netPort),
+        onChange: (e) => {
+          const n = Number(e.currentTarget.value);
+          props.onNet?.({ host: props.netHost, port: Number.isFinite(n) ? n : 0, allow_remote: props.netAllowRemote });
+        },
+        "aria-label": "\u7F51\u7EDC\u7AEF\u53E3",
+        title: "\u7F51\u7EDC\u7AEF\u53E3\uFF081~65535\uFF09\uFF1B\u677F\u5B50\u56FA\u4EF6\u91CC\u7684\u7AEF\u53E3\u8981\u548C\u8FD9\u91CC\u4E00\u81F4",
+        style: { ...selectStyle, width: "62px", opacity: portLocked ? 0.5 : 1 },
+        disabled: portLocked
+      }
+    ), /* @__PURE__ */ react_default.createElement(
+      "label",
+      {
+        title: "\u9ED8\u8BA4\u53EA\u5141\u8BB8 127.0.0.1/localhost\uFF1B\u8DE8\u673A\u6216\u677F\u5B50\u76F4\u8FDE\u65F6\u5FC5\u987B\u663E\u5F0F\u5141\u8BB8",
+        style: { ...chip, cursor: portLocked ? "not-allowed" : "pointer", opacity: portLocked ? 0.5 : 1 }
+      },
+      /* @__PURE__ */ react_default.createElement(
+        "input",
+        {
+          type: "checkbox",
+          checked: props.netAllowRemote,
+          onChange: (e) => props.onNet?.({ host: props.netHost, port: props.netPort, allow_remote: Boolean(e.currentTarget.checked) }),
+          disabled: portLocked,
+          style: { marginRight: "4px", verticalAlign: "middle" }
+        }
+      ),
+      "\u5141\u8BB8\u975E\u56DE\u73AF"
+    )),
     /* @__PURE__ */ react_default.createElement(
       "span",
       {
         "aria-label": "\u4E32\u53E3\u7EBF\u53C2\u6570\uFF08\u53EA\u8BFB\uFF09",
         title: "\u7EBF\u53C2\u6570\uFF08\u53EA\u8BFB\uFF09\uFF1A\u5728 cockpit\u300C\u4E32\u53E3\u300D\u5DE5\u4F5C\u533A\u7F16\u8F91\uFF1B\u6539\u540E\u9700\u91CD\u5F00\u76D1\u89C6\u624D\u751F\u6548",
-        style: { ...chip, cursor: "default", fontFamily: "var(--elab-font-mono)" }
+        style: { ...chip, cursor: "default", fontFamily: "var(--elab-font-mono)", display: transport === "serial" ? void 0 : "none" }
       },
       stream.snap?.line_text ?? "8N1"
     ),
+    logProfiles.length > 0 ? /* @__PURE__ */ react_default.createElement(
+      "select",
+      {
+        value: profileId,
+        disabled: !stream.active,
+        onChange: (e) => {
+          const next = e.currentTarget.value;
+          setProfileId(next);
+          props.onLogProfile?.(next);
+          if (stream.active) void stream.setLogProfile(next);
+        },
+        "aria-label": "\u65E5\u5FD7\u8BCA\u65AD profile",
+        title: "\u65E5\u5FD7\u8BCA\u65AD\u89C4\u5219\u6765\u81EA\u5305/\u5DE5\u7A0B\u6570\u636E\uFF08panic / hardfault / \u590D\u4F4D\uFF09\uFF1B\u5173\u95ED = \u4E0D\u89E3\u6790",
+        style: { ...selectStyle, opacity: stream.active ? 1 : 0.5 }
+      },
+      /* @__PURE__ */ react_default.createElement("option", { value: "" }, "\u65E5\u5FD7\u8BCA\u65AD\uFF1A\u5173"),
+      logProfiles.map((p) => /* @__PURE__ */ react_default.createElement("option", { key: p.id, value: p.id }, p.label || p.id))
+    ) : null,
+    stream.issueTotal > 0 ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => setIssuesOpen((v) => !v),
+        style: {
+          ...chip,
+          ...stream.issues.some((i) => i.kind !== "reset") ? { color: "var(--elab-status-fail)", borderColor: "var(--elab-status-fail)" } : {}
+        },
+        title: "\u7ED3\u6784\u5316\u5F02\u5E38\uFF08panic / assert / hardfault / \u590D\u4F4D\uFF09\uFF1B\u53EF\u5C55\u5F00\u7B26\u53F7\u5316\u56DE\u6EAF\u5730\u5740"
+      },
+      `\u5F02\u5E38 ${stream.issueTotal}${issuesOpen ? " \u25BE" : " \u25B8"}`
+    ) : null,
     /* @__PURE__ */ react_default.createElement(
       "select",
       {
@@ -4394,7 +4577,16 @@ function SerialPane(props) {
       },
       `\u4F1A\u8BDD ${openedBy === "agent" ? "agent" : "\u6211"}${leaseLeft > 0 ? ` \xB7 \u79DF\u7EA6 ${leaseLeft}s` : ""}`
     ) : null
-  ), replayErr !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u56DE\u653E\u5931\u8D25\uFF1A${replayErr}`) : null, replayMode && replay !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u56DE\u653E\u4E2D\uFF1A${replay.name} \u2014\u2014 ${replay.chunks.length} \u6279 / ${replay.bytes} B \xB7 ${replay.lines.length} \u884C\uFF08\u672C\u5730\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09${replay.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${replay.skipped} \u884C` : ""}`) : null, stream.snap?.state === "reconnecting" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barWarn }, `\u4E32\u53E3\u5DF2\u6389\u7EBF\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8FDE${stream.snap.down_s ? `\uFF08\u5DF2\u65AD\u5F00 ${stream.snap.down_s}s\uFF09` : ""}${stream.snap.last_error ? `\uFF1A${stream.snap.last_error}` : ""} \u2014\u2014 \u6062\u590D\u540E\u65E5\u5FD7\u81EA\u52A8\u7EED\u4E0A\u3002`) : null, stream.snap?.state === "suspended" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barInfo }, `\u76D1\u89C6\u5DF2\u4E3A\u95ED\u73AF\u8BA9\u51FA\u4E32\u53E3${stream.snap.suspend_reason ? `\uFF08${stream.snap.suspend_reason}\uFF09` : ""} \u2014\u2014 run \u7ED3\u675F\u81EA\u52A8\u6062\u590D\u3002`) : null, stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
+  ), replayErr !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u56DE\u653E\u5931\u8D25\uFF1A${replayErr}`) : null, replayMode && replay !== null ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, `\u56DE\u653E\u4E2D\uFF1A${replay.name} \u2014\u2014 ${replay.chunks.length} \u6279 / ${replay.bytes} B \xB7 ${replay.lines.length} \u884C\uFF08\u672C\u5730\u53EA\u8BFB\uFF0C\u4E0D\u5360\u4E32\u53E3\uFF09${replay.skipped > 0 ? ` \xB7 \u8DF3\u8FC7 ${replay.skipped} \u884C` : ""}`) : null, stream.snap?.state === "reconnecting" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barWarn }, `\u4E32\u53E3\u5DF2\u6389\u7EBF\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8FDE${stream.snap.down_s ? `\uFF08\u5DF2\u65AD\u5F00 ${stream.snap.down_s}s\uFF09` : ""}${stream.snap.last_error ? `\uFF1A${stream.snap.last_error}` : ""} \u2014\u2014 \u6062\u590D\u540E\u65E5\u5FD7\u81EA\u52A8\u7EED\u4E0A\u3002`) : null, stream.snap?.state === "suspended" ? /* @__PURE__ */ react_default.createElement("div", { role: "status", style: barInfo }, `\u76D1\u89C6\u5DF2\u4E3A\u95ED\u73AF\u8BA9\u51FA\u4E32\u53E3${stream.snap.suspend_reason ? `\uFF08${stream.snap.suspend_reason}\uFF09` : ""} \u2014\u2014 run \u7ED3\u675F\u81EA\u52A8\u6062\u590D\u3002`) : null, stream.error !== null ? /* @__PURE__ */ react_default.createElement("div", { role: "alert", style: barWarn }, `\u76D1\u89C6\u5DF2\u4E2D\u65AD\uFF1A${stream.error}\uFF08\u670D\u52A1\u7AEF\u5DF2\u91CA\u653E\u4E32\u53E3\uFF09`) : null, stream.paused ? /* @__PURE__ */ react_default.createElement("div", { style: barInfo }, "\u5DF2\u6682\u505C\u5165\u73AF \u2014\u2014 \u670D\u52A1\u7AEF\u4ECD\u5728\u8BFB\u53E3\uFF1B\u70B9\u300C\u7EE7\u7EED\u300D\u6062\u590D\u3002") : null, issuesOpen && stream.issues.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { role: "region", "aria-label": "\u7ED3\u6784\u5316\u5F02\u5E38", style: { ...barInfo, maxHeight: "220px", overflowY: "auto" } }, stream.issues.slice().reverse().map((it) => /* @__PURE__ */ react_default.createElement("div", { key: it.seq, style: { marginBottom: "6px" } }, /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("b", null, ISSUE_KIND_LABEL[it.kind] ?? it.kind), ` ${it.t}`, it.core ? ` \xB7 core ${it.core}` : "", it.reason ? ` \xB7 ${it.reason}` : "", it.after_reset ? " \xB7 \u590D\u4F4D\u540E" : "", it.kind !== "reset" && it.backtrace.length > 0 ? /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => void symbolizeIssue(it),
+      style: { ...chip, marginLeft: "6px" },
+      title: "\u628A\u56DE\u6EAF\u5730\u5740\u89E3\u6790\u6210\u51FD\u6570 / \u6587\u4EF6:\u884C\uFF08\u9700\u8981\u5DE5\u7A0B ELF\uFF09"
+    },
+    "\u7B26\u53F7\u5316"
+  ) : null), /* @__PURE__ */ react_default.createElement("div", { style: metaStyle }, it.line), it.backtrace.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: metaStyle }, it.backtrace.join(" ")) : null, (symbols[it.seq] ?? []).map((sym) => /* @__PURE__ */ react_default.createElement("div", { style: metaStyle, key: sym.addr }, `${sym.addr} \u2192 ${sym.func ?? sym.note ?? "\u65E0\u6CD5\u89E3\u6790"}`, sym.file ? `\uFF08${sym.file}:${sym.line ?? "?"}\uFF09` : ""))))) : null, capActive !== true && cap?.truncated === true ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u5F55\u5236\u5DF2\u5230\u4E0A\u9650\u5E76\u505C\u6B62\uFF1A${String(cap?.path ?? "")}\uFF08${String(cap?.chunks ?? 0)} \u6279 / ${String(cap?.bytes ?? 0)} B\uFF09\u2014\u2014 \u8BC1\u636E\u6587\u4EF6\u5DF2\u4FDD\u7559\uFF0C\u53EF\u56DE\u653E`) : null, lossy > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: barWarn }, `\u73AF\u5F62\u7F13\u51B2\u5DF2\u6324\u51FA\uFF1A\u884C \u2265${stream.gapLines} / \u6279\u6B21 \u2265${stream.gapChunks}\uFF08\u53EA\u62A5\u544A\u4E0D\u62B9\u5E73\uFF1B\u5B8C\u6574\u7559\u6863\u8BF7\u7528\u300C\u5BFC\u51FA\u300D\u6216\u95ED\u73AF monitor \u4E8B\u4EF6\uFF09`) : null, /* @__PURE__ */ react_default.createElement(
     "div",
     {
       ref: scrollRef,
@@ -4408,7 +4600,7 @@ function SerialPane(props) {
         lineHeight: 1.55
       }
     },
-    view === "lines" ? runLines.length === 0 && monitorLines.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709 RX \u884C\uFF08\u5171 ${replay?.chunks.length ?? 0} \u6279\uFF0C\u53EF\u80FD\u662F\u7EAF TX \u5F55\u5236\uFF09\u2014\u2014 \u53EF\u5207\u5230\u300C\u5B57\u8282\u300D\u770B\u539F\u59CB\u5185\u5BB9\u3002` : "\u5C1A\u65E0\u884C\u8F93\u51FA\u3002\u70B9\u4E0A\u65B9\u300C\u25B6 \u4E32\u53E3\u300D\u542F\u52A8\u5E38\u9A7B\u76D1\u89C6\u540E\uFF0C\u8BBE\u5907\u8F93\u51FA\u4F1A\u5B9E\u65F6\u6D41\u8FDB\u6765\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", padding: "2px 0" } }, runLines.map((line, i) => /* @__PURE__ */ react_default.createElement(
+    view === "lines" ? runLines.length === 0 && monitorLines.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: emptyStyle }, replayMode ? `\u56DE\u653E\u6587\u4EF6\u91CC\u6CA1\u6709 RX \u884C\uFF08\u5171 ${replay?.chunks.length ?? 0} \u6279\uFF0C\u53EF\u80FD\u662F\u7EAF TX \u5F55\u5236\uFF09\u2014\u2014 \u53EF\u5207\u5230\u300C\u5B57\u8282\u300D\u770B\u539F\u59CB\u5185\u5BB9\u3002` : "\u5C1A\u65E0\u884C\u8F93\u51FA\u3002\u70B9\u4E0A\u65B9\u300C\u25B6 \u6253\u5F00\u76D1\u89C6\u300D\u542F\u52A8\u4F1A\u8BDD\u540E\uFF0C\u8BBE\u5907\u8F93\u51FA\u4F1A\u5B9E\u65F6\u6D41\u8FDB\u6765\u3002") : /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", padding: "2px 0" } }, runLines.map((line, i) => /* @__PURE__ */ react_default.createElement(
       "div",
       {
         key: `run-${i}`,
@@ -4747,7 +4939,7 @@ function SerialPane(props) {
         borderTop: "1px solid var(--elab-border)"
       }
     },
-    `\u76D1\u89C6\u672A\u542F\u52A8\uFF08${port || "auto"}@${baud}\uFF09\u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u25B6 \u4E32\u53E3\u300D\u542F\u52A8\u3002`
+    `\u76D1\u89C6\u672A\u542F\u52A8\uFF08${port || "auto"}@${baud}\uFF09\u2014\u2014 \u70B9\u4E0A\u65B9\u300C\u25B6 \u6253\u5F00\u76D1\u89C6\u300D\u542F\u52A8\u3002`
   ) : null);
 }
 var WAVE_TOKENS = [
@@ -5082,10 +5274,12 @@ var MAX_LOCAL_LINES = 2e3;
 var MAX_LOCAL_CHUNKS = 4096;
 var MAX_LOCAL_BYTES = 1 << 20;
 var MAX_LOCAL_DEC_FRAMES = 1024;
-function useSerialStream({ api, initial, project, port, baud, enabled, sessionId }) {
+function useSerialStream({ api, initial, project, port, baud, transport = "", net, logProfile = "", enabled, sessionId }) {
   const [snap, setSnap] = useState(initial);
   const [lines, setLines] = useState([]);
   const [chunks, setChunks] = useState([]);
+  const [issues, setIssues] = useState([]);
+  const [issueTotal, setIssueTotal] = useState(0);
   const [decoded, setDecoded] = useState([]);
   const [decodedSnap, setDecodedSnap] = useState(null);
   const [gaps, setGaps] = useState({ lines: 0, chunks: 0, decoded: 0 });
@@ -5093,6 +5287,7 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
   const snapRef = useRef(initial);
   const lineCursor = useRef(0);
   const chunkCursor = useRef(0);
+  const issueCursor = useRef(0);
   const decCursor = useRef(0);
   const decDecoder = useRef("");
   const epochRef = useRef(-1);
@@ -5108,11 +5303,14 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
   const resetLocal = useCallback(() => {
     lineCursor.current = 0;
     chunkCursor.current = 0;
+    issueCursor.current = 0;
     decCursor.current = 0;
     decDecoder.current = "";
     bytesRef.current = 0;
     setLines([]);
     setChunks([]);
+    setIssues([]);
+    setIssueTotal(0);
     setDecoded([]);
     setDecodedSnap(null);
     setGaps({ lines: 0, chunks: 0, decoded: 0 });
@@ -5180,6 +5378,15 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
           const lost = Math.max(bt.gap, missedChunks);
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }));
         }
+        if (lt.issues?.profile) {
+          const it = await api.serialIssues(issueCursor.current, sessionId);
+          if (disposed || gen !== genRef.current) return;
+          if (it.issues.length > 0) {
+            setIssues((prev) => prev.concat(it.issues).slice(-200));
+          }
+          issueCursor.current = it.issue_total ?? issueCursor.current;
+          setIssueTotal(issueCursor.current);
+        }
         if (dt !== null) {
           setDecodedSnap(dt);
           if (dt.decoder !== decDecoder.current) {
@@ -5225,7 +5432,10 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
         baud,
         port,
         actor: "human",
+        ...transport !== "" ? { transport } : {},
+        ...net !== void 0 ? { net } : {},
         ...decoder !== void 0 && decoder !== "" ? { decoder } : {},
+        ...logProfile !== "" ? { log_profile: logProfile } : {},
         sessionId
       });
       if (r.active !== true) {
@@ -5242,7 +5452,7 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
       setError(msg);
       return { ok: false, error: msg };
     }
-  }, [project, baud, port, sessionId, resetLocal, remember, api]);
+  }, [project, baud, port, transport, net, logProfile, sessionId, resetLocal, remember, api]);
   const close = useCallback(async () => {
     genRef.current += 1;
     try {
@@ -5309,6 +5519,22 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     },
     [sessionId, remember, api]
   );
+  const setLogProfile = useCallback(
+    async (profile) => {
+      if (!active) return;
+      try {
+        const r = await api.serialMonitorToggle("log_profile", {
+          log_profile: profile,
+          sessionId
+        });
+        remember(r);
+        if (r.ok === false) setError(String(r.error ?? "\u5207\u6362\u65E5\u5FD7 profile \u5931\u8D25"));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [active, sessionId, remember, api]
+  );
   const setPaused = useCallback(
     async (next) => {
       try {
@@ -5322,6 +5548,14 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     },
     [sessionId, remember, api]
   );
+  const resync = useCallback(async () => {
+    if (snapRef.current?.active === true) return;
+    try {
+      const st = await api.serialMonitor(0, sessionId);
+      if (st.active === true) seedFromSnapshot(st);
+    } catch {
+    }
+  }, [sessionId, seedFromSnapshot, api]);
   const send = useCallback(
     (data, opts) => api.serial({
       project,
@@ -5346,6 +5580,8 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     chunks,
     decoded,
     decodedSnap,
+    issues,
+    issueTotal,
     gapLines: gaps.lines,
     gapChunks: gaps.chunks,
     gapDecoded: gaps.decoded,
@@ -5354,7 +5590,9 @@ function useSerialStream({ api, initial, project, port, baud, enabled, sessionId
     close,
     clear,
     setPaused,
+    resync,
     setDecoder,
+    setLogProfile,
     send
   };
 }
@@ -5798,14 +6036,26 @@ function PackSettingsView(props) {
     const installedRec = status?.installed.find((x) => x.name === p.name);
     const isInstalled = installedRec?.installed === true;
     const isActive = installedRec?.active === true;
+    const updatable = installedRec?.updatable === true;
+    const latest = installedRec?.latest ?? p.version;
     const disabled = frozen || !compat.ok;
-    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, isInstalled && !isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u5DF2\u5B89\u88C5", tone: "idle" }) : null), p.description !== void 0 && p.description !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)" } }, p.description) : null, /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), compat.ok ? null : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-fail)" } }, `\u4E0D\u517C\u5BB9\uFF1A${compat.reasons.join("\uFF1B")}`), /* @__PURE__ */ react_default.createElement("div", { style: actionRowStyle }, isInstalled ? isActive ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u5F53\u524D\u542F\u7528\u7684\u82AF\u7247\u9002\u914D\u5305") : /* @__PURE__ */ react_default.createElement(
+    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, isInstalled && !isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u5DF2\u5B89\u88C5", tone: "idle" }) : null, updatable ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${latest}`, tone: "warn" }) : null), p.description !== void 0 && p.description !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)" } }, p.description) : null, /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), compat.ok ? null : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-fail)" } }, `\u4E0D\u517C\u5BB9\uFF1A${compat.reasons.join("\uFF1B")}`), /* @__PURE__ */ react_default.createElement("div", { style: actionRowStyle }, isInstalled && updatable ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        disabled: disabled || pending === p.name,
+        onClick: () => doUpdate(p.name),
+        style: { ...btn(true), ...disabled || pending === p.name ? disabledBtn : {} },
+        title: `\u6309\u5E02\u573A\u7D22\u5F15\u66F4\u65B0\u5230 v${latest}\uFF08\u5185\u5BB9\u54C8\u5E0C\u5F3A\u6821\u9A8C\uFF09`
+      },
+      pending === p.name ? "\u66F4\u65B0\u4E2D\u2026" : `\u66F4\u65B0\u5230 v${latest}`
+    ) : null, isInstalled ? isActive ? updatable ? null : /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-muted)" } }, "\u5F53\u524D\u542F\u7528\u7684\u82AF\u7247\u9002\u914D\u5305") : /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
         disabled: disabled || pending === p.name,
         onClick: () => doActivate(p.name),
-        style: { ...btn(true), ...disabled || pending === p.name ? disabledBtn : {} },
+        style: { ...btn(!updatable), ...disabled || pending === p.name ? disabledBtn : {} },
         title: "\u542F\u7528\u8FD9\u5957\u5305\uFF08\u5176\u4F59\u5305\u4FDD\u7559\u5728\u672C\u5730\uFF0C\u968F\u65F6\u5207\u56DE\uFF09"
       },
       pending === p.name ? "\u542F\u7528\u4E2D\u2026" : "\u542F\u7528"
@@ -5824,7 +6074,7 @@ function PackSettingsView(props) {
   const renderInstalledRow = (p) => {
     const v = verifies[p.name];
     const disabled = frozen;
-    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), p.active ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null), /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)", wordBreak: "break-all" } }, p.dir), v !== void 0 ? /* @__PURE__ */ react_default.createElement(
+    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), p.active ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, p.updatable && p.latest !== null ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${p.latest}`, tone: "warn" }) : null), /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)", wordBreak: "break-all" } }, p.dir), v !== void 0 ? /* @__PURE__ */ react_default.createElement(
       "div",
       {
         style: {
@@ -5848,10 +6098,10 @@ function PackSettingsView(props) {
         type: "button",
         disabled,
         onClick: () => doUpdate(p.name),
-        style: { ...btn(), ...disabled ? disabledBtn : {} },
-        title: "\u6309\u5E02\u573A\u7D22\u5F15\u66F4\u65B0\uFF08\u5185\u5BB9\u54C8\u5E0C\u5F3A\u6821\u9A8C\uFF09"
+        style: { ...btn(p.updatable === true), ...disabled ? disabledBtn : {} },
+        title: p.updatable && p.latest !== null ? `\u6309\u5E02\u573A\u7D22\u5F15\u66F4\u65B0\u5230 v${p.latest}\uFF08\u5185\u5BB9\u54C8\u5E0C\u5F3A\u6821\u9A8C\uFF09` : "\u6309\u5E02\u573A\u7D22\u5F15\u66F4\u65B0\uFF08\u5185\u5BB9\u54C8\u5E0C\u5F3A\u6821\u9A8C\uFF09"
       },
-      "\u66F4\u65B0"
+      p.updatable && p.latest !== null ? `\u66F4\u65B0\u5230 v${p.latest}` : "\u66F4\u65B0"
     ), /* @__PURE__ */ react_default.createElement(
       "button",
       {
@@ -6051,6 +6301,8 @@ function toneOf(text) {
   return "normal";
 }
 var SERIAL_PREF_KEY = "elab.serial.pref";
+var TRANSPORT_PREF_KEY = "elab.serial.transport";
+var NET_PREF_KEY = "elab.serial.net";
 function readSerialPref() {
   try {
     const raw = window.localStorage.getItem(SERIAL_PREF_KEY);
@@ -6060,6 +6312,7 @@ function readSerialPref() {
     if (typeof o.port === "string" && o.port !== "") out.port = o.port;
     if (typeof o.baud === "number" && Number.isFinite(o.baud) && o.baud > 0) out.baud = o.baud;
     if (typeof o.decoder === "string" && o.decoder !== "") out.decoder = o.decoder;
+    if (typeof o.logProfile === "string" && o.logProfile !== "") out.logProfile = o.logProfile;
     return out;
   } catch {
     return {};
@@ -6068,6 +6321,39 @@ function readSerialPref() {
 function writeSerialPref(p) {
   try {
     window.localStorage.setItem(SERIAL_PREF_KEY, JSON.stringify(p));
+  } catch {
+  }
+}
+function readTransportPref() {
+  try {
+    const raw = window.localStorage.getItem(TRANSPORT_PREF_KEY);
+    return raw === null || raw === "serial" ? "" : raw;
+  } catch {
+    return "";
+  }
+}
+function writeTransportPref(transport) {
+  try {
+    if (transport === "" || transport === "serial") window.localStorage.removeItem(TRANSPORT_PREF_KEY);
+    else window.localStorage.setItem(TRANSPORT_PREF_KEY, transport);
+  } catch {
+  }
+}
+function readNetPref() {
+  try {
+    const raw = window.localStorage.getItem(NET_PREF_KEY);
+    if (raw === null) return null;
+    const j = JSON.parse(raw);
+    const port = Number(j.port);
+    if (!Number.isFinite(port) || port <= 0) return null;
+    return { host: String(j.host ?? "127.0.0.1"), port, allow_remote: Boolean(j.allow_remote) };
+  } catch {
+    return null;
+  }
+}
+function writeNetPref(net) {
+  try {
+    window.localStorage.setItem(NET_PREF_KEY, JSON.stringify(net));
   } catch {
   }
 }
@@ -6284,9 +6570,14 @@ function CockpitPane(props) {
     port: "auto",
     baud: 115200,
     writable: false,
-    ports: []
+    ports: [],
+    transportKinds: ["serial", "tcp-client", "tcp-server", "udp"],
+    transportDefault: "serial",
+    netDefaults: {}
   });
   const [serialPref, setSerialPref] = useState(readSerialPref);
+  const [transportPref, setTransportPref] = useState(readTransportPref);
+  const [netPref, setNetPref] = useState(readNetPref);
   const [serialInitial, setSerialInitial] = useState(null);
   const [decoders, setDecoders] = useState([
     { id: "justfloat", label: "JustFloat" },
@@ -6366,6 +6657,7 @@ function CockpitPane(props) {
       const s = caps;
       const serial = s.serial;
       if (serial !== void 0) {
+        const tr = s.meta?.serial?.transports;
         setSerialMeta({
           port: serial.host_default || serial.ports?.[0]?.name || "auto",
           baud: serial.host_baud ?? 115200,
@@ -6374,7 +6666,10 @@ function CockpitPane(props) {
             name: String(p.name),
             ...typeof p.kind === "string" ? { kind: p.kind } : {},
             ...typeof p.desc === "string" ? { desc: p.desc } : {}
-          }))
+          })),
+          transportKinds: Array.isArray(tr?.kinds) && tr.kinds.length > 0 ? tr.kinds.filter((k) => typeof k === "string" && k !== "") : ["serial", "tcp-client", "tcp-server", "udp"],
+          transportDefault: typeof tr?.default === "string" && tr.default !== "" ? tr.default : "serial",
+          netDefaults: tr?.net?.defaults ?? {}
         });
         if (serial.monitor !== void 0) setSerialInitial(serial.monitor);
       }
@@ -6412,6 +6707,16 @@ function CockpitPane(props) {
   }, [snap.project, sessionId]);
   const serialPort = serialPref.port ?? serialMeta.port;
   const serialBaud = serialPref.baud ?? serialMeta.baud;
+  const transport = transportPref !== "" ? transportPref : serialMeta.transportDefault;
+  const isNet = transport !== "serial";
+  const netDefaults = serialMeta.netDefaults[transport] ?? {};
+  const netHost = netPref?.host ?? String(netDefaults.host ?? netDefaults.bind ?? "127.0.0.1");
+  const netPort = netPref?.port ?? Number(netDefaults.port ?? 9e3);
+  const netAllowRemote = netPref?.allow_remote ?? false;
+  const netPayload = useMemo(
+    () => transport === "tcp-client" ? { host: netHost, port: netPort, allow_remote: netAllowRemote } : { bind: netHost, port: netPort, allow_remote: netAllowRemote },
+    [transport, netHost, netPort, netAllowRemote]
+  );
   const onSerialPort = useCallback((port) => {
     setSerialPref((prev) => {
       const next = { ...prev, port };
@@ -6435,12 +6740,32 @@ function CockpitPane(props) {
       return next;
     });
   }, []);
+  const onSerialLogProfile = useCallback((profile) => {
+    setSerialPref((prev) => {
+      const next = { ...prev };
+      if (profile === "") delete next.logProfile;
+      else next.logProfile = profile;
+      writeSerialPref(next);
+      return next;
+    });
+  }, []);
+  const onSerialTransport = useCallback((next) => {
+    setTransportPref(next);
+    writeTransportPref(next);
+  }, []);
+  const onSerialNet = useCallback((net) => {
+    setNetPref(net);
+    writeNetPref(net);
+  }, []);
   const serialStream = useSerialStream({
     api: elabApi,
     initial: serialInitial,
     project: snap.project,
     port: serialPort,
     baud: serialBaud,
+    transport: isNet ? transport : "",
+    net: isNet ? netPayload : void 0,
+    logProfile: serialPref.logProfile ?? "",
     enabled: channel === "serial" && visible === true && view === "work",
     sessionId
   });
@@ -6451,6 +6776,21 @@ function CockpitPane(props) {
   }, [serialStream, serialPref.decoder]);
   const steps = snap.run.steps;
   const running = snap.run.status === "running";
+  const runWasLive = useRef(running);
+  const resyncSerial = serialStream.resync;
+  useEffect(() => {
+    if (runWasLive.current && !running) void resyncSerial();
+    runWasLive.current = running;
+  }, [running, resyncSerial]);
+  const runningStepId = useMemo(
+    () => steps.find((s) => s.state === "running")?.id ?? null,
+    [steps]
+  );
+  useEffect(() => {
+    if (!running || runningStepId === null) return;
+    const ch = channelOfStep2(runningStepId);
+    setChannel((cur) => cur === ch ? cur : ch);
+  }, [running, runningStepId]);
   const probeList = kernelProbes()?.list ?? [];
   const currentProbe = snap.projects.find((p) => p.name === snap.project)?.probe ?? "";
   const [probeOpen, setProbeOpen] = useState(false);
@@ -6576,7 +6916,7 @@ function CockpitPane(props) {
           display: "flex",
           alignItems: "center",
           gap: "6px",
-          padding: "5px 8px",
+          padding: "6px 8px",
           borderBottom: "1px solid var(--elab-border)",
           fontSize: "12px"
         }
@@ -6590,9 +6930,10 @@ function CockpitPane(props) {
           style: {
             flex: "1 1 auto",
             minWidth: 0,
-            padding: "1px 4px",
+            height: "24px",
+            padding: "0 6px",
             fontSize: "12px",
-            borderRadius: "4px",
+            borderRadius: "6px",
             border: "1px solid var(--elab-border)",
             background: "var(--elab-bg-surface)",
             color: "var(--elab-fg-primary)"
@@ -6704,12 +7045,32 @@ function CockpitPane(props) {
         "span",
         {
           style: {
+            flex: "0 0 auto",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "4px",
+            padding: "1px 6px",
+            borderRadius: "999px",
+            border: "1px solid currentColor",
             fontSize: "10px",
+            lineHeight: "14px",
             whiteSpace: "nowrap",
+            background: "color-mix(in srgb, currentColor 10%, transparent)",
             color: snap.run.status === "ok" ? "var(--elab-status-ok)" : snap.run.status === "failed" ? "var(--elab-status-fail)" : snap.run.status === "cancelled" || snap.run.status === "inconclusive" ? "var(--elab-status-run)" : "var(--elab-accent)"
           }
         },
-        snap.run.status === "inconclusive" ? "\u672A\u9A8C\u8BC1" : snap.run.status
+        /* @__PURE__ */ react_default.createElement(
+          "span",
+          {
+            style: {
+              width: "5px",
+              height: "5px",
+              borderRadius: "50%",
+              background: "currentColor"
+            }
+          }
+        ),
+        snap.run.status === "inconclusive" ? "\u672A\u9A8C\u8BC1" : snap.run.status === "running" ? "\u8FD0\u884C\u4E2D" : snap.run.status === "ok" ? "\u5B8C\u6210" : snap.run.status === "failed" ? "\u5931\u8D25" : snap.run.status === "cancelled" ? "\u5DF2\u53D6\u6D88" : snap.run.status
       ) : null,
       /* @__PURE__ */ react_default.createElement(
         "button",
@@ -6933,6 +7294,15 @@ function CockpitPane(props) {
               decoderPref: serialPref.decoder,
               onDecoder: onSerialDecoder,
               writable: serialMeta.writable,
+              transport: isNet ? transport : "serial",
+              transportKinds: serialMeta.transportKinds,
+              netHost,
+              netPort,
+              netAllowRemote,
+              onTransport: onSerialTransport,
+              onNet: onSerialNet,
+              logProfilePref: serialPref.logProfile,
+              onLogProfile: onSerialLogProfile,
               runLines: buffersRef.current.serial ?? [],
               runLinesVersion: tailVersion,
               sessionId

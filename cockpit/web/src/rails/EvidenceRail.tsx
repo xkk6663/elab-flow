@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Capabilities, ProjectCard, StepId } from "../api/types";
 import { api } from "../api/client";
 import { logs } from "../store/logs";
@@ -295,6 +295,16 @@ export function EvidenceRail({
     net: netPayload,
     enabled: serialWsActive,
   });
+
+  // 闭环结束 → 内核可能已按 `resume_after_run` 自动把会话开回来（原会话不存在时
+  // 会新开一个）。前端并不知情，界面会停在「监视未启动」，此时手动开又会被内核的
+  // "已在运行"挡住（表现为**串口怎么也打不开**）。收尾时只读同步一次即可接上。
+  const runWasLive = useRef(run.status === "running");
+  const resyncSerial = stream.resync;
+  useEffect(() => {
+    if (runWasLive.current && run.status !== "running") void resyncSerial();
+    runWasLive.current = run.status === "running";
+  }, [run.status, resyncSerial]);
 
   // 监视进行中时，下拉框显示**会话真实的连接方式**（内核回传的 kind），
   // 否则"已经连到 tcp://…，界面却写着串口"会让人以为连错了。

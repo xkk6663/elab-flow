@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 # ======================================================================
-# F411CEU6_BOOT —— Bootloader 薄工程（方案 §4，archetype A：elab -D 全接管）
+# STM32F411CEU6/boot —— Bootloader 薄工程（方案 §4，archetype A：elab -D 全接管）
 #
 # 无 CubeMX：startup（复用 APP 的）+ BOOT.ld(32K) + 薄 main.c + 组件。
 # 业务源只有 main.c（SystemClock_Config 与 APP 逐段一致）；
@@ -17,14 +17,14 @@ set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # elab-flow 仓库根（components.cmake 自举兜底用）
-get_filename_component(ELAB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+get_filename_component(ELAB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
 set(CMAKE_PROJECT_NAME f411_boot)
 project(${CMAKE_PROJECT_NAME})
 enable_language(C ASM)
 
 # APP 工程根（HAL 驱动单一真源，不拷贝）
-set(APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../STM32F411CEU6)
+set(APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 add_executable(${CMAKE_PROJECT_NAME}
     ${CMAKE_CURRENT_SOURCE_DIR}/main.c

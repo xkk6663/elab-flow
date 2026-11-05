@@ -18,7 +18,10 @@ import type { SerialPort } from '../../app/ports.ts'
 import type {
   SerialChunk,
   SerialFrameProfile,
+  SerialIssue,
+  SerialLogProfile,
   SerialPreviewResult,
+  SerialSymbol,
   SerialWidgetRunResult,
 } from '../../domain/icd.ts'
 import {
@@ -84,6 +87,14 @@ const EOLS = [
   { id: 'crlf', label: 'CRLF' },
   { id: 'tab', label: 'TAB' },
 ]
+
+/** 连接方式的人话标签（M4）：未登记的 kind 直接显示原值（不猜）。 */
+const TRANSPORT_LABELS: Record<string, string> = {
+  serial: '串口',
+  'tcp-client': 'TCP 客户端',
+  'tcp-server': 'TCP 服务端',
+  udp: 'UDP',
+}
 
 /** 常用波特率（非标值会插进来，否则 select 显示不出当前值）。 */
 const COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
@@ -240,6 +251,19 @@ export interface SerialPaneProps {
   /** 解码器偏好变化（上层负责持久化；'' 表示关闭共享解码）。 */
   onDecoder?: (decoder: string) => void
   writable: boolean
+  /** 连接方式（M4）：serial / tcp-client / tcp-server / udp */
+  transport: string
+  /** 可用的连接方式（来自 caps.meta.serial.transports.kinds） */
+  transportKinds: string[]
+  /** 网络目标/绑定地址（M4） */
+  netHost: string
+  netPort: number
+  netAllowRemote: boolean
+  onTransport?: (transport: string) => void
+  onNet?: (net: { host: string; port: number; allow_remote: boolean }) => void
+  /** 日志诊断 profile 偏好（M6）：打开会话时带上 */
+  logProfilePref?: string
+  onLogProfile?: (profile: string) => void
   /** 闭环 run 落在 serial 通道的事件行（保持闭环证据可见）。 */
   runLines: TailLine[]
   /** 缓冲版本号：命令式缓冲不进 React 状态，靠它触发重绘。 */
@@ -388,7 +412,7 @@ function termText(line: TermLine): string {
 }
 
 export function SerialPane(props: SerialPaneProps): ReactNode {
-  const { api, stream, decoders, project, running, port, baud, ports, writable } = props
+  const { api, stream, decoders, project, running, port, baud, ports, writable, transport } = props
   const [view, setView] = useState<ViewId>('lines')
   const [dir, setDir] = useState<Dir>('all')
   const [repr, setRepr] = useState<SerialRepr>('hex')
@@ -415,6 +439,43 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
   const [jobId, setJobId] = useState('')
   // 本地解码兜底：上次偏好优先；'' = 用户显式关闭共享解码（也不本地解码）。
   const [decoder, setDecoder] = useState(props.decoderPref ?? decoders[0]?.id ?? 'justfloat')
+
+  // ── 日志诊断（M6）：profile 清单 + 结构化异常展开 ──
+  const ISSUE_KIND_LABEL: Record<string, string> = {
+    panic: 'panic', assert: 'assert', hardfault: 'hardfault', reset: '复位',
+  }
+  const [logProfiles, setLogProfiles] = useState<SerialLogProfile[]>([])
+  const [profileId, setProfileId] = useState(props.logProfilePref ?? '')
+  const [issuesOpen, setIssuesOpen] = useState(false)
+  const [symbols, setSymbols] = useState<Record<number, SerialSymbol[]>>({})
+  useEffect(() => {
+    let dead = false
+    if (!project) {
+      setLogProfiles([])
+      return undefined
+    }
+    void api
+      .serialLogProfiles(project, props.sessionId)
+      .then((r) => { if (!dead) setLogProfiles(r.profiles ?? []) })
+      .catch(() => { if (!dead) setLogProfiles([]) })
+    return () => { dead = true }
+  }, [api, project, props.sessionId])
+  useEffect(() => {
+    // 会话实际启用的 profile 是事实源（打开时可能默认选了第一份）
+    const active = stream.snap?.issues?.profile
+    if (active) setProfileId(active)
+  }, [stream.snap?.issues?.profile])
+  const symbolizeIssue = useCallback(async (issue: SerialIssue): Promise<void> => {
+    try {
+      const r = await api.serialSymbolize(
+        project, issue.backtrace, stream.snap?.issues?.profile ?? '', props.sessionId,
+      )
+      setSymbols((prev) => ({ ...prev, [issue.seq]: r.symbols ?? [] }))
+      if (!r.ok) setNotice(`符号化未完全成功：${r.error ?? '未知原因'}`)
+    } catch (e) {
+      setNotice(`符号化失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [api, project, props.sessionId, stream.snap?.issues?.profile])
 
   // ── 帧协议（M5）：只读镜像（编辑器只在驾驶舱，避免两套前端漂移）──
   const [frameProfiles, setFrameProfiles] = useState<SerialFrameProfile[]>([])
@@ -1057,47 +1118,139 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
           )
         })}
         <span style={{ flex: '1 1 auto' }} />
+        {/* ── 连接方式（M4）：串口 / TCP 客户端 / TCP 服务端 / UDP ── */}
         <select
-          value={port || 'auto'}
-          onChange={(e: any) => props.onPort?.(e.currentTarget.value)}
-          aria-label="串口端口"
-          title={
-            portLocked
-              ? '监视进行中：先关闭监视再换端口（换口会重开串口）'
-              : '选择串口；auto = 内核按 USB 优先自动解析（有歧义时会报错而不是猜）'
-          }
-          style={{ ...selectStyle, maxWidth: '150px', opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
-          disabled={portLocked || props.onPort === undefined}
-        >
-          <option value="auto">{'auto（自动选口）'}</option>
-          {portOptions.map((p) => (
-            <option key={p.name} value={p.name} title={p.label}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <select
-          value={baud}
-          onChange={(e: any) => props.onBaud?.(Number(e.currentTarget.value))}
-          aria-label="串口波特率"
-          title={portLocked ? '监视进行中：先关闭监视再换波特率' : '波特率：下一次打开监视时生效'}
+          value={transport}
+          onChange={(e: any) => props.onTransport?.(e.currentTarget.value)}
+          aria-label="连接方式"
+          title={portLocked
+            ? '监视进行中：先关闭监视再换连接方式（换链路会重开会话）'
+            : '连接方式：串口 = 本地 COM；TCP 客户端 = 连板子/服务器；TCP 服务端 = 本机监听等板子连入；UDP = 本机监听等设备发包'}
           style={{ ...selectStyle, opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
-          disabled={portLocked || props.onBaud === undefined}
+          disabled={portLocked || props.onTransport === undefined}
         >
-          {baudOptions(baud).map((b) => (
-            <option key={b} value={b}>
-              {b}
-            </option>
+          {props.transportKinds.map((k) => (
+            <option key={k} value={k}>{TRANSPORT_LABELS[k] ?? k}</option>
           ))}
         </select>
+        {transport === 'serial' ? (
+          <>
+            <select
+              value={port || 'auto'}
+              onChange={(e: any) => props.onPort?.(e.currentTarget.value)}
+              aria-label="串口端口"
+              title={
+                portLocked
+                  ? '监视进行中：先关闭监视再换端口（换口会重开串口）'
+                  : '选择串口；auto = 内核按 USB 优先自动解析（有歧义时会报错而不是猜）'
+              }
+              style={{ ...selectStyle, maxWidth: '150px', opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
+              disabled={portLocked || props.onPort === undefined}
+            >
+              <option value="auto">{'auto（自动选口）'}</option>
+              {portOptions.map((p) => (
+                <option key={p.name} value={p.name} title={p.label}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={baud}
+              onChange={(e: any) => props.onBaud?.(Number(e.currentTarget.value))}
+              aria-label="串口波特率"
+              title={portLocked ? '监视进行中：先关闭监视再换波特率' : '波特率：下一次打开监视时生效'}
+              style={{ ...selectStyle, opacity: portLocked ? 0.5 : 1, cursor: portLocked ? 'not-allowed' : 'pointer' }}
+              disabled={portLocked || props.onBaud === undefined}
+            >
+              {baudOptions(baud).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : (
+          <>
+            <input
+              value={props.netHost}
+              onChange={(e: any) => props.onNet?.({ host: e.currentTarget.value, port: props.netPort, allow_remote: props.netAllowRemote })}
+              aria-label={transport === 'tcp-client' ? '目标地址' : '绑定地址'}
+              title={transport === 'tcp-client'
+                ? '板子/服务器的地址（跨机需勾选「允许非回环」）'
+                : '本机绑定地址：127.0.0.1 只给本机；0.0.0.0 监听局域网（需勾选「允许非回环」）'}
+              style={{ ...selectStyle, width: '120px', opacity: portLocked ? 0.5 : 1 }}
+              disabled={portLocked}
+            />
+            <input
+              value={String(props.netPort)}
+              onChange={(e: any) => {
+                const n = Number(e.currentTarget.value)
+                props.onNet?.({ host: props.netHost, port: Number.isFinite(n) ? n : 0, allow_remote: props.netAllowRemote })
+              }}
+              aria-label="网络端口"
+              title="网络端口（1~65535）；板子固件里的端口要和这里一致"
+              style={{ ...selectStyle, width: '62px', opacity: portLocked ? 0.5 : 1 }}
+              disabled={portLocked}
+            />
+            <label
+              title="默认只允许 127.0.0.1/localhost；跨机或板子直连时必须显式允许"
+              style={{ ...chip, cursor: portLocked ? 'not-allowed' : 'pointer', opacity: portLocked ? 0.5 : 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={props.netAllowRemote}
+                onChange={(e: any) => props.onNet?.({ host: props.netHost, port: props.netPort, allow_remote: Boolean(e.currentTarget.checked) })}
+                disabled={portLocked}
+                style={{ marginRight: '4px', verticalAlign: 'middle' }}
+              />
+              允许非回环
+            </label>
+          </>
+        )}
         {/* 线参数：只读 —— 编辑面只在 cockpit（避免两套前端漂移）；这里展示会话实际值 */}
         <span
           aria-label="串口线参数（只读）"
           title="线参数（只读）：在 cockpit「串口」工作区编辑；改后需重开监视才生效"
-          style={{ ...chip, cursor: 'default', fontFamily: 'var(--elab-font-mono)' }}
+          style={{ ...chip, cursor: 'default', fontFamily: 'var(--elab-font-mono)', display: transport === 'serial' ? undefined : 'none' }}
         >
           {stream.snap?.line_text ?? '8N1'}
         </span>
+        {/* ── 日志诊断 profile（M6）：规则来自包/工程数据，面板只读清单 ── */}
+        {logProfiles.length > 0 ? (
+          <select
+            value={profileId}
+            disabled={!stream.active}
+            onChange={(e: any) => {
+              const next: string = e.currentTarget.value
+              setProfileId(next)
+              props.onLogProfile?.(next)
+              if (stream.active) void stream.setLogProfile(next)
+            }}
+            aria-label="日志诊断 profile"
+            title="日志诊断规则来自包/工程数据（panic / hardfault / 复位）；关闭 = 不解析"
+            style={{ ...selectStyle, opacity: stream.active ? 1 : 0.5 }}
+          >
+            <option value="">日志诊断：关</option>
+            {logProfiles.map((p) => (
+              <option key={p.id} value={p.id}>{p.label || p.id}</option>
+            ))}
+          </select>
+        ) : null}
+        {stream.issueTotal > 0 ? (
+          <button
+            type="button"
+            onClick={() => setIssuesOpen((v) => !v)}
+            style={{
+              ...chip,
+              ...(stream.issues.some((i) => i.kind !== 'reset')
+                ? { color: 'var(--elab-status-fail)', borderColor: 'var(--elab-status-fail)' }
+                : {}),
+            }}
+            title="结构化异常（panic / assert / hardfault / 复位）；可展开符号化回溯地址"
+          >
+            {`异常 ${stream.issueTotal}${issuesOpen ? ' ▾' : ' ▸'}`}
+          </button>
+        ) : null}
         <select
           value={dir}
           onChange={(e: any) => setDir(e.currentTarget.value === 'rx' ? 'rx' : e.currentTarget.value === 'tx' ? 'tx' : 'all')}
@@ -1321,6 +1474,39 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
       {stream.paused ? (
         <div style={barInfo}>{'已暂停入环 —— 服务端仍在读口；点「继续」恢复。'}</div>
       ) : null}
+      {issuesOpen && stream.issues.length > 0 ? (
+        <div role="region" aria-label="结构化异常" style={{ ...barInfo, maxHeight: '220px', overflowY: 'auto' }}>
+          {stream.issues.slice().reverse().map((it) => (
+            <div key={it.seq} style={{ marginBottom: '6px' }}>
+              <div>
+                <b>{ISSUE_KIND_LABEL[it.kind] ?? it.kind}</b>
+                {` ${it.t}`}
+                {it.core ? ` · core ${it.core}` : ''}
+                {it.reason ? ` · ${it.reason}` : ''}
+                {it.after_reset ? ' · 复位后' : ''}
+                {it.kind !== 'reset' && it.backtrace.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => void symbolizeIssue(it)}
+                    style={{ ...chip, marginLeft: '6px' }}
+                    title="把回溯地址解析成函数 / 文件:行（需要工程 ELF）"
+                  >
+                    符号化
+                  </button>
+                ) : null}
+              </div>
+              <div style={metaStyle}>{it.line}</div>
+              {it.backtrace.length > 0 ? <div style={metaStyle}>{it.backtrace.join(' ')}</div> : null}
+              {(symbols[it.seq] ?? []).map((sym) => (
+                <div style={metaStyle} key={sym.addr}>
+                  {`${sym.addr} → ${sym.func ?? sym.note ?? '无法解析'}`}
+                  {sym.file ? `（${sym.file}:${sym.line ?? '?'}）` : ''}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      ) : null}
       {capActive !== true && cap?.truncated === true ? (
         <div style={barWarn}>
           {`录制已到上限并停止：${String(cap?.path ?? '')}（${String(cap?.chunks ?? 0)} 批 / ${String(cap?.bytes ?? 0)} B）—— 证据文件已保留，可回放`}
@@ -1350,7 +1536,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             <div style={emptyStyle}>
               {replayMode
                 ? `回放文件里没有 RX 行（共 ${replay?.chunks.length ?? 0} 批，可能是纯 TX 录制）—— 可切到「字节」看原始内容。`
-                : '尚无行输出。点上方「▶ 串口」启动常驻监视后，设备输出会实时流进来。'}
+                : '尚无行输出。点上方「▶ 打开监视」启动会话后，设备输出会实时流进来。'}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0' }}>
@@ -1836,7 +2022,7 @@ export function SerialPane(props: SerialPaneProps): ReactNode {
             borderTop: '1px solid var(--elab-border)',
           }}
         >
-          {`监视未启动（${port || 'auto'}@${baud}）—— 点上方「▶ 串口」启动。`}
+          {`监视未启动（${port || 'auto'}@${baud}）—— 点上方「▶ 打开监视」启动。`}
         </div>
       ) : null}
     </div>

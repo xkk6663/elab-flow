@@ -36,11 +36,12 @@ test('elab_guide：返回工具清单 + 规则 + 面板说明，且与常驻段�
   }
 })
 
-test('纪律文案：单飞 / 互斥 / 写门控 / 判活四类都在', () => {
+test('纪律文案：单飞 / 串口让位 / 写门控 / 判活四类都在', () => {
   const { rules } = agentGuidePayload()
   const text = rules.join('\n')
   assert.match(text, /单飞/)
-  assert.match(text, /互斥/)
+  // M2 起串口不再是「互斥不许跑」，而是内核自动让位（挂起监视并在收尾恢复）。
+  assert.match(text, /让位/)
   assert.match(text, /allowAgentWrite/)
   assert.match(text, /toggles|tick/)
 })

@@ -56,6 +56,7 @@ from elab import serialwidgets as serialwidgets_mod  # noqa: E402
 from elab.config import Config, ElabError, Host, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 from elab import pkg as pkg_mod                       # noqa: E402
+from elab import setup as setup_mod                   # noqa: E402
 from elab import _yaml as yaml_mod                    # noqa: E402
 
 HOST = "127.0.0.1"            # ★ 只监听本地（§5.6：本地工具，不做远程暴露）
@@ -2388,6 +2389,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 cfg2, (pkg_mod.discover(cfg2).get(name) or {}).get("chips") or [],
                 log=lambda *a: None)
             return self._json({**rec, "skills": skills,
+                               "setup": setup_mod.pack_report(cfg2, pack=name),
                                "packs": pkg_mod.status(cfg2, include_market=False)}, 200)
 
         if action == "install":
@@ -2401,7 +2403,14 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                             force=force, log=log)
                 stage("生成平台 skill")
                 skills = pkg_mod.regenerate_skills(cfg, rec.get("chips"), log)
-                return {**rec, "skills": skills}
+                stage("环境自检")
+                report = setup_mod.pack_report(cfg, pack=rec.get("name") or name)
+                for item in report["items"]:
+                    if item["level"] in ("error", "warn"):
+                        log(f"[setup] {item['code']}: {item['message']}")
+                        if item.get("action"):
+                            log(f"[setup]   → {item['action']}")
+                return {**rec, "skills": skills, "setup": report}
             return self._json(self.pkg_jobs.start("install", name, work), 202)
 
         if action == "remove":
@@ -2426,7 +2435,14 @@ class CockpitHandler(BaseHTTPRequestHandler):
             stage("生成平台 skill")
             skills = pkg_mod.regenerate_skills(
                 cfg, [c for r in recs for c in r.get("chips") or []], log)
-            return {"updated": recs, "skills": skills}
+            stage("环境自检")
+            reports = [setup_mod.pack_report(cfg, pack=r.get("name") or "")
+                       for r in recs]
+            for report in reports:
+                for item in report["items"]:
+                    if item["level"] in ("error", "warn"):
+                        log(f"[setup] {item['code']}: {item['message']}")
+            return {"updated": recs, "skills": skills, "setup": reports}
         return self._json(self.pkg_jobs.start("update", name, work), 202)
 
     # ── 一键适配（M5.6）────────────────────────────────────────

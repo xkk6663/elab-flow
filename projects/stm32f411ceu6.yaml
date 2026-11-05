@@ -33,7 +33,7 @@ flash:
     - path: ${ELAB_ROOT}/.work/f411_boot/f411_boot.bin
       format: bin
       address: "0x08000000"
-      ld: ${ELAB_ROOT}/examples/F411CEU6_BOOT/BOOT.ld
+      ld: ${ELAB_ROOT}/examples/STM32F411CEU6/boot/BOOT.ld
     - path: ${work_dir}/411.bin
       format: bin
       address: "0x08010000"

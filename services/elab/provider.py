@@ -48,7 +48,11 @@ _SEMVER_RE = re.compile(r"^([0-9]+)\.([0-9]+)\.([0-9]+)(?:[+-][0-9A-Za-z.+-]+)?$
 _ALLOWED_TOP_KEYS = {
     "schema_version", "provider_api", "name", "version", "license",
     "description", "requires", "defaults", "artifacts", "steps", "debug",
+    "toolchain",
 }
+#: ``toolchain`` 块的展示字段（纯数据，永不执行）；未知平台/键在加载时 fail-fast。
+_TOOLCHAIN_KEYS = {"name", "version", "docs", "install", "host_keys"}
+_INSTALL_PLATFORMS = ("windows", "linux", "macos")
 
 
 class ProviderError(ElabError):
@@ -273,6 +277,50 @@ def validate_manifest(man: dict) -> list[str]:
                     if bad:
                         problems.append(
                             f"debug.features 含未知能力：{', '.join(map(str, bad))}")
+
+    tc = man.get("toolchain")
+    if tc is not None:
+        problems += _check_toolchain(tc)
+    return problems
+
+
+def _check_toolchain(tc) -> list[str]:
+    """``toolchain`` 是纯展示块（安装引导），结构错误必须 fail-fast。"""
+    if not isinstance(tc, dict):
+        return ["toolchain 必须是映射"]
+    problems: list[str] = []
+    for key in tc:
+        if key.startswith("x-"):
+            continue
+        if key not in _TOOLCHAIN_KEYS:
+            problems.append(f"toolchain 含未知字段 {key!r}")
+    for key in ("name", "version", "docs"):
+        if key in tc and not isinstance(tc[key], str):
+            problems.append(f"toolchain.{key} 必须是字符串")
+    install = tc.get("install")
+    if install is not None:
+        if not isinstance(install, dict):
+            problems.append("toolchain.install 必须是映射（平台 → 多行命令）")
+        else:
+            for osname, cmd in install.items():
+                if osname not in _INSTALL_PLATFORMS:
+                    problems.append(
+                        f"toolchain.install 平台未知：{osname!r}"
+                        f"（可选：{'/'.join(_INSTALL_PLATFORMS)}）")
+                if isinstance(cmd, str):
+                    if not cmd.strip():
+                        problems.append(
+                            f"toolchain.install.{osname} 不能为空")
+                elif not (
+                        isinstance(cmd, list)
+                        and all(isinstance(x, str) and x.strip() for x in cmd)):
+                    problems.append(
+                        f"toolchain.install.{osname} 必须是命令字符串或命令列表")
+    host_keys = tc.get("host_keys")
+    if host_keys is not None and (
+            not isinstance(host_keys, list)
+            or not all(isinstance(k, str) and k.strip() for k in host_keys)):
+        problems.append("toolchain.host_keys 必须是字符串列表")
     return problems
 
 
@@ -575,6 +623,33 @@ def _check_one(value: str, kind: str) -> bool:
     return False
 
 
+def host_checks(cfg: Config, man: dict) -> list[dict]:
+    """检查 provider ``requires.host``（不依赖项目，供 ``elab setup`` 使用）。
+
+    返回每项 ``{key, check, value, ok, code, message, hint}``；``code`` 与
+    :func:`evaluate` 的口径一致（``host.missing`` / ``host.invalid``）。
+    """
+    out: list[dict] = []
+    for item in ((man.get("requires") or {}).get("host") or []):
+        key = str(item.get("key") or "")
+        kind = str(item.get("check") or "file")
+        val = _host_fact(cfg, key)
+        if not val:
+            out.append({"key": key, "check": kind, "value": "", "ok": False,
+                        "code": "host.missing",
+                        "message": f"主机事实源未声明：${{host:{key}}}",
+                        "hint": f"在 elab.host.yaml 声明 {key}"})
+        elif not _check_one(val, kind):
+            out.append({"key": key, "check": kind, "value": val, "ok": False,
+                        "code": "host.invalid",
+                        "message": f"{key}={val} 不是有效的 {kind}",
+                        "hint": f"检查 elab.host.yaml: {key}（或环境变量覆盖）"})
+        else:
+            out.append({"key": key, "check": kind, "value": val, "ok": True,
+                        "code": "host.ok", "message": val, "hint": ""})
+    return out
+
+
 def evaluate(cfg: Config, project: str,
              toolchain: ResolvedToolchain | None = None) -> dict:
     """求 provider ``requires``（host/probe/serial）→ ``{available, reasons}``。"""
@@ -863,7 +938,7 @@ __all__ = [
     "CORE_ONLY_STEPS", "DataProvider", "DEFAULT_TIMEOUTS", "NativeProvider",
     "PROVIDER_API_VERSION", "PROVIDER_FILE", "ProviderError", "ProviderRef",
     "ProviderRegistry", "ResolvedToolchain", "StepDecl", "ToolchainProvider",
-    "entry_source", "evaluate", "index_entries", "index_problems", "inline_decl",
+    "entry_source", "evaluate", "host_checks", "index_entries", "index_problems", "inline_decl",
     "install", "install_root", "market_entry", "native_decl", "official_root",
     "provider_roots", "read_manifest", "remove", "resolve", "satisfies_version",
     "split_ref", "status", "validate_manifest",

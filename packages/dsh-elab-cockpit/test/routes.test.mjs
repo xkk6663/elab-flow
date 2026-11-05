@@ -181,21 +181,15 @@ test('回归 2026-10-26：/elab/api/* 与 /elab/events 把 sessionId 传给 ensu
   assert.deepEqual(seen, ['s1', undefined, 's2'])
 })
 
-test('P5 串口互斥预判：onhw 步骤撞监视会话 → 409 serial-busy；纯 build 不拦', async () => {
+test('M2 让位：监视开着时 onhw 步骤不再被宿主预判拦截（由内核挂起/恢复）', async () => {
   const mutex = { active: true, setOpen(v) { this.active = v }, isActive() { return this.active } }
   const ctx = makeCtx()
   registerApiRoute(ctx, deps({ serialMutex: mutex }))
-  // flash 在 ONHW_STEPS 里 → 预判拦截
-  const blocked = await call(ctx.routes[0], 'POST', '/elab/api/run?sessionId=s1', JSON.stringify({ project: 'p', steps: ['flash'] }))
-  assert.equal(blocked.statusCode, 409)
-  assert.equal(blocked.json.error.code, 'serial-busy')
-  // build 不占串口 → 过门（上游不可达 → 502）
-  const allowed = await call(ctx.routes[0], 'POST', '/elab/api/run?sessionId=s1', JSON.stringify({ project: 'p', steps: ['build'] }))
-  assert.equal(allowed.statusCode, 502)
-  // 关监视后 → 过门
-  mutex.setOpen(false)
-  const after = await call(ctx.routes[0], 'POST', '/elab/api/run?sessionId=s1', JSON.stringify({ project: 'p', steps: ['flash'] }))
-  assert.equal(after.statusCode, 502)
+  // 监视开着 + flash → 不再 409；请求照常转发（上游不可达 → 502）
+  const flash = await call(ctx.routes[0], 'POST', '/elab/api/run?sessionId=s1', JSON.stringify({ project: 'p', steps: ['flash'] }))
+  assert.equal(flash.statusCode, 502)
+  const triple = await call(ctx.routes[0], 'POST', '/elab/api/run?sessionId=s1', JSON.stringify({ project: 'p', steps: ['build', 'flash', 'debug_verify'] }))
+  assert.equal(triple.statusCode, 502)
 })
 
 test('P1 串口字节/解码端点白名单 + 互斥只认 open/close', async () => {

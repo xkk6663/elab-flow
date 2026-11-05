@@ -220,6 +220,8 @@ export function PacksView({ runActive, onClose, onActivated }: PacksViewProps) {
     const installedRec = status?.installed.find((x) => x.name === p.name);
     const isInstalled = installedRec?.installed === true;
     const isActive = installedRec?.active === true;
+    const updatable = installedRec?.updatable === true;
+    const latest = installedRec?.latest ?? p.version;
     const disabled = frozen || !compat.ok;
     return (
       <div key={p.name} className={s.row}>
@@ -227,6 +229,7 @@ export function PacksView({ runActive, onClose, onActivated }: PacksViewProps) {
           <span className={s.name}>{p.name}</span>
           {isActive ? <Tag tone="green" dense>启用中</Tag> : null}
           {isInstalled && !isActive ? <Tag dense>已安装</Tag> : null}
+          {updatable ? <Tag tone="amber" dense>{`可更新 v${latest}`}</Tag> : null}
         </div>
         {p.description !== undefined && p.description !== "" ? (
           <span className={s.desc}>{p.description}</span>
@@ -236,12 +239,25 @@ export function PacksView({ runActive, onClose, onActivated }: PacksViewProps) {
           <div className={s.compatFail}>{`不兼容：${compat.reasons.join("；")}`}</div>
         )}
         <div className={s.actions}>
+          {isInstalled && updatable ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={disabled || pending === p.name}
+              title={`按市场索引更新到 v${latest}（内容哈希强校验）`}
+              onClick={() => doUpdate(p.name)}
+            >
+              {pending === p.name ? "更新中…" : `更新到 v${latest}`}
+            </Button>
+          ) : null}
           {isInstalled ? (
             isActive ? (
-              <span className={s.mutedText}>当前启用的芯片适配包</span>
+              updatable ? null : (
+                <span className={s.mutedText}>当前启用的芯片适配包</span>
+              )
             ) : (
               <Button
-                variant="primary"
+                variant={updatable ? "outline" : "primary"}
                 size="sm"
                 disabled={disabled || pending === p.name}
                 title="启用这套包（其余包保留在本地，随时切回）"
@@ -274,6 +290,9 @@ export function PacksView({ runActive, onClose, onActivated }: PacksViewProps) {
         <div className={s.nameRow}>
           <span className={s.name}>{p.name}</span>
           {p.active ? <Tag tone="green" dense>启用中</Tag> : null}
+          {p.updatable && p.latest !== null ? (
+            <Tag tone="amber" dense>{`可更新 v${p.latest}`}</Tag>
+          ) : null}
         </div>
         <PackMeta pack={p} />
         <span className={s.path}>{p.dir}</span>
@@ -297,13 +316,15 @@ export function PacksView({ runActive, onClose, onActivated }: PacksViewProps) {
             校验
           </Button>
           <Button
-            variant="outline"
+            variant={p.updatable ? "primary" : "outline"}
             size="sm"
             disabled={disabled}
-            title="按市场索引更新（内容哈希强校验）"
+            title={p.updatable && p.latest !== null
+              ? `按市场索引更新到 v${p.latest}（内容哈希强校验）`
+              : "按市场索引更新（内容哈希强校验）"}
             onClick={() => doUpdate(p.name)}
           >
-            更新
+            {p.updatable && p.latest !== null ? `更新到 v${p.latest}` : "更新"}
           </Button>
           <Button
             variant="danger"

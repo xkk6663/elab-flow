@@ -14,7 +14,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { registerOnce } from './route-guard.ts'
-import { ONHW_STEPS } from '../../domain/pipeline.ts'
 import type { KernelProxyDeps, RetentionConfig, SerialMutexPort } from '../../app/ports.ts'
 
 /**
@@ -224,22 +223,11 @@ export function registerApiRoute(ctx: HostRouteContext, deps: ProxyDeps): () => 
             // ★ 组件执行也要区分人/agent：人的按钮 = human，工具调用带内部头 = agent
             //   （面板据 actor 决定谁能停：人的停止/暂停永远优先）。
             parsed.actor = internal === 'agent' ? 'agent' : 'human'
-            // ★ §6.2 规则 2 预判拦截：带 onhw 步骤的 run 与常驻串口监视互斥
-            //   （服务端只在监视 open/串口写侧查闭环，run 侧不查 —— 宿主提前拦）。
-            if (deps.serialMutex?.isActive() === true) {
-              const stepsNow = Array.isArray(parsed.steps) ? (parsed.steps as unknown[]).map(String) : []
-              if (stepsNow.some((s) => (ONHW_STEPS as readonly string[]).includes(s))) {
-                return json(res, 409, {
-                  ok: false,
-                  error: {
-                    code: 'serial-busy',
-                    message: '串口监视会话占用中（约束 N5）：先在「串口」通道点「关闭监视」，或等它结束后再发起含烧录/调试的 run',
-                  },
-                })
-              }
-            }
+            // ★ M2 起**不再预判拦截**：含 flash/debug_verify/monitor 的 run 由内核
+            //   `_serial_yield_begin` 自动让位（挂起常驻监视并释放口，收尾按
+            //   `serial.resume_after_run` 恢复）。宿主若先回 409，用户会看到
+            //   「监视已开着 → 怎么都不能跑」的死路，且与内核真实语义相反。
           }
-          // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
           // ★ RunArbiter（§6.2）：同一 rootKey 同时最多 1 个 run；
           //   人工 run 进行中 agent 请求返回 human-busy（不静默排队）。
           if (rel === 'run' && deps.arbiter !== undefined) {

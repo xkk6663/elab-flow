@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "rev": 0,
+  "profiles": [
+    {
+      "id": "wave3",
+      "label": "三通道波形帧（7B，sum8）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "aa55",
+        "tail_hex": "",
+        "length": 7,
+        "max_bytes": 32
+      },
+      "checksum": {
+        "kind": "sum8",
+        "at": "tail"
+      },
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u8",
+          "offset": 2,
+          "plot": false
+        },
+        {
+          "name": "sine",
+          "type": "u8",
+          "offset": 3,
+          "unit": "LSB",
+          "plot": true
+        },
+        {
+          "name": "tri",
+          "type": "u8",
+          "offset": 4,
+          "unit": "LSB",
+          "plot": true
+        },
+        {
+          "name": "sq",
+          "type": "u8",
+          "offset": 5,
+          "unit": "LSB",
+          "plot": true
+        }
+      ]
+    }
+  ]
+}

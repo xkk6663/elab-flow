@@ -812,6 +812,23 @@ def _snapshot(s: _Session | None) -> dict:
                 "decode": s._decode_view_locked()}
 
 
+def _same_target(s: "_Session", t, project: str) -> bool:
+    """``open`` 请求是否就是**当前这条会话**（同工程 / 同传输 / 同目标 / 同波特率）。
+
+    ``Target.label`` 是解析后的**实际目标**（串口 = COMx；网络 = 规范化后的
+    地址），所以这里比对 label 就足够 —— 不用再各自猜 host/bind 的等价性。
+    """
+    if project and s.project and project != s.project:
+        return False
+    if (t.kind or "serial") != (s.kind or "serial"):
+        return False
+    if (t.label or "") != (s.port or ""):
+        return False
+    if t.kind == "serial" and int(t.baud or 0) != int(s.baud or 0):
+        return False
+    return True
+
+
 def current() -> "_Session | None":
     """当前会话句柄（活着才返回）。给 DTR/RTS 控制等"复用同一串口"的场景用。
 
@@ -864,12 +881,6 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
             return {"ok": False, "error": f"未找到日志 profile：{lp!r}"}
     with _LOCK:
         cur = _SESS
-        if cur is not None and cur.state != "closed":
-            extra = "（当前因闭环让位处于暂停，run 结束后会自动恢复）" \
-                if cur.state == "suspended" else ""
-            return {"ok": False, "error": (
-                f"监视已在进行（{cur.port}@{cur.baud}，state={cur.state}）{extra} —— "
-                f"先关闭当前监视再换口/换工程")}
         caps = sp.capabilities()
         # 网络传输（M4）不走串口后端：没有 pyserial 也能开 TCP/UDP。
         kind_hint = str(transport or "").strip().lower()
@@ -892,6 +903,27 @@ def open_session(cfg: Config, project: str, *, port: str = "", baud: int = 0,
             return {"ok": False, "error": t.reason,
                     "port": "", "baud": t.baud,
                     "line": t.line.as_dict(), "line_text": t.line.text}
+        if cur is not None and cur.state != "closed":
+            # ★ 幂等（不是"重复打开"）：同工程 / 同传输 / 同目标的 open 就是
+            #   **接上这条已有会话**。闭环让位回归后内核会自己把会话开回来
+            #   （opened_by="auto"，面板不一定知道），此时点「打开监视」若被
+            #   拒成"监视已在进行"，界面就卡在**怎么都打不开**的死局（对方还
+            #   占着口，也不能再开第二条）。真正换口/换工程仍按原样拒绝。
+            if _same_target(cur, t, project):
+                # open 携带的「跨会话记忆」仍要生效（解码器 / 日志 profile）：
+                # 否则复用的会话不会按面板当前选的协议画波形、也不做 panic 解析。
+                if dec and dec != cur.decoder:
+                    cur.set_decoder(dec, actor=opened_by, profile=frame_profile)
+                if profile and (profile.get("id") or "") != cur.log_profile_id:
+                    cur.set_log_profile(profile)
+                log(f"[serialmon] ⇄ 复用已有会话 {cur.port}@{cur.baud}"
+                    f"（state={cur.state}，by={cur.opened_by}）")
+                return {"ok": True, "adopted": True, **_snapshot(cur)}
+            extra = "（当前因闭环让位处于暂停，run 结束后会自动恢复）" \
+                if cur.state == "suspended" else ""
+            return {"ok": False, "error": (
+                f"监视已在进行（{cur.port}@{cur.baud}，state={cur.state}）{extra} —— "
+                f"先关闭当前监视再换口/换工程")}
         try:
             proj = cfg.resolved_project(project) if project else {}
         except Exception:                            # noqa: BLE001

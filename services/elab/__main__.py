@@ -31,6 +31,7 @@ from . import run as run_mod
 from . import serialconsole as serialconsole_mod
 from . import serialport as serialport_mod
 from . import serialterm as serialterm_mod
+from . import setup as setup_mod
 from . import skillgen
 from .plan import plan_for
 
@@ -62,6 +63,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--deep", action="store_true", help="真跑 configure 取实际编译命令作证据")
     p.add_argument("--strict-lock", action="store_true", dest="strict_lock",
                    help="elab.lock.yaml 版本漂移升级为失败（默认只 warn）")
+
+    p = sub.add_parser("setup",
+                       help="装完芯片包后的环境自检：缺什么、下一步装什么（只读）")
+    _add_common(p)
+    p.add_argument("-p", "--project", help="同时检查该工程所需的串口 / 探针")
+    p.add_argument("--pack", help="适配包名（默认当前启用的包）")
 
     p = sub.add_parser("build", help="构建项目")
     _add_common(p)
@@ -299,6 +306,8 @@ def _dispatch(args) -> int:
         return cmd_list(cfg, args)
     if args.cmd == "doctor":
         return cmd_doctor(cfg, args)
+    if args.cmd == "setup":
+        return cmd_setup(cfg, args)
     if args.cmd == "build":
         return cmd_build(cfg, args)
     if args.cmd == "flash":
@@ -414,6 +423,17 @@ def cmd_doctor(cfg: Config, args) -> int:
         else:
             print(f"[elab] ✗ {len(rep.errors)} 项失败, {len(rep.warns)} 项告警")
     return 0 if rep.passed else 1
+
+
+# ── setup（装包后的环境自检）──────────────────────────────────────
+def cmd_setup(cfg: Config, args) -> int:
+    report = setup_mod.pack_report(cfg, pack=args.pack or "",
+                                   project=args.project or "")
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(setup_mod.render(report))
+    return 0 if report["ok"] else 1
 
 
 # ── build ─────────────────────────────────────────────────────────
@@ -820,11 +840,15 @@ def cmd_pkg(cfg: Config, args) -> int:
         rec = pkg_mod.install(cfg, sha256=sha, force=args.force, status=status,
                               log=log, **kwargs)
         written = [] if args.no_skill else _regen_skills(cfg, rec.get("chips"), log)
+        # 装完立刻做一遍环境自检：包是数据，工具链缺了要当场告诉用户
+        report = setup_mod.pack_report(cfg, pack=rec.get("name") or "")
         if args.json:
-            print(json.dumps({**rec, "skills": written}, ensure_ascii=False, indent=2))
+            print(json.dumps({**rec, "skills": written, "setup": report},
+                             ensure_ascii=False, indent=2))
         else:
             print(f"[elab] 芯片：{', '.join(rec.get('chips') or []) or '(无)'}")
-            print("[elab] 下一步：elab doctor / elab build -p <工程>")
+            print()
+            print(setup_mod.render(report))
         return 0
 
     if cmd == "bootstrap":
@@ -832,11 +856,17 @@ def cmd_pkg(cfg: Config, args) -> int:
                                  force=args.force, log=log)
         refs = [c for r in recs for c in r.get("chips") or []]
         written = [] if args.no_skill else _regen_skills(cfg, refs, log)
+        reports = [setup_mod.pack_report(cfg, pack=r.get("name") or "")
+                   for r in recs]
         if args.json:
-            print(json.dumps({"installed": recs, "skills": written},
+            print(json.dumps({"installed": recs, "skills": written,
+                              "setup": reports},
                              ensure_ascii=False, indent=2))
         else:
             print(f"[elab] 官方包安装完成：{len(recs)} 个")
+            for report in reports:
+                print()
+                print(setup_mod.render(report))
         return 0
 
     if cmd == "list":
@@ -861,10 +891,14 @@ def cmd_pkg(cfg: Config, args) -> int:
         rec = pkg_mod.set_active(cfg, args.name, log=log)
         written = [] if args.no_skill else _regen_skills(
             cfg, (pkg_mod.discover(cfg).get(args.name) or {}).get("chips") or [], log)
+        report = setup_mod.pack_report(cfg, pack=args.name)
         if args.json:
-            print(json.dumps({**rec, "skills": written}, ensure_ascii=False, indent=2))
+            print(json.dumps({**rec, "skills": written, "setup": report},
+                             ensure_ascii=False, indent=2))
         else:
             print(f"[elab] 已启用：{args.name}（其余已装包保留在本地，随时切回）")
+            print()
+            print(setup_mod.render(report))
         return 0
 
     if cmd == "remove":
@@ -883,9 +917,16 @@ def cmd_pkg(cfg: Config, args) -> int:
         results = pkg_mod.update(cfg, args.name, force=args.force, log=log)
         refs = [c for r in results for c in r.get("chips") or []]
         written = [] if args.no_skill else _regen_skills(cfg, refs, log)
+        reports = [setup_mod.pack_report(cfg, pack=r.get("name") or "")
+                   for r in results]
         if args.json:
-            print(json.dumps({"updated": results, "skills": written},
+            print(json.dumps({"updated": results, "skills": written,
+                              "setup": reports},
                              ensure_ascii=False, indent=2))
+        else:
+            for report in reports:
+                print()
+                print(setup_mod.render(report))
         return 0
 
     if cmd == "verify":

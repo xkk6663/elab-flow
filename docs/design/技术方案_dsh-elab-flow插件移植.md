@@ -908,7 +908,7 @@ candidates:
   AT32F421G8U7@d2                        ← 未接入
   411@d3                                 ← 未接入（嵌套工程）
   AT32_TEST@d2        (已接入:at32_test)
-  F411CEU6_BOOT@d2    (已接入:f411_boot)
+  STM32F411CEU6/boot@d2  (已接入:f411_boot)
   STM32F411CEU6@d2    (已接入:f411)
   STM32_TEST@d2       (已接入:stm32_test)
 ```

@@ -3,6 +3,10 @@
 本仓库 = **业务层（elab 内核）+ 工具层（DSH 插件）**。分层边界见
 `docs/design/技术方案_dsh-elab-flow插件移植.md` §16。
 
+> **Agent 动手前先读** [`.agents/skills/elab-agent/SKILL.md`](.agents/skills/elab-agent/SKILL.md)：
+> 能力入口、任务路由，以及「芯片 pack / 工具链 provider / 工程绑定」的接入架构。
+> 具体调用查 [`.agents/skills/elab-tools/SKILL.md`](.agents/skills/elab-tools/SKILL.md)（CLI / HTTP / `elab_*` 工具索引）。
+
 ## 层与归属
 
 | 层 | 路径 | 说明 |

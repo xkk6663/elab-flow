@@ -505,7 +505,7 @@ export const AGENT_USAGE = [
   '- 嵌入式固件任务优先用 elab_* 工具，不要手写 cmake / openocd / pyocd 命令。',
   '- 先 elab_status 拿工程名与每步可用性；再 elab_triple（编译+烧录+调试校验）或 elab_loop（完整闭环）；日志用 elab_log。',
   '- 串口：elab_serial_monitor(open) → elab_serial_read / elab_serial_wait；调试：elab_debug_open → elab_debug_control → elab_debug_inspect → elab_debug_close（关闭会恢复运行）。',
-  '- 单飞：同一会话同时只允许 1 个 run；串口监视占用时烧录/调试会被拒；串口写、适配写盘、录制受 allowAgentWrite 门控，被拒时告知用户开权限，不要绕路重试。',
+  '- 单飞：同一会话同时只允许 1 个 run；串口监视会自动让位给烧录/调试（内核挂起并恢复），无需先关监视；串口写、适配写盘、录制受 allowAgentWrite 门控，被拒时告知用户开权限，不要绕路重试。',
   '- 你发起的 run 会实时出现在右栏面板，用户可见也可取消；「LED 均匀闪烁」只能由用户肉眼确认，你只凭串口 tick / toggles 判活。',
   '- 需要完整工具清单与排障时调 elab_guide。',
 ].join('\n')
@@ -538,7 +538,7 @@ export function agentGuidePayload(): unknown {
     ],
     rules: [
       '同一会话单飞：最多 1 个 run；human-busy 时等结束或请用户取消，不要重试刷屏。',
-      '串口互斥：监视占用时含烧录/调试的 run 返回 serial-busy，先请用户关闭监视。',
+      '串口让位：监视开着也能直接发起含烧录/调试的 run —— 内核自动挂起监视、释放口，run 收尾按 serial.resume_after_run 恢复；不要先让用户关监视。',
       '写门控：串口写 / 适配写盘 / 录制默认被 allowAgentWrite 拒绝；如实转告用户怎么开。',
       '可视化：发起 run 后右栏面板自动点亮阶梯与通道日志；失败时把对应通道日志尾转述给人。',
       '判活纪律：agent 只读串口 tick / toggles；「LED 均匀闪烁」必须由用户肉眼确认。',

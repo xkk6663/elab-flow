@@ -318,6 +318,8 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
     const installedRec = status?.installed.find((x) => x.name === p.name)
     const isInstalled = installedRec?.installed === true
     const isActive = installedRec?.active === true
+    const updatable = installedRec?.updatable === true
+    const latest = installedRec?.latest ?? p.version
     const disabled = frozen || !compat.ok
     return (
       <div key={p.name} style={rowStyle}>
@@ -325,6 +327,7 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
           <span style={{ fontWeight: 600, fontSize: 'var(--elab-fs-sm)' }}>{p.name}</span>
           {isActive ? <Badge text="启用中" tone="ok" /> : null}
           {isInstalled && !isActive ? <Badge text="已安装" tone="idle" /> : null}
+          {updatable ? <Badge text={`可更新 v${latest}`} tone="warn" /> : null}
         </div>
         {p.description !== undefined && p.description !== '' ? (
           <span style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-secondary)' }}>{p.description}</span>
@@ -336,15 +339,28 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
           </div>
         )}
         <div style={actionRowStyle}>
+          {isInstalled && updatable ? (
+            <button
+              type="button"
+              disabled={disabled || pending === p.name}
+              onClick={() => doUpdate(p.name)}
+              style={{ ...btn(true), ...(disabled || pending === p.name ? disabledBtn : {}) }}
+              title={`按市场索引更新到 v${latest}（内容哈希强校验）`}
+            >
+              {pending === p.name ? '更新中…' : `更新到 v${latest}`}
+            </button>
+          ) : null}
           {isInstalled ? (
             isActive ? (
-              <span style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-muted)' }}>当前启用的芯片适配包</span>
+              updatable ? null : (
+                <span style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-muted)' }}>当前启用的芯片适配包</span>
+              )
             ) : (
               <button
                 type="button"
                 disabled={disabled || pending === p.name}
                 onClick={() => doActivate(p.name)}
-                style={{ ...btn(true), ...(disabled || pending === p.name ? disabledBtn : {}) }}
+                style={{ ...btn(!updatable), ...(disabled || pending === p.name ? disabledBtn : {}) }}
                 title="启用这套包（其余包保留在本地，随时切回）"
               >
                 {pending === p.name ? '启用中…' : '启用'}
@@ -374,6 +390,9 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
         <div style={nameRowStyle}>
           <span style={{ fontWeight: 600, fontSize: 'var(--elab-fs-sm)' }}>{p.name}</span>
           {p.active ? <Badge text="启用中" tone="ok" /> : null}
+          {p.updatable && p.latest !== null ? (
+            <Badge text={`可更新 v${p.latest}`} tone="warn" />
+          ) : null}
         </div>
         <PackMeta pack={p} />
         <span style={{ fontSize: 'var(--elab-fs-xs)', color: 'var(--elab-fg-faint)', wordBreak: 'break-all' }}>
@@ -407,10 +426,12 @@ export function PackSettingsView(props: PackSettingsViewProps): ReactNode {
             type="button"
             disabled={disabled}
             onClick={() => doUpdate(p.name)}
-            style={{ ...btn(), ...(disabled ? disabledBtn : {}) }}
-            title="按市场索引更新（内容哈希强校验）"
+            style={{ ...btn(p.updatable === true), ...(disabled ? disabledBtn : {}) }}
+            title={p.updatable && p.latest !== null
+              ? `按市场索引更新到 v${p.latest}（内容哈希强校验）`
+              : '按市场索引更新（内容哈希强校验）'}
           >
-            {'更新'}
+            {p.updatable && p.latest !== null ? `更新到 v${p.latest}` : '更新'}
           </button>
           <button
             type="button"

@@ -9,3 +9,8 @@ CONFIG_SPIRAM_MODE_OCT=y
 # ★ 二进制帧走 stdout：关掉 libc 的 LF→CRLF 转换，否则帧内 0x0A 字节会被
 #   扩成 0D 0A（长度与校验全错，帧协议/波形直接解不出来）。
 CONFIG_LIBC_STDOUT_LINE_ENDING_LF=y
+# 联网遥测（M4 演示）：凭据留在本地 sdkconfig（已被 .gitignore 忽略），
+# 这里只给空默认值 → 不配置时固件自动跳过 WiFi，只跑串口心跳。
+CONFIG_KORVO_WIFI_SSID=""
+CONFIG_KORVO_WIFI_PASSWORD=""
+CONFIG_KORVO_TCP_PORT=9000

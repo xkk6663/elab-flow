@@ -90,8 +90,15 @@
 ./elab pkg list                 # 看已装包与「启用」标记
 ./elab pkg activate artery/at32 # 切换启用的包（其余保留在本地）
 ./elab pkg verify               # 逐包校验结构/安全/内容哈希
-./elab pkg update               # 按索引升级（同版本需 --force）
+./elab pkg update               # 按索引升级（同版本 / 本地更高默认跳过，--force 才覆盖）
 ```
+
+面板里也能手动更新：**已安装**页每行有「更新」按钮；**市场**页签里已装包若索引有新版本，
+会打上「可更新 vX」并直接给「更新到 vX」按钮。索引版本比本地低时默认不降级。
+
+装包（`install` / `bootstrap` / `update` / `activate`）成功后会自动跑一遍**环境自检**
+（等价 `elab setup`）：芯片包、工具链 provider、`requires.host` 主机键、串口/探针逐项列，
+缺什么就打印下一步命令。自检**只读**，不会自动下载工具链，也不会改 `elab.host.yaml`。
 
 ## 驾驶舱 / DSH 面板
 

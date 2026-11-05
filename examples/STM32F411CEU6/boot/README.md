@@ -1,6 +1,8 @@
-# F411CEU6_BOOT —— OTA Bootloader（APP 的配套薄工程）
+# STM32F411CEU6/boot —— OTA Bootloader（APP 的配套薄工程）
 
-本工程是 [`../STM32F411CEU6`](../STM32F411CEU6/) OTA APP 的**配套 Bootloader**。
+本工程是同一完整例程中 [`../`](../)（APP 侧）的**配套 Bootloader**，
+与 APP 共用 `examples/STM32F411CEU6/` 目录，但保持独立的 CMake 工程与
+`projects/f411_boot.yaml` 声明。
 它刻意做成「薄入口」：`main.c` 只负责初始化 + 交接，全部升级流程在
 `components/ota`（`VARIANT=boot`）里，避免 boot 与 APP 的协议实现各写一份。
 

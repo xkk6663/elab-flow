@@ -207,11 +207,21 @@ elab pkg install espressif/esp32        # 芯片包：芯片参数 / 厂商指�
 elab provider install espressif/idf     # 工具链 provider：命令模板，独立于芯片包
 ```
 
+装完包会**自动跑一次环境自检**（`elab pkg install/bootstrap/update/activate` 之后都会，
+等价于 `elab setup`）：芯片包、provider、工具链主机键、串口/探针逐项列出，缺什么直接给下一步命令。
+自检**只读**——不下载工具链、不写 `elab.host.yaml`；provider 的 `toolchain.install` 命令原文只打印给人看。
+
+```bash
+elab setup                       # 复查当前启用的包（0=就绪 / 1=有缺失）
+elab setup --pack espressif/esp32  # 指定包
+elab setup -p my-project         # 连同工程的串口 / 探针一起查（自动用项目固定的 pack）
+```
+
 `elab adapt <path>` 识别 ESP-IDF 工程（根 `CMakeLists.txt` include `project.cmake`，芯片读 `sdkconfig` 的 `CONFIG_IDF_TARGET`）后直接生成
 `provider: espressif/idf@>=1 <2`，不再写内联 `tools:`（`--no-provider` 才保留内联兜底）——
 后续外部工程（如 `pet_companion`）直接复用这条接入路径。
 
-新机器先装 ESP-IDF：用 **EIM（ESP-IDF Installation Manager）** 装好 v6.1，再把 `elab.host.yaml: tools.idf` 指向 EIM 的安装路径（激活脚本由 `env_from_cmd` 等价替代，不用手动 `export`）。完整步骤见 [ESP32 适配包 README](https://github.com/xkk6663/elab-pack-espressif-esp32#2-接入-elab-flow)。
+新机器先装 ESP-IDF：用 **EIM（ESP-IDF Installation Manager）** 装好 v6.1，再把 `elab.host.yaml: tools.idf` 指向 EIM 的安装路径（激活脚本由 `env_from_cmd` 等价替代，不用手动 `export`）。`elab setup --pack espressif/esp32` 会把 provider 里声明的安装命令、文档链接和要回填的 `tools.idf.*` 键一起打印出来。完整步骤见 [ESP32 适配包 README](https://github.com/xkk6663/elab-pack-espressif-esp32#2-接入-elab-flow)。
 
 ### ⑧ CLI：一条命令跑完，也能被 CI 直接调用
 
@@ -228,7 +238,7 @@ elab provider install espressif/idf     # 工具链 provider：命令模板，�
 
 ### ⑨ OTA 双槽升级（F411CEU6 实弹样例）
 
-`examples/STM32F411CEU6` + `examples/F411CEU6_BOOT` 是完整参考实现：boot / APP / 上位机 / 异常注入 / 双槽回滚全链路验证。
+`examples/STM32F411CEU6/`（APP 根 + `boot/`）是完整参考实现：boot / APP / 上位机 / 异常注入 / 双槽回滚全链路验证。
 
 - **分区表唯一事实源**：适配包 `chips/*.yaml` 的 `ota_layout:`，构建期注入 `ota_layout_gen.h`，`doctor --deep` 三方对账。
 - **坏固件自动回滚**：新固件写 INACTIVE 槽 → 试运行（trial 先记后跳）→ 耗尽打印 `=== ROLLBACK ===`；心跳正常则 `OTA_Confirm()` 晋级。
@@ -245,7 +255,7 @@ DSH 界面里的 agent 调用教程（开面板、话术、纪律）见 [插件 
 能跑命令行，但**不是零配置**。克隆后先做三步，再让 agent 接手：
 
 ```bash
-./elab pkg bootstrap                 # ① 内置芯片包 st/stm32（Windows 用 elab.cmd）
+./elab pkg bootstrap                 # ① 内置芯片包 st/stm32（Windows 用 elab.cmd；装完自动做环境自检）
 ./elab doctor                        # ② 体检：工具链 / 探针 / 端口，缺什么会直说
 ./elab adapt ../my-project --write   # ③ 接入工程（先去掉 --write 看只读报告）
 ```
@@ -309,11 +319,12 @@ HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
 git clone git@github.com:xkk6663/elab-flow.git
 cd elab-flow
 
-./elab pkg bootstrap      # ① 安装内置包 st/stm32
-./elab doctor             # ② 环境体检，先全绿再往下
-./elab adapt ./my-project --write   # ③ 接入自己的工程（可先不加 --write 看只读报告）
-./elab loop -p my-project -v        # ④ 一键闭环：体检→编译→烧录→调试校验→串口
-python -m cockpit.server            # ⑤ 驾驶舱 → http://127.0.0.1:8333/
+./elab pkg bootstrap      # ① 安装内置包 st/stm32（装完自动环境自检，缺什么会列出来）
+./elab setup              # ② 随时复查：芯片包 / provider / 工具链 / 串口探针
+./elab doctor             # ③ 环境体检，先全绿再往下
+./elab adapt ./my-project --write   # ④ 接入自己的工程（可先不加 --write 看只读报告）
+./elab loop -p my-project -v        # ⑤ 一键闭环：体检→编译→烧录→调试校验→串口
+python -m cockpit.server            # ⑥ 驾驶舱 → http://127.0.0.1:8333/
 ```
 
 - 要求：**Python ≥ 3.10（无第三方依赖）**；上板另需 CMake + Ninja + ARM GCC + OpenOCD。Windows 用 `elab.cmd`，桌面场景直接双击 `cockpit.cmd`（幂等，已在跑只开 UI）。
@@ -374,7 +385,7 @@ docs/**                   教程、设计约束、架构分析
 | 04 | [调试工作区上手 · 真实 HardFault 排错](docs/tutorials/04-调试面板上手_STM32F103C8T6.md) | 断点 / 监视 / 外设 / RTOS 栈 |
 | 05 | [DSH 插件上手 · 右栏闭环 + 调试页签](docs/tutorials/05-DSH插件上手_STM32F103C8T6.md) | DSH 主线 |
 | 06 | [CLI 终端闭环 · 真机 5 阶段](docs/tutorials/06-CLI终端闭环上手.md) | 只想用命令行 |
-| 07 | [波形面板使用](docs/tutorials/07-波形面板使用.md) | 解码器 / 多面板 / 缩放暂停 |
+| 07 | [串口面板使用](docs/tutorials/07-串口面板使用.md) | 发送 / 历史 / 定时 · 三链路 / 波形游标 |
 | 08 | [串口压力测试报告 · STM32F411CEU6](docs/tutorials/08-串口压力测试报告_STM32F411CEU6.md) | 高吞吐与丢数判定 |
 
 深度文档（架构 / 设计约束 C1–C36 / ICD / OTA）见 [docs/README.md](docs/README.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。

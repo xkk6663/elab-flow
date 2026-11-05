@@ -15,6 +15,7 @@ import type {
   SerialChunk,
   SerialDecodedFrame,
   SerialDecodedTail,
+  SerialIssue,
   SerialMonitorLine,
   SerialMonitorSnapshot,
 } from '../../../domain/icd.ts'
@@ -48,14 +49,21 @@ export interface SerialStream {
    */
   decoded: SerialDecodedFrame[]
   decodedSnap: SerialDecodedTail | null
+  /** 结构化异常（M6）：profile 开着才有内容；与 cockpit 同一份内核数据 */
+  issues: SerialIssue[]
+  issueTotal: number
   error: string | null
   /** 打开监视；`decoder` = 上次选定（跨会话记忆，缺省为空 = 不启用共享解码）。 */
   open(decoder?: string): Promise<{ ok: boolean; error?: string }>
   close(): Promise<void>
   clear(): Promise<void>
   setPaused(next: boolean): Promise<void>
+  /** 闭环结束后接上内核**已自动重开**的会话（只读快照，不主动 open）。 */
+  resync(): Promise<void>
   /** 选解码器（human 面板操作；agent 用 action=decoder 走同一条会话属性）。 */
   setDecoder(decoder: string): Promise<{ ok: boolean; error?: string }>
+  /** 选日志诊断 profile（M6）：'' = 关闭解析。 */
+  setLogProfile(profile: string): Promise<void>
   send(data: string, opts: SerialSendOpts): Promise<{
     ok: boolean
     written: number
@@ -80,15 +88,23 @@ export interface UseSerialStreamArgs {
   project: string
   port: string
   baud: number
+  /** 连接方式（M4）：serial / tcp-client / tcp-server / udp；缺省 '' = serial。 */
+  transport?: string
+  /** 网络配置（M4）：仅 transport 非 serial 时用。 */
+  net?: Record<string, unknown>
+  /** 日志诊断 profile 偏好（M6）：打开会话时带上。 */
+  logProfile?: string
   /** 只有串口通道可见时才轮询 */
   enabled: boolean
   sessionId?: string
 }
 
-export function useSerialStream({ api, initial, project, port, baud, enabled, sessionId }: UseSerialStreamArgs): SerialStream {
+export function useSerialStream({ api, initial, project, port, baud, transport = '', net, logProfile = '', enabled, sessionId }: UseSerialStreamArgs): SerialStream {
   const [snap, setSnap] = useState<SerialMonitorSnapshot | null>(initial)
   const [lines, setLines] = useState<SerialMonitorLine[]>([])
   const [chunks, setChunks] = useState<SerialChunk[]>([])
+  const [issues, setIssues] = useState<SerialIssue[]>([])
+  const [issueTotal, setIssueTotal] = useState(0)
   const [decoded, setDecoded] = useState<SerialDecodedFrame[]>([])
   const [decodedSnap, setDecodedSnap] = useState<SerialDecodedTail | null>(null)
   const [gaps, setGaps] = useState({ lines: 0, chunks: 0, decoded: 0 })
@@ -97,6 +113,8 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
   const snapRef = useRef<SerialMonitorSnapshot | null>(initial)
   const lineCursor = useRef(0)
   const chunkCursor = useRef(0)
+  /** 结构化异常游标（M6）：按 issue_total 单调前进 */
+  const issueCursor = useRef(0)
   /** 共享解码帧游标（帧序号单调；换 decoder / clear 都不回退） */
   const decCursor = useRef(0)
   /** 上一次拉到的 decoder —— 变化即本地帧重新开始（不同解码器的值不可混画） */
@@ -119,11 +137,14 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
   const resetLocal = useCallback(() => {
     lineCursor.current = 0
     chunkCursor.current = 0
+    issueCursor.current = 0
     decCursor.current = 0
     decDecoder.current = ''
     bytesRef.current = 0
     setLines([])
     setChunks([])
+    setIssues([])
+    setIssueTotal(0)
     setDecoded([])
     setDecodedSnap(null)
     setGaps({ lines: 0, chunks: 0, decoded: 0 })
@@ -206,7 +227,18 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }))
         }
 
-        // ④ 共享解码帧（P3.5）：同一份帧就是面板波形页画的（agent 与人同图）
+        // ④ 结构化异常（M6）：profile 开着才拉，增量按 issue_total 走
+        if (lt.issues?.profile) {
+          const it = await api.serialIssues(issueCursor.current, sessionId)
+          if (disposed || gen !== genRef.current) return
+          if (it.issues.length > 0) {
+            setIssues((prev) => prev.concat(it.issues).slice(-200))
+          }
+          issueCursor.current = it.issue_total ?? issueCursor.current
+          setIssueTotal(issueCursor.current)
+        }
+
+        // ⑤ 共享解码帧（P3.5）：同一份帧就是面板波形页画的（agent 与人同图）
         if (dt !== null) {
           setDecodedSnap(dt)
           if (dt.decoder !== decDecoder.current) {
@@ -261,7 +293,10 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
         baud,
         port,
         actor: 'human',
+        ...(transport !== '' ? { transport } : {}),
+        ...(net !== undefined ? { net } : {}),
         ...(decoder !== undefined && decoder !== '' ? { decoder } : {}),
+        ...(logProfile !== '' ? { log_profile: logProfile } : {}),
         sessionId,
       })) as unknown as SerialMonitorSnapshot & { ok?: boolean; error?: string }
       if (r.active !== true) {
@@ -278,7 +313,7 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
       setError(msg)
       return { ok: false, error: msg }
     }
-  }, [project, baud, port, sessionId, resetLocal, remember, api])
+  }, [project, baud, port, transport, net, logProfile, sessionId, resetLocal, remember, api])
 
   const close = useCallback(async (): Promise<void> => {
     genRef.current += 1
@@ -357,6 +392,24 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     [sessionId, remember, api],
   )
 
+  /** 选日志诊断 profile（M6）：写会话属性；'' = 关闭解析。 */
+  const setLogProfile = useCallback(
+    async (profile: string): Promise<void> => {
+      if (!active) return
+      try {
+        const r = (await api.serialMonitorToggle('log_profile', {
+          log_profile: profile,
+          sessionId,
+        })) as unknown as SerialMonitorSnapshot & { ok?: boolean; error?: string }
+        remember(r)
+        if (r.ok === false) setError(String(r.error ?? '切换日志 profile 失败'))
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [active, sessionId, remember, api],
+  )
+
   const setPaused = useCallback(
     async (next: boolean): Promise<void> => {
       try {
@@ -370,6 +423,21 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     },
     [sessionId, remember, api],
   )
+
+  /**
+   * 闭环结束后接上内核**已自动重开**的会话（`resume_after_run: open`
+   * 时内核在 run 收尾会自己 open）。只读一次快照，绝不主动 open ——
+   * 回归策略归内核，前端不复制规则。
+   */
+  const resync = useCallback(async (): Promise<void> => {
+    if (snapRef.current?.active === true) return
+    try {
+      const st = await api.serialMonitor(0, sessionId)
+      if (st.active === true) seedFromSnapshot(st)
+    } catch {
+      /* 内核没会话 / 没起来：什么都不做 */
+    }
+  }, [sessionId, seedFromSnapshot, api])
 
   const send = useCallback(
     (data: string, opts: SerialSendOpts) =>
@@ -399,6 +467,8 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     chunks,
     decoded,
     decodedSnap,
+    issues,
+    issueTotal,
     gapLines: gaps.lines,
     gapChunks: gaps.chunks,
     gapDecoded: gaps.decoded,
@@ -407,7 +477,9 @@ export function useSerialStream({ api, initial, project, port, baud, enabled, se
     close,
     clear,
     setPaused,
+    resync,
     setDecoder,
+    setLogProfile,
     send,
   }
 }

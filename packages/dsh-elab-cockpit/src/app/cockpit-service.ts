@@ -199,8 +199,8 @@ export function createCockpitService(deps: {
     for (const [k, v] of Object.entries(st)) {
       next[k] = { ok: v?.ok ?? true, reason: v?.reason }
     }
-    // serialBusy 恒为 false：面板不知道互斥实况（宿主半在 run 侧硬拦），
-    // 与旧实现一致 —— 互斥的呈现靠 409 错误回显，不靠本地猜测。
+    // serialBusy 恒为 false：串口要占用时由**内核**自动让位（M2
+    // `_serial_yield_begin`），宿主与面板都不预判；真失败由内核报错回显。
     set({ availability: next, plans: resolveAllPlans(next, false) })
     // 项目级文案覆盖（ESP32 的 debug_verify = 「烧录校验」）；空值自动回退全局 meta
     setProjectStepLabels((card?.step_labels ?? {}) as Record<string, string>)

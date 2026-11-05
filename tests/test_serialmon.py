@@ -129,6 +129,24 @@ class OpenClose(Base):
         self.assertFalse(r["ok"])
         self.assertIn("监视已在进行", r["error"])
 
+    def test_open_same_target_adopts_session(self):
+        """★ 回归：闭环自动回归后（同工程/同口）再点「打开监视」必须接上，
+        而不是报「监视已在进行」把人挡在门外（此前导致"串口怎么都打不开"）。"""
+        first = self.open()
+        self.assertTrue(first["ok"], first)
+        again = self.open()
+        self.assertTrue(again["ok"], again)
+        self.assertTrue(again.get("adopted"))
+        self.assertEqual(again["epoch"], first["epoch"], "复用不得 bump 纪元")
+        self.assertEqual(again["port"], "COM9")
+
+    def test_open_other_port_still_refused(self):
+        self.assertTrue(self.open()["ok"])
+        self._resolved = "COM10"
+        r = self.open()
+        self.assertFalse(r["ok"])
+        self.assertIn("监视已在进行", r["error"])
+
     def test_close_is_idempotent(self):
         self.assertTrue(self.open()["ok"])
         r1 = sm.close_session(log=lambda *a: None)

@@ -226,6 +226,19 @@ def _version_tuple(s: str) -> tuple[int, ...]:
     return tuple(int(x) for x in s.split("."))
 
 
+def _ver_key(version) -> tuple[int, int, int]:
+    """容错版本键（``1.2`` / ``v1.2.3-beta`` / ``1.2.3+build`` 都能比较）。"""
+    m = re.match(r"^v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?", str(version or ""))
+    if not m:
+        return (-1, -1, -1)
+    return tuple(int(g or 0) for g in m.groups())
+
+
+def _is_newer(latest, local) -> bool:
+    """``latest`` 是否比本地版本高（无法解析时按"不新"处理，避免误导）。"""
+    return _ver_key(latest) > _ver_key(local)
+
+
 def _cmp_token(version: int, token: str) -> bool:
     token = token.strip()
     if not token:
@@ -774,6 +787,12 @@ def update(cfg, name: str | None = None, *, force: bool = False,
         if cur.get("version") == entry.get("version") and not force:
             log(f"[elab] — {n} 已是最新 v{entry.get('version')}")
             continue
+        # 本地版本高于索引（如本地开发版）：默认不降级
+        if (not force and cur.get("version") and entry.get("version")
+                and _is_newer(cur.get("version"), entry.get("version"))):
+            log(f"[elab] — {n} 本地 v{cur.get('version')} 高于市场 "
+                f"v{entry.get('version')}，跳过（--force 可覆盖）")
+            continue
         kwargs = entry_source(entry, entry.get("_base", ""))
         results.append(install(cfg, sha256=entry.get("sha256"), force=True,
                                status=entry.get("status"), log=log, **kwargs))
@@ -1052,9 +1071,16 @@ def status(cfg, *, include_market=True, query: str = "") -> dict:
     roots = pack_roots(cfg)
     active = active_pack(cfg, packs)
     active_name = (active or {}).get("name") or ""
+    # 市场最新版本：仅用于「可更新」提示（include_market=False 时不联网）
+    market = load_market(cfg) if include_market else None
+    market_versions = {
+        str(e.get("name")): str(e.get("version") or "")
+        for e in ((market or {}).get("packs") or [])
+    }
     installed = []
     for rec in packs.values():
         man = rec["manifest"]
+        latest = market_versions.get(rec["name"]) or None
         installed.append({
             "name": rec["name"],
             "version": man.get("version"),
@@ -1071,6 +1097,10 @@ def status(cfg, *, include_market=True, query: str = "") -> dict:
             "chips": rec["chips"],
             "requires": man.get("requires") or {},
             "compatible": {"ok": not check_requires(man), "reasons": check_requires(man)},
+            # ★ 市场索引里的最新版本 + 是否比本地新（界面画「更新」入口）
+            "latest": latest,
+            "updatable": bool(rec["installed"] and latest
+                              and _is_newer(latest, man.get("version"))),
         })
     data = {
         "roots": [to_fwd(p) for p in roots],
@@ -1083,8 +1113,7 @@ def status(cfg, *, include_market=True, query: str = "") -> dict:
         "schema_version": PACK_SCHEMA_VERSION,
         "kernel_api": KERNEL_API_VERSION,
     }
-    if include_market:
-        market = load_market(cfg)
+    if include_market and market is not None:
         installed_names = {r["name"] for r in installed if r["installed"]}
         data["market"] = {
             "path": market.get("path", ""),

@@ -630,6 +630,24 @@ export interface SerialIssueSummary {
   last_seq: number;
 }
 
+/** 结构化异常增量读回（M6，`GET /api/serial/monitor/issues?after=`）。 */
+export interface SerialIssuesTail {
+  issues: SerialIssue[];
+  issue_total: number;
+  issue_covered: number;
+  gap: number;
+  profile: string;
+}
+
+/** 符号化结果（M6）：失败也如实返回 note，不编造函数名。 */
+export interface SerialSymbolResult {
+  ok: boolean;
+  error: string | null;
+  elf?: string;
+  tool?: string;
+  symbols: SerialSymbol[];
+}
+
 /** 日志 profile（M6）：面板只读 id/label，规则在包/工程数据里。 */
 export interface SerialLogProfile {
   id: string;
@@ -771,7 +789,7 @@ export interface SerialMonitorWriteResult {
 
 // ── 串口监视：字节真值（P1）──────────────────────────────────────
 /** 监视会话动作（POST /api/serial/monitor 的 body.action）。 */
-export type SerialAction = 'open' | 'close' | 'decoder' | 'clear' | 'pause' | 'resume'
+export type SerialAction = 'open' | 'close' | 'decoder' | 'log_profile' | 'clear' | 'pause' | 'resume'
 
 /**
  * 一条原始字节批次。
@@ -1131,6 +1149,10 @@ export interface InstalledPack {
   chips: string[];
   requires: PkgRequires;
   compatible: PkgCompatibility;
+  /** 市场索引里的最新版本；无市场信息 / 不在索引时 null */
+  latest: string | null;
+  /** 已安装且市场版本比本地新（界面画「更新到 vX」入口） */
+  updatable: boolean;
 }
 
 /** 市场索引里的一个条目（内容在作者仓库，索引只记元数据）。 */

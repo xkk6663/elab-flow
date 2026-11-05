@@ -1185,6 +1185,10 @@ export interface InstalledPack {
   chips: string[];
   requires: PkgRequires;
   compatible: PkgCompatibility;
+  /** 市场索引里的最新版本；无市场信息 / 不在索引时 null */
+  latest: string | null;
+  /** 已安装且市场版本比本地新（界面画「更新到 vX」入口） */
+  updatable: boolean;
 }
 
 /** 市场索引里的一个条目（内容在作者仓库，索引只记元数据）。 */

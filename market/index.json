@@ -109,7 +109,7 @@
         "type": "local",
         "path": "providers/official/espressif/idf"
       },
-      "sha256": "70f3df2ead6056049039fa3f76d5bdb408ecc7a2ebbd31988d958b7f917a7a5c"
+      "sha256": "651fdbc85343046af9a9a6c6518d3a25c23d1125511fe2b5a7933cd16fe2bf31"
     }
   ]
 }

@@ -1,9 +1,9 @@
-# projects/f411_boot.yaml —— F411CEU6_BOOT Bootloader 工程（方案 §4 / M1）
-# 人工接管编写（examples/F411CEU6_BOOT 为手写 bare-metal 工程，无 CubeMX 产物可探测）。
+# projects/f411_boot.yaml —— STM32F411CEU6 的配套 Bootloader 工程（方案 §4 / M1）
+# 人工接管编写（examples/STM32F411CEU6/boot 为手写 bare-metal 工程，无 CubeMX 产物可探测）。
 # archetype=A：无 preset / 无行内 include，elab 以 -D 全接管（toolchain_file + project_include + ELAB_LD）。
 
 name: f411_boot
-root: ${ELAB_ROOT}/examples/F411CEU6_BOOT
+root: ${ELAB_ROOT}/examples/STM32F411CEU6/boot
 chip: st/stm32f411ceux
 archetype: A
 version: "1.0.0"     # ★ boot 版本独立冻结（§10.3）：仅协议/跳转变更才 bump

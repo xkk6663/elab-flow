@@ -47,25 +47,52 @@ const chipBase: React.CSSProperties = {
   lineHeight: '16px',
 }
 
+/** 主档（三连）比普通 chip 大一号：一眼能找到「一键跑完」。 */
+const chipPrimaryBig: React.CSSProperties = {
+  ...chipBase,
+  padding: '5px 14px',
+  fontSize: '12px',
+  borderRadius: '8px',
+  fontWeight: 600,
+  background: 'var(--elab-btn-primary-bg)',
+  borderColor: 'var(--elab-btn-primary-border)',
+  color: 'var(--elab-btn-primary-fg)',
+}
+
+/** 单步行的小按钮：比动作行轻，视觉上退到第二层。 */
+const chipSmall: React.CSSProperties = {
+  ...chipBase,
+  padding: '3px 8px',
+  fontSize: '10.5px',
+  lineHeight: '15px',
+}
+
 function chipFor(primary: boolean, disabled: boolean): React.CSSProperties {
   if (disabled) {
     return {
-      ...chipBase,
+      ...(primary ? chipPrimaryBig : chipBase),
+      background: 'transparent',
+      borderColor: 'var(--elab-border)',
+      color: 'var(--elab-fg-dimmed)',
+      boxShadow: 'none',
+      cursor: 'not-allowed',
+    }
+  }
+  if (primary) return chipPrimaryBig
+  return chipBase
+}
+
+/** 单步行按钮（小一号；禁用时同样退成灰）。 */
+function chipSmallFor(disabled: boolean): React.CSSProperties {
+  if (disabled) {
+    return {
+      ...chipSmall,
       background: 'transparent',
       color: 'var(--elab-fg-dimmed)',
       cursor: 'not-allowed',
     }
   }
-  if (primary) {
-    return {
-      ...chipBase,
-      background: 'var(--elab-btn-primary-bg)',
-      borderColor: 'var(--elab-btn-primary-border)',
-      color: 'var(--elab-btn-primary-fg)',
-      fontWeight: 600,
-    }
-  }
-  return chipBase
+  return chipSmall
 }
 
 /** 单步启动按钮（每个通道自己的启动入口；串口单独处理）。 */
@@ -107,7 +134,7 @@ export function ManualBar(props: ManualBarProps): ReactNode {
   return (
     <div style={{ flex: '0 0 auto', borderBottom: '1px solid var(--elab-border)' }}>
       {/* ── 动作行：三连 / 闭环（单步启动在下一行） ── */}
-      <div style={{ display: 'flex', gap: '6px', padding: '6px 8px 4px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 8px 6px', flexWrap: 'wrap' }}>
         {plans
           .filter((plan) => plan.id !== 'basic')
           .map((plan) => {
@@ -163,7 +190,20 @@ export function ManualBar(props: ManualBarProps): ReactNode {
       </div>
 
       {/* ── 单步启动行：构建 / 烧录 / 调试 / 串口，每个通道各自启动 ── */}
-      <div style={{ display: 'flex', gap: '6px', padding: '0 8px 6px', flexWrap: 'wrap' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '4px 8px 7px',
+          flexWrap: 'wrap',
+          borderTop: '1px dashed color-mix(in srgb, var(--elab-border) 70%, transparent)',
+          background: 'color-mix(in srgb, var(--elab-bg-surface) 55%, transparent)',
+        }}
+      >
+        <span style={{ flex: '0 0 auto', fontSize: '10px', color: 'var(--elab-fg-faint)', letterSpacing: '0.04em' }}>
+          单步
+        </span>
         {STEP_BUTTONS.map((b) => {
           const av = props.availability[b.step]
           const disabled = running || busy || (av?.ok === false)
@@ -175,7 +215,7 @@ export function ManualBar(props: ManualBarProps): ReactNode {
               disabled={disabled}
               title={tip}
               onClick={() => props.onRunOne(b.step)}
-              style={chipFor(false, disabled)}
+              style={chipSmallFor(disabled)}
             >
               {`\u25b6 ${stepLabel(b.step)}`}
             </button>
@@ -188,13 +228,14 @@ export function ManualBar(props: ManualBarProps): ReactNode {
           title={props.serialActive ? '串口监视正在运行：点击关闭并释放串口（闭环烧录/调试需要）' : '启动串口通道：打开常驻监视并实时收设备输出'}
           onClick={props.onSerial}
           style={{
-            ...chipFor(false, running || busy),
+            ...chipSmallFor(running || busy),
+            marginLeft: 'auto',
             ...(props.serialActive
               ? { borderColor: 'var(--elab-status-ok)', color: 'var(--elab-status-ok)' }
               : {}),
           }}
         >
-          {props.serialActive ? '\u25a0 关闭监视' : '\u25b6 串口'}
+          {props.serialActive ? '\u25a0 关闭监视' : '\u25b6 打开监视'}
         </button>
       </div>
 

@@ -25,6 +25,26 @@ requires:
   probe: false
   serial: true
 
+# 工具链安装引导（**纯展示，永不自动执行**）：`elab setup` / `elab pkg install`
+# 发现 requires.host 缺失时，把对应平台的命令原文打印给用户，由用户自己决定装不装。
+# host_keys 是要回填到 elab.host.yaml 的键（与 requires.host 一一对应）。
+toolchain:
+  name: ESP-IDF
+  version: "6.1"
+  docs: https://docs.espressif.com/projects/esp-idf/en/v6.1/esp-idf/get-started.html
+  # 每个平台写命令列表（一行一条）；elab 只打印原文，不执行。
+  install:
+    windows:
+      - git clone --recursive https://github.com/espressif/esp-idf.git C:\esp\v6.1\esp-idf
+      - C:\esp\v6.1\esp-idf\install.ps1
+    linux:
+      - git clone --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+      - ~/esp/esp-idf/install.sh
+    macos:
+      - git clone --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+      - ~/esp/esp-idf/install.sh
+  host_keys: [tools.idf.python, tools.idf.idf_path, tools.idf.tools_path, tools.idf.venv]
+
 defaults:
   cwd: ${root}
   env:

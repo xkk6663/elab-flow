@@ -27,8 +27,11 @@ import type {
   SerialDecodeResult,
   SerialDecodedTail,
   SerialFramesResponse,
+  SerialIssuesTail,
+  SerialLogProfile,
   SerialMonitorSnapshot,
   SerialMonitorTail,
+  SerialSymbolResult,
   SerialWidget,
   SerialWidgetRunResult,
   SerialWidgetsDoc,
@@ -198,6 +201,12 @@ export interface SerialPort {
       allow_agent_write?: boolean
       /** action=decoder 时：justfloat / firewater（'' = 关闭共享解码） */
       decoder?: string
+      /** action=log_profile 时：日志诊断 profile（'' = 关闭） */
+      log_profile?: string
+      /** 连接方式（M4）：serial / tcp-client / tcp-server / udp */
+      transport?: string
+      /** 网络配置（M4）：tcp-client {host,port}；服务端/UDP {bind,port}；+ allow_remote */
+      net?: Record<string, unknown>
       sessionId?: string
     },
   ): Promise<Record<string, unknown>>
@@ -213,6 +222,17 @@ export interface SerialPort {
   }): Promise<SerialDecodeResult>
   /** 工程帧协议只读投影（M5）：插件只选/只读，编辑在驾驶舱。 */
   serialFrames(project: string, sessionId?: string): Promise<SerialFramesResponse>
+  /** 日志诊断 profile 清单（M6）：规则来自包/工程数据，面板只读。 */
+  serialLogProfiles(project: string, sessionId?: string): Promise<{ profiles: SerialLogProfile[] }>
+  /** 结构化异常增量读回（M6）：profile 开着才拉。 */
+  serialIssues(after: number, sessionId?: string): Promise<SerialIssuesTail>
+  /** 地址 → 函数/文件:行（M6）：失败如实返回，不编造。 */
+  serialSymbolize(
+    project: string,
+    addrs: string[],
+    profile?: string,
+    sessionId?: string,
+  ): Promise<SerialSymbolResult>
   serialCapture(opts: {
     action: 'start' | 'stop' | 'status'
     project?: string

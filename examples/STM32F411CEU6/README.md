@@ -1,8 +1,21 @@
 # STM32F411CEU6 —— OTA 升级全链路实弹样例（APP 侧）
 
-本工程是 elab 的**旗舰示例**：它不只是一个心跳 demo，而是一套完整的
+本目录是 elab 的**旗舰示例**：它不只是一个心跳 demo，而是一套完整的
 「Bootloader + APP + 上位机 + 异常注入 + 双槽回滚」参考实现。
-配套 bootloader 在 [`../F411CEU6_BOOT`](../F411CEU6_BOOT/)。
+APP 工程是外层根目录，配套 Bootloader 在 [`boot/`](boot/)，两者合起来是一个完整例程。
+
+## 目录结构
+
+```text
+examples/STM32F411CEU6/
+├── CMakeLists.txt / 411.ioc / Core/ / APP/ ...   # APP 工程根（CubeMX + FreeRTOS）
+└── boot/                                         # 配套 Bootloader（独立 CMake 工程）
+    ├── main.c / BOOT.ld / startup_stm32f411xe.s
+    └── CMakeLists.txt
+```
+
+两个工程各有独立的 `projects/*.yaml`（`stm32f411ceu6` / `f411_boot`），
+但属于同一套 OTA 完整例程；日常只操作 APP 工程，boot 由 `boot_project` 级联构建。
 
 ## 展示什么能力
 
@@ -76,6 +89,8 @@ elab loop  -p stm32f411ceu6        # doctor → build → flash → debug_verify
 - `APP/KEY.c` —— 单击/长按识别，经消息队列上报
 - `STM32F411_APP.ld` —— APP 链接布局（`0x08010000`）
 - `CMakeLists.txt` —— 接入 `components/ota`（`VARIANT app`，能力位图 `0x3`）
+- `boot/main.c` —— 配套 Bootloader 的薄入口（与 APP 共用 `components/ota`，`VARIANT boot`）
+- `boot/BOOT.ld` —— Bootloader 链接布局（`0x08000000`，32K）
 - `projects/stm32f411ceu6.yaml` —— 双镜像烧录、串口判据、6 个 OTA 工具
 
 技术细节：[OTA_F411_移植技术方案](doc/OTA_F411_移植技术方案.md)、

@@ -1,0 +1,16 @@
+menu "Korvo 联网演示"
+
+    config KORVO_WIFI_SSID
+        string "WiFi SSID（本地保密，写在 sdkconfig，不入库）"
+        default ""
+
+    config KORVO_WIFI_PASSWORD
+        string "WiFi 密码（本地保密，写在 sdkconfig，不入库）"
+        default ""
+
+    config KORVO_TCP_PORT
+        int "TCP 遥测服务端口"
+        range 1024 65535
+        default 9000
+
+endmenu
