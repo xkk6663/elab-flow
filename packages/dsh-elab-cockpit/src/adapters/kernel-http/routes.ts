@@ -77,6 +77,8 @@ const GET_ALLOW = new Set([
   'capabilities',
   'projects',
   'runs',
+  // 轻量活动 run（2s 轮询用）：不扫历史目录，开销与历史条数无关
+  'runs/active',
   'plan',
   'run-events',
   'serial/console',
@@ -85,6 +87,10 @@ const GET_ALLOW = new Set([
   'serial/monitor/bytes',
   // P3.5 会话级共享解码帧：agent 与面板读同一份（?after= 增量游标）
   'serial/monitor/decoded',
+  // P3.1 帧级健康度：帧率 / 到达间隔 / 错误分类 / 每 variant 计数（?window_s=）
+  'serial/monitor/stats',
+  // 盘点 #4：四路增量合并轮询（行+字节+issue+解码帧，一次带回）
+  'serial/monitor/poll',
   // 线参数 / DTR-RTS / 复位预设（M1）：只读状态（预设清单 + 已知线态）
   'serial/control',
   // 日志诊断（M6）：可用 profile 清单 + 结构化 issue 增量读回
@@ -103,7 +109,7 @@ const GET_ALLOW = new Set([
   'serial/widget/job',
   // 调试会话（§6 ICD）：面板/Agent 同源只读
   'debug/session', 'debug/stack', 'debug/variables', 'debug/registers',
-  'debug/breakpoints', 'debug/memory', 'debug/disasm',
+  'debug/breakpoints', 'debug/memory', 'debug/disasm', 'debug/source',
   'debug/watch', 'debug/audit', 'debug/peripherals', 'debug/rtos',
 ])
 
@@ -114,15 +120,22 @@ const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial
   'serial/frames', 'serial/frames/preview',
   // 帧协议增强（P1）：反向组帧 + 模板导入（仍走 rev 乐观锁）
   'serial/frames/encode', 'serial/frames/templates/import',
+  // P4：抓包学习（只产草稿）/ round-trip 校验 / 自动匹配（可 apply）/ C 头生成
+  'serial/frames/learn', 'serial/frames/verify',
+  'serial/frames/auto', 'serial/frames/codegen',
   // 适配包写动作（内核 `_pkg`）：install/remove/update 回 202 + job，verify/activate 同步 200
   'pkg/install', 'pkg/remove', 'pkg/verify', 'pkg/update', 'pkg/activate',
+  // 盘点 #11：历史 run 清理（keep + days 双闸；running 永不删）
+  'runs/prune',
   // 工程级发送组件（M1/M2）：保存/删除（rev 乐观锁）+ 执行/取消/暂停
   'serial/widgets', 'serial/widget/run', 'serial/widget/cancel', 'serial/widget/pause',
   // 发送框的定时发送：瞬态任务，不落盘（与组件共用任务引擎）
   'serial/loop',
   // 调试会话（§6 ICD）：open / control / breakpoints / watch / evaluate / write
   'debug/session', 'debug/control', 'debug/breakpoints', 'debug/watch',
-  'debug/evaluate', 'debug/write'])
+  'debug/evaluate', 'debug/write',
+  // P3-C：寄存器组批量写（GET 同路径只读，写只看 POST）
+  'debug/registers'])
 
 /** 允许转发的 DELETE 端点（调试会话关闭必须恢复运行 —— D8/C36）。 */
 const DELETE_ALLOW = new Set(['debug/session'])
@@ -336,6 +349,9 @@ export function registerDebugEventsRoute(ctx: HostRouteContext, deps: ProxyDeps)
         return err(res, 503, 'host-unavailable', error instanceof Error ? error.message : String(error))
       }
       const target = new URL(`${host.baseUrl}/api/debug/events`)
+      // P3-B：SSE 按会话过滤 —— 不转发查询参数，两个 pane 会收到对方的事件
+      const only = url.searchParams.get('debug_session')
+      if (only !== null && only !== '') target.searchParams.set('debug_session', only)
       let aborted = false
       res.on('close', () => {
         aborted = true

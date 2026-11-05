@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 
 from . import serialport as sp
 from . import serialtransport as tp
-from .config import Config, ElabError
+from .config import Config
 
 # 未声明 within_s 时的兜底观察窗口
 DEFAULT_WINDOW_S = 15.0

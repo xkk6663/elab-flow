@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ._winproc import proc_kwargs
+from ._winproc import proc_kwargs, spawn
 from .config import ElabError, to_fwd
 from .plan import Plan, plan_for
 
@@ -400,9 +400,10 @@ def debug(plan: Plan, *, mode: str = "print", log=print,
         return res
 
     env = plan.host.build_env()
-    srv = subprocess.Popen(server, cwd=str(plan.cfg.root), env=env,
-                           text=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                           **proc_kwargs())
+    # spawn：这个 openocd 是长驻 gdb server，内核被强杀时必须一起走，
+    # 否则它继续占着探针，下一轮 flash/debug 直接失败。
+    srv = spawn(server, cwd=str(plan.cfg.root), env=env,
+                text=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     try:
         # ★ 端口占用事故（实测）：openocd 的 gdb server 绑 3333，而驾驶舱 HTTP
         #   服务默认端口恰好也是 3333 —— 端口被占时 openocd **静默退出**，

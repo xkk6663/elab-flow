@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import threading
 import time
@@ -526,42 +527,242 @@ def read_run(runs_dir, run_id: str, *, after_seq: int = 0) -> list:
     return out
 
 
+#: ``list_runs`` 的元数据缓存：``str(path) -> ((mtime_ns, size), meta)``。
+#:
+#: ★ 键里带 ``mtime_ns + size``，文件被追加就自动失效 —— 不需要手工失效逻辑，
+#:   也就没有"缓存与文件不一致"这个新的同步点（本文件反复在为"少一个同步点"付代价）。
+_RUN_META_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
+_RUN_META_LOCK = threading.Lock()
+#: 尾部窗口大小。``run/end`` / ``run/cancel`` 恒为**最后一行**，所以取最后一条
+#: 终态事件只需要扫尾部；16 KB 足够覆盖任何正常收尾（终态事件本体 < 1 KB）。
+_RUN_TAIL_BYTES = 16 * 1024
+#: 缓存上限。超过就整体丢弃 —— run 文件数由 retention 治理，这里只是兜底防无界。
+_RUN_META_CACHE_MAX = 4096
+
+
+def _read_head_and_tail(path: Path, max_bytes: int = _RUN_TAIL_BYTES) -> tuple[str, str, bool]:
+    """**一次 open** 拿首行 + 尾窗（返回 ``(first_line, tail_text, truncated)``）。
+
+    为什么不分开两次 open：冷路径（缓存未命中）每个文件都要做这件事，
+    Windows 上 open+Defender 实扫一次就要几毫秒，800 条 × 2 次 open 就是秒级 ——
+    这正是本次要消灭的量级。合并成一次 open 后冷路径减半。
+    """
+    size = path.stat().st_size
+    with open(path, "rb") as fh:
+        first = fh.readline()
+        if size > max_bytes:
+            fh.seek(size - max_bytes)
+            raw = fh.read()
+            drop_first = True
+        else:
+            raw = fh.read()
+            drop_first = False
+    tail = raw.decode("utf-8", errors="replace")
+    return first.decode("utf-8", errors="replace"), tail, drop_first
+
+
+def _parse_tail(tail: str, drop_first: bool) -> list:
+    """尾窗文本 → 事件列表（原顺序）。
+
+    截断窗口时**丢弃第一行**：它极可能被拦腰切断，``json.loads`` 会失败；
+    而失败行被静默跳过会让人以为"事件丢了"，不如显式丢掉这个已知不完整的片段。
+    坏行（半行）沿用 ``replay`` 的口径：跳过、不抛。
+    """
+    lines = tail.splitlines()
+    if drop_first and lines:
+        lines = lines[1:]
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
+def run_meta(path, st: "os.stat_result | None" = None) -> dict:
+    """从单个 ``<run>.jsonl`` 重建元数据 —— **只读首行与尾部，不扫全文件**。
+
+    为什么这样是对的（不是"大概够用"，是契约层面的必然）：
+
+      * ``run/start`` 的 ``seq`` 恒为 1，且是**第一条**写入的事件 → 恒在第一行；
+      * ``run/end`` / ``run/cancel`` 是 run 的**收尾**事件，之后不会再追加
+        （``append_event`` 只在取消硬杀后补写 ``run/cancel``，那也是最后一行）。
+
+    早先的实现用 ``replay(p, 0)`` 把整个文件解析成列表、只为取首尾两条 ——
+    实测 800 条历史 run 要 2 s，而前端每 2 s 轮询一次，扫描比轮询周期还慢。
+
+    :param st: 调用方已拿到的 stat（``os.scandir`` 枚举时自带，免 syscall）。
+    :returns: 与 ``list_runs`` 旧版逐字段相同的 dict（``run`` 除外，由调用方补）。
+    """
+    path = Path(path)
+    st = st if st is not None else path.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    ck = str(path)
+    with _RUN_META_LOCK:
+        hit = _RUN_META_CACHE.get(ck)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+
+    first, tail, drop_first = _read_head_and_tail(path)
+    events = _parse_tail(tail, drop_first)
+
+    start = None
+    first_ev = None
+    first = first.strip()
+    if first:
+        try:
+            first_ev = json.loads(first)
+        except ValueError:
+            first_ev = None
+        if isinstance(first_ev, dict) and first_ev.get("topic") == RUN_START:
+            start = first_ev
+
+    if start is None and first_ev is None:
+        # 首行坏掉（手工编辑、写到一半就崩）→ 只能老实全量找一遍。
+        # 这条路径只在"文件已经损坏"时走，不影响正常 run 的性能。
+        events = list(replay(path, 0))
+        start = next((e for e in events if e.get("topic") == RUN_START), None)
+
+    end = next((e for e in reversed(events) if e.get("topic") in (RUN_END, RUN_CANCEL)), None)
+    if end is None:
+        status = "running"
+    elif end.get("topic") == RUN_CANCEL:
+        status = "cancelled"
+    else:
+        # ★ 三态（2026-11-03）：run/end 带 verdict 就要如实回放；
+        #   只看 ok 会把 "inconclusive（没验证）" 记成 ok。
+        status = str(end.get("verdict")
+                     or ("ok" if end.get("ok") else "failed"))
+
+    meta = {
+        "project": start.get("project", "") if start else "",
+        "steps": start.get("steps", []) if start else [],
+        "started_at": start.get("ts") if start else st.st_mtime,
+        "status": status,
+        "last_seq": events[-1].get("seq", 0) if events else 0,
+    }
+    with _RUN_META_LOCK:
+        if len(_RUN_META_CACHE) > _RUN_META_CACHE_MAX:
+            _RUN_META_CACHE.clear()
+        _RUN_META_CACHE[ck] = (key, meta)
+    return meta
+
+
 def list_runs(runs_dir) -> list[dict]:
     """列出所有 run 及其元数据。
 
     **刻意不写 ``index.json``**：索引一旦独立落盘就会与实际文件漂移，
     而它 100% 可由文件名 + 首/尾事件重建。少一个需要保持同步的东西。
+
+    性能（盘点 #1-a，2026-11-05 实测）：
+      * 单条 run 走 :func:`run_meta`（一次 open 读首尾 + mtime/size 缓存）；
+      * 目录枚举用 ``os.scandir`` 而不是 ``glob`` —— Windows 上 ``DirEntry.stat()``
+        直接用枚举时带出的信息，**零额外 syscall**；``glob`` + 每 entry ``stat()``
+        是 3200 次 syscall / 800 条 ≈ 0.6 s 的隐形税，比解析本身还贵。
     """
     runs_dir = Path(runs_dir)
     if not runs_dir.is_dir():
         return []
+    states: list[tuple[str, "os.stat_result"]] = []
+    proc_stats: dict[str, "os.stat_result"] = {}
+    with os.scandir(runs_dir) as it:
+        for entry in it:
+            name = entry.name
+            if not name.startswith("r-") or not name.endswith(".jsonl"):
+                continue
+            # ★ 必须排除 `*.proc.jsonl`：它们也匹配 `r-*.jsonl`，否则每个 run 都会
+            #   多出一个名叫 `r-xxxx.proc` 的幻影 run（`Path.stem` 会把 `.proc` 吃进 stem）。
+            if name.endswith(".proc.jsonl"):
+                proc_stats[name[:-len(".proc.jsonl")]] = entry.stat()
+            else:
+                states.append((name[:-len(".jsonl")], entry.stat()))
+    states.sort(key=lambda x: x[1].st_mtime, reverse=True)
     out = []
-    # ★ 必须排除 `*.proc.jsonl`：它们也匹配 `r-*.jsonl`，否则每个 run 都会
-    #   多出一个名叫 `r-xxxx.proc` 的幻影 run（`Path.stem` 会把 `.proc` 吃进 stem）。
-    files = [p for p in runs_dir.glob("r-*.jsonl") if not p.name.endswith(".proc.jsonl")]
-    for p in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True):
-        rid = p.stem
-        events = list(replay(p, 0))
-        start = next((e for e in events if e.get("topic") == RUN_START), None)
-        end = next((e for e in reversed(events) if e.get("topic") in (RUN_END, RUN_CANCEL)), None)
-        if end is None:
-            status = "running"
-        elif end.get("topic") == RUN_CANCEL:
-            status = "cancelled"
-        else:
-            # ★ 三态（2026-11-03）：run/end 带 verdict 就要如实回放；
-            #   只看 ok 会把 "inconclusive（没验证）" 记成 ok。
-            status = str(end.get("verdict")
-                         or ("ok" if end.get("ok") else "failed"))
-        proc_file = runs_dir / f"{rid}.proc.jsonl"
+    for rid, st in states:
+        meta = run_meta(runs_dir / f"{rid}.jsonl", st)
+        pst = proc_stats.get(rid)
         out.append({
             "run": rid,
-            "project": start.get("project", "") if start else "",
-            "steps": start.get("steps", []) if start else [],
-            "started_at": start.get("ts") if start else p.stat().st_mtime,
-            "status": status,
-            "last_seq": events[-1]["seq"] if events else 0,
-            "proc_bytes": proc_file.stat().st_size if proc_file.exists() else 0,
-            "state_bytes": p.stat().st_size,
+            **meta,
+            "proc_bytes": pst.st_size if pst is not None else 0,
+            "state_bytes": st.st_size,
         })
     return out
+
+
+#: 一个 run 的**全部**落盘产物后缀（EventLog.__init__ 是定义处，别处不许拼路径）。
+_RUN_FILE_SUFFIXES = (".jsonl", ".proc.jsonl", ".log", ".serial.log")
+
+
+def run_file_paths(runs_dir, run_id: str) -> list[Path]:
+    """某 run 的全部产物（``run_paths`` 只是跟读子集；清理要走全量）。"""
+    runs_dir = Path(runs_dir)
+    return [runs_dir / f"{run_id}{sfx}" for sfx in _RUN_FILE_SUFFIXES]
+
+
+def prune_runs(runs_dir, *, keep: int = 50, days: float = 30.0,
+               dry_run: bool = False) -> dict:
+    """清理历史 run 产物（盘点 #11：runs 目录只增不减，只能手删文件）。
+
+    两道闸，**命中任意一道**即进入删除候选：
+
+      * ``keep`` —— 按 state 文件 mtime 倒序，第 N 条之后的全部；
+      * ``days`` —— mtime 早于 ``now - days*86400`` 的全部（0 = 关闭时间闸）。
+
+    安全边界：
+
+      * **正在跑的 run 永不删**（status == "running" 跳过）——哪怕它 mtime 很老
+        （几天的长跑 run 是存在的）；判定复用 :func:`run_meta`（带缓存，便宜）；
+      * 只删 ``<runs_dir>/r-<id>{4 种后缀}``，文件名由 state 文件派生，
+        绝不碰目录里其它任何东西；
+      * ``dry_run=True`` 只盘点不落手，返回结构与实删完全一致（UI 先预览再执行）。
+
+    :returns: ``{"removed": [{run, files, bytes}], "kept": n, "freed_bytes": n,
+               "dry_run": bool}``
+    """
+    runs_dir = Path(runs_dir)
+    if not runs_dir.is_dir():
+        return {"removed": [], "kept": 0, "freed_bytes": 0, "dry_run": bool(dry_run)}
+    cutoff = (time.time() - days * 86400.0) if (days and days > 0) else None
+    states: list[tuple[str, "os.stat_result"]] = []
+    with os.scandir(runs_dir) as it:
+        for entry in it:
+            name = entry.name
+            if (not name.startswith("r-") or not name.endswith(".jsonl")
+                    or name.endswith(".proc.jsonl")):
+                continue
+            states.append((name[:-len(".jsonl")], entry.stat()))
+    states.sort(key=lambda x: x[1].st_mtime, reverse=True)
+
+    doomed: set[str] = set()
+    for idx, (rid, st) in enumerate(states):
+        if idx >= max(0, keep):
+            doomed.add(rid)
+        elif cutoff is not None and st.st_mtime < cutoff:
+            doomed.add(rid)
+
+    removed: list[dict] = []
+    freed_total = 0
+    kept = 0
+    for rid, st in states:
+        if rid not in doomed:
+            kept += 1
+            continue
+        if run_meta(runs_dir / f"{rid}.jsonl", st).get("status") == "running":
+            kept += 1                       # 保护性跳过，不计入删除
+            continue
+        paths = [p for p in run_file_paths(runs_dir, rid) if p.exists()]
+        freed = sum(p.stat().st_size for p in paths)
+        removed.append({"run": rid, "files": [str(p) for p in paths], "bytes": freed})
+        if not dry_run:
+            for p in paths:
+                p.unlink()                  # 只 unlink 普通文件；目录/符号链接不在此路径上
+        freed_total += freed
+    return {"removed": removed, "kept": kept, "freed_bytes": freed_total,
+            "dry_run": bool(dry_run)}

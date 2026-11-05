@@ -108,6 +108,40 @@ const MAX_BYTE_BLOCKS = 300;
 /** 波形最大回看字节（超出只取最近一段，避免每次轮询都重解 1 MiB） */
 const MAX_WAVE_BYTES = 64 * 1024;
 
+/** 解码失败分类 → 人话。没有这一层，"跳过 12" 等于什么也没说。 */
+const REASON_LABELS: Record<string, string> = {
+  no_head: "找不到帧头",
+  bad_length: "长度字段非法",
+  short: "帧太短/超长",
+  tail_mismatch: "帧尾不符",
+  checksum: "校验失败",
+  unknown_id: "未知 ID",
+  bad_id: "ID 读取失败",
+  field: "字段越界",
+};
+
+function reasonSummary(reasons?: Record<string, number>): string {
+  if (!reasons) return "";
+  const parts = Object.entries(reasons)
+    .filter(([, n]) => Number(n) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([k, n]) => `${REASON_LABELS[k] ?? k} ${n}`);
+  return parts.length ? `：${parts.join(" · ")}` : "";
+}
+
+/** 窗口内出现过几种消息（variant / id）——"线上一共在说什么"的最小摘要。 */
+function speciesCount(variants: Record<string, number>): number {
+  return Object.values(variants).filter((n) => Number(n) > 0).length;
+}
+
+function variantSummary(variants: Record<string, number>): string {
+  return Object.entries(variants)
+    .filter(([, n]) => Number(n) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([k, n]) => `${k} ×${n}`)
+    .join("\n");
+}
+
 /** 发送历史（↑/↓ 调取）：只留最近 N 条，跨会话记忆（含格式与行尾） */
 const HISTORY_KEY = "elab.serial.send.history";
 
@@ -276,6 +310,10 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
   const [frameHex, setFrameHex] = useState("");
   const [framePreview, setFramePreview] = useState<SerialDecodeResult | null>(null);
   const [frameNotice, setFrameNotice] = useState<string | null>(null);
+  /** 学习在跑：样本大时要几秒，不锁按钮会被连点成并发请求 */
+  const [frameLearnBusy, setFrameLearnBusy] = useState(false);
+  /** 学习已跑多久（秒）：慢的时候让用户知道没卡死 */
+  const [frameLearnSecs, setFrameLearnSecs] = useState(0);
   const [framesOpen, setFramesOpen] = useState(false);
   const [frameTemplates, setFrameTemplates] = useState<SerialFrameTemplate[]>([]);
   const [frameTpl, setFrameTpl] = useState("");
@@ -336,6 +374,13 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       setFrameNotice(`✗ JSON 语法错误：${e instanceof Error ? e.message : String(e)}`);
       return;
     }
+    // 同名会被静默覆盖：learn 的默认 id 就是 "learned"，连学两次再保存就会
+    // 把上一个冲掉。保存前先问一句（agent 侧由内核的 overwritten 字段提示）。
+    const pid = (raw as { id?: string }).id ?? "";
+    if (pid !== "" && frameProfiles.some((p) => p.id === pid)
+        && !window.confirm(`已存在同名 profile「${pid}」，保存会覆盖它。\n\n要继续就点"确定"；想保留原来的，先把 JSON 里的 id 改掉。`)) {
+      return;
+    }
     try {
       const r = await api.serialFramesSave({
         project, action: "save", rev: frameRev, profile: raw,
@@ -348,7 +393,6 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       setFrameRev(r.rev);
       setFrameProfiles(r.profiles ?? []);
       setFrameWarns(r.warnings ?? []);
-      const pid = (raw as { id?: string }).id ?? "";
       const hit = (r.profiles ?? []).find((p) => p.id === pid);
       if (hit) {
         setFrameSel(hit.id);
@@ -358,7 +402,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     } catch (e) {
       setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [project, frameDoc, frameRev, loadFrames]);
+  }, [project, frameDoc, frameRev, frameProfiles, loadFrames]);
 
   const deleteFrameProfile = useCallback(async (): Promise<void> => {
     if (!project || !frameSel) return;
@@ -446,16 +490,68 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
       const r = await api.serialFramesPreview({ profile: raw, hex });
       setFramePreview(r);
       setFrameNotice(r.ok
-        ? `✓ 解出 ${r.total_frames} 帧（跳过 ${r.skipped}，校验失败 ${r.checksum_fail ?? 0}` +
-          `${r.unknown_id ? `，未知 ID ${r.unknown_id}` : ""}）`
+        ? `✓ 解出 ${r.total_frames} 帧（跳过 ${r.skipped}` +
+          `${reasonSummary(r.reasons)}${r.unknown_id ? `，未知 ID ${r.unknown_id}` : ""}）`
         : `✗ ${r.error ?? "预览失败"}`);
     } catch (e) {
       setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [frameDoc, frameHex]);
 
-  const encodeFrameProfile = useCallback(async (): Promise<void> => {
-    if (!frameDoc.trim()) {
+  const learnTimer = useRef<number | null>(null);
+  const stopLearnTimer = useCallback((): void => {
+    if (learnTimer.current !== null) {
+      window.clearInterval(learnTimer.current);
+      learnTimer.current = null;
+    }
+  }, []);
+  // 卸载时别留着秒表在跑
+  useEffect(() => stopLearnTimer, [stopLearnTimer]);
+
+  /**
+   * 从样本学习（P4.1）：只产草稿，**不写盘**。
+   * 学到的东西直接填进编辑器，人再决定要不要保存 —— 学习不该有副作用。
+   *
+   * 样本几万字节时服务端要跑 1–3 s（大样本更久），所以这里必须锁按钮 +
+   * 走秒：不锁的话连点会叠出多个并发学习请求，把内核拖得更死。
+   */
+  const learnFrameProfile = useCallback(async (): Promise<void> => {
+    const hex = frameHex.trim();
+    if (!hex) {
+      setFrameNotice("✗ 先粘一段抓包 HEX（至少几十字节，最好包含多帧）");
+      return;
+    }
+    if (frameLearnBusy) return;
+    setFrameLearnBusy(true);
+    setFrameLearnSecs(0);
+    stopLearnTimer();
+    learnTimer.current = window.setInterval(() => setFrameLearnSecs((s) => s + 1), 1000);
+    setFrameNotice("… 正在分析帧头 / 长度 / 校验");
+    try {
+      const r = await api.serialFramesLearn({ hex });
+      if (!r.ok || !r.draft) {
+        setFrameNotice(`✗ ${r.error ?? "学不出来"}` +
+          (r.warnings?.length ? `（${r.warnings.join("；")}）` : ""));
+        return;
+      }
+      setFrameDoc(JSON.stringify(r.draft, null, 2));
+      const ev = (r.evidence ?? []).slice(0, 3).join(" · ");
+      setFrameNotice(
+        `✓ 学出草稿 ${(r.draft as { id?: string }).id ?? ""}` +
+        `（置信度 ${Math.round((r.confidence ?? 0) * 100)}%` +
+        `${r.decode_rate !== undefined ? `，回放 ${Math.round(r.decode_rate * 100)}%` : ""}）` +
+        `${ev ? ` —— ${ev}` : ""}` +
+        `${r.warnings?.length ? ` ⚠ ${r.warnings.join("；")}` : ""}`,
+      );
+    } catch (e) {
+      setFrameNotice(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      stopLearnTimer();
+      setFrameLearnBusy(false);
+    }
+  }, [frameHex, frameLearnBusy, stopLearnTimer]);
+
+  const encodeFrameProfile = useCallback(async (): Promise<void> => {    if (!frameDoc.trim()) {
       setFrameNotice("✗ 先选择/新建 profile");
       return;
     }
@@ -746,12 +842,55 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
     channels: number;
     skipped: number;
     pending: number;
+    /** 解码失败分类（P2.2-C）：no_head / checksum / bad_length … */
+    reasons?: Record<string, number>;
     fields: { name: string; unit: string; type: string; plot: boolean }[];
   } | null>(null);
   const [waveErr, setWaveErr] = useState<string | null>(null);
 
   const sharedDecoderId = stream.snap?.decode?.decoder ?? "";
   const sharedLane = stream.active && sharedDecoderId !== "" && sharedDecoderId === decoder;
+
+  // ── 帧级健康度（P3.1）──
+  // 会话共享解码时才有真正的"服务端视角"（它在实时读口）：帧率、到达间隔、
+  // 错误分类都由内核算好，这里只渲染。离线波形走本地解码，不轮询。
+  const [health, setHealth] = useState<{
+    fps: number;
+    interval: string;
+    errorRate: number;
+    pending: number;
+    variants: Record<string, number>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (view !== "wave" || !sharedLane) {
+      setHealth(null);
+      return undefined;
+    }
+    let dropped = false;
+    const tick = async () => {
+      try {
+        const r = await api.serialFrameStats(10);
+        if (dropped) return;
+        const iv = r.interval_ms;
+        setHealth({
+          fps: r.fps ?? 0,
+          interval: iv ? `${iv.mean.toFixed(0)}/${iv.p95.toFixed(0)}ms` : "—",
+          errorRate: r.error_rate ?? 0,
+          pending: r.pending_bytes ?? 0,
+          variants: r.variants ?? {},
+        });
+      } catch {
+        if (!dropped) setHealth(null);     // 面板不能因为统计挂了而空白
+      }
+    };
+    void tick();
+    const h = window.setInterval(() => void tick(), 1500);
+    return () => {
+      dropped = true;
+      window.clearInterval(h);
+    };
+  }, [view, sharedLane]);
 
   // 会话一开就把当前解码器写进会话（P3.5：agent 与面板同图；M7：Δt 才有时间源）。
   // 只在会话尚未选定解码器时写入 —— 不覆盖 agent/别的标签页的选择。
@@ -810,6 +949,7 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
           channels: r.channels,
           skipped: r.skipped,
           pending: r.pending_bytes,
+          reasons: r.reasons,
           fields: r.fields ?? [],
         });
       })
@@ -1406,6 +1546,15 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
                 >
                   预览
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!frameHex.trim() || frameLearnBusy}
+                  onClick={() => void learnFrameProfile()}
+                  title="按样本自学协议：推断帧头/长度/校验/字段，只产草稿不落盘"
+                >
+                  {frameLearnBusy ? `分析中 ${frameLearnSecs}s` : "学习"}
+                </Button>
               </div>
               <div className={s.framesRow}>
                 <Input
@@ -1795,8 +1944,28 @@ export function SerialWorkspace({ stream, caps, project, running }: SerialWorksp
               <div className={s.waveMeta}>
                 {frames.length} 帧 · {frameFields.length || decodeMeta?.channels || (frames[0]?.length ?? 0)} 通道
                 {sharedLane ? " · 会话共享解码（Δt 可用）" : ""}
-                {decodeMeta?.skipped ? ` · 跳过 ${decodeMeta.skipped}` : ""}
+                {decodeMeta?.skipped
+                  ? ` · 跳过 ${decodeMeta.skipped}${reasonSummary(decodeMeta.reasons)}`
+                  : ""}
                 {decodeMeta?.pending ? ` · 半帧 ${decodeMeta.pending} B（下一轮续解）` : ""}
+                {health ? (
+                  <span className={s.waveHealth}>
+                    <span title="最近 10 秒帧率">{health.fps.toFixed(1)} fps</span>
+                    <span title="帧到达间隔：均值/p95">Δ {health.interval}</span>
+                    <span
+                      className={health.errorRate > 0 ? s.waveHealthBad : undefined}
+                      title="错误帧占比（帧头/长度/校验/未知 id）"
+                    >
+                      错 {(health.errorRate * 100).toFixed(1)}%
+                    </span>
+                    {speciesCount(health.variants) > 1 ? (
+                      <span title={variantSummary(health.variants)}>
+                        {speciesCount(health.variants)} 种消息
+                      </span>
+                    ) : null}
+                    {health.pending > 0 ? <span>半帧 {health.pending} B</span> : null}
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </div>

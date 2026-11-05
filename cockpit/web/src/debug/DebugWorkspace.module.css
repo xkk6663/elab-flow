@@ -159,6 +159,17 @@ button.row { cursor: default; }
 .mono { font-family: var(--elab-font-mono, ui-monospace, monospace); }
 .dimText { color: var(--elab-fg-faint); }
 .value { margin-left: auto; font-family: var(--elab-font-mono, ui-monospace, monospace); color: var(--elab-fg); }
+/* 只读值的 <button> 会继承 UA 的边框/底色 —— 寄存器里 pc/lr/xpsr 因此被画成
+   "看起来能点"的小方块，而可写的那几行反而是纯文本，affordance 正好反了。 */
+button.value {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-family: var(--elab-font-mono, ui-monospace, monospace);
+  color: var(--elab-fg);
+  cursor: default;
+}
 button.group {
   border: none;
   background: none;
@@ -352,3 +363,132 @@ button.memCell:hover { background: var(--elab-bg-hover); color: var(--elab-accen
 .value[data-health="critical"] { color: var(--elab-danger, #d64545); }
 .dimText[data-health="warn"] { color: var(--elab-warn, #d98b00); }
 .dimText[data-health="critical"] { color: var(--elab-danger, #d64545); font-weight: 600; }
+
+/* ── P3：会话条 / 双 pane / 源码 gutter / 寄存器草稿 ───────────── */
+.sessionBar {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 6px 8px 2px 0;
+  flex-wrap: wrap;
+}
+.sessionChip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--elab-border);
+  border-radius: 999px;
+  background: var(--elab-bg-panel, transparent);
+  overflow: hidden;
+}
+.sessionChipActive {
+  border-color: var(--elab-accent, #4c8bf5);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--elab-accent, #4c8bf5) 45%, transparent);
+}
+.sessionPick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--elab-fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sessionClose {
+  border: 0;
+  background: transparent;
+  color: var(--elab-fg-faint);
+  padding: 3px 8px 3px 2px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.sessionClose:hover { color: var(--elab-danger, #d64545); }
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--elab-fg-faint);
+  flex: none;
+}
+.dot[data-state="stopped"] { background: var(--elab-warn, #d98b00); }
+.dot[data-state="running"] { background: var(--elab-success, #2f9e44); }
+.dot[data-state="error"] { background: var(--elab-danger, #d64545); }
+.dot[data-state="starting"] { background: var(--elab-accent, #4c8bf5); }
+
+.panes { display: grid; grid-template-columns: 1fr; gap: var(--elab-space-3); min-height: 0; }
+.panes[data-dual="1"] { grid-template-columns: 1fr 1fr; }
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-md, 8px);
+  padding: 6px 8px 8px;
+}
+.pane[data-compact="1"] { border-style: dashed; }
+.paneHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+
+/* 源码页：窄栏 gutter = 圆点 + 行号（4 字符宽），横向滚动 */
+.srcWrap { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: hidden; }
+/* 工具条不参与横向滚动：长行只在 .srcList 里滚 */
+.srcWrap > .rowHead { flex: 0 0 auto; flex-wrap: wrap; row-gap: 4px; }
+.srcList { overflow: auto; font-family: var(--elab-font-mono, ui-monospace, monospace); font-size: 12px; }
+.srcRow { display: flex; align-items: stretch; min-height: 18px; }
+.srcRow:hover { background: color-mix(in srgb, var(--elab-bg-hover) 55%, transparent); }
+.srcRowStop { background: color-mix(in srgb, var(--elab-warn, #d98b00) 16%, var(--elab-bg-panel, canvas)); }
+.srcRowPick { background: color-mix(in srgb, var(--elab-accent, #4c8bf5) 12%, var(--elab-bg-panel, canvas)); }
+.srcGutter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  width: 52px;
+  flex: none;
+  padding: 0 4px;
+  border: 0;
+  /* 粘在左边：长行横向滚动时行号不能跟着跑掉（否则整页失去定位锚点） */
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--elab-bg-panel, canvas);
+  color: var(--elab-fg-faint);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  text-align: right;
+}
+.srcGutter:hover { color: var(--elab-accent, #4c8bf5); }
+.srcRowStop .srcGutter, .srcRowPick .srcGutter { background: inherit; }
+.srcDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  /* 无断点时**不可见**：218 行每行一个灰环会把 gutter 变成噪点。
+     悬停这一行的 gutter 才露出候选位置（实心=启用，空心=停用）。 */
+  border: 1px solid transparent;
+  background: transparent;
+}
+.srcDot[data-on="1"] { background: var(--elab-danger, #d64545); border-color: var(--elab-danger, #d64545); }
+.srcDot[data-on="0"] { background: transparent; border-color: var(--elab-fg-muted); }
+.srcGutter:hover .srcDot[data-on=""] { border-color: var(--elab-fg-faint); }
+.srcNo { flex: 1 1 auto; }
+.srcText {
+  flex: 1 1 auto;
+  white-space: pre;
+  padding: 0 6px;
+  color: var(--elab-fg);
+  cursor: text;
+}
+.srcRowStop .srcText { color: var(--elab-fg); font-weight: 600; }
+
+/* 寄存器草稿行：改了但没提交 —— 用左边条提示，避免和“当前 PC”抢颜色 */
+.rowDraft { border-left: 2px solid var(--elab-warn, #d98b00); }

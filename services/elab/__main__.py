@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import Config, ElabError, Host, to_fwd
+from .config import Config, ElabError, Host
 from . import adapt as adapt_mod, builder, ci as ci_mod, doctor as doctor_mod, flash as flash_mod
 from . import market as market_mod
 from . import monitor as monitor_mod
@@ -37,7 +37,11 @@ from .plan import plan_for
 
 
 def _add_common(p):
-    p.add_argument("--root", help="覆盖 ELAB_ROOT（默认本文件所在目录）")
+    # ★ default=SUPPRESS（盘点 #6）：子命令未显式给 --root 时**不写 namespace**，
+    #   保留全局 `elab --root X list` 里解析到的值 —— 否则子命令参数的默认
+    #   None 会把全局值覆盖掉。没给时属性不存在，`_cfg` 的 getattr 兜底为 None。
+    p.add_argument("--root", default=argparse.SUPPRESS,
+                   help="覆盖 ELAB_ROOT（默认本文件所在目录）；写在子命令前后均可")
     p.add_argument("--json", action="store_true", help="机器可读输出")
 
 
@@ -52,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
         description="elab-Flow：一套工具链 + 一套流程，驱动不同芯片的编译/烧录/调试闭环",
     )
     ap.add_argument("--version", action="version", version=f"elab {__version__}")
+    # ★ --root 提到全局（盘点 #6）：用户直觉是 `elab --root X list`，
+    #   早先只挂在子命令级，这个写法会报
+    #   "invalid choice: 'X'（choose from 'list', ...）" —— 完全对不上、纯误导。
+    #   子命令级仍保留（SUPPRESS 默认），两种位置都合法，子命令显式给时优先。
+    ap.add_argument("--root", help="覆盖 ELAB_ROOT（默认本文件所在目录）；写在子命令前后均可")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list", help="列出主机 / 芯片 / 项目")
@@ -164,6 +173,17 @@ def _parser() -> argparse.ArgumentParser:
                    help="失败也继续跑后续步骤（默认失败即停）")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="只读预览：打印每步将执行的命令/效果，**不执行任何东西**")
+
+    p = sub.add_parser("runs", help="运行产物管理（清理历史 run；盘点 #11）")
+    _add_common(p)
+    runs_sub = p.add_subparsers(dest="runs_cmd", required=True)
+    rp = runs_sub.add_parser("prune", help="清理历史 run（keep + days 双闸，running 永不删）")
+    rp.add_argument("--keep", type=int, default=50,
+                    help="按时间倒序至少保留最近 N 条（默认 50）")
+    rp.add_argument("--days", type=float, default=30.0,
+                    help="删除 N 天前的（默认 30；0 = 关闭时间闸）")
+    rp.add_argument("--dry-run", action="store_true",
+                    help="只列出将删除的与可释放空间，不落手")
 
     p = sub.add_parser("skill", help="由 chips/*.yaml 生成平台级 AI skill（按平台聚合，芯片为条目）")
     _add_common(p)
@@ -297,6 +317,21 @@ def main(argv=None) -> int:
     except ElabError as exc:
         print(f"[elab] 错误：{exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # Ctrl-C 不是故障：不吐栈、退出码 130（与 shell 惯例一致）
+        print("[elab] 已中断", file=sys.stderr)
+        return 130
+    except Exception as exc:                           # noqa: BLE001
+        # ★ 兜底（盘点 #8）：绝大部分路径都已规规矩矩转成 ElabError（文案带原因
+        #   和对策），但只要有一个 KeyError/OSError 漏出去，用户就会看到一整屏
+        #   traceback —— 对"收尾阶段"的产品观感是灾难级的。这里接住并说人话；
+        #   ELAB_TRACE=1 放行原始栈（反馈问题时让用户带上）。
+        if os.environ.get("ELAB_TRACE"):
+            raise
+        print(f"[elab] 内部错误：{type(exc).__name__}: {exc}", file=sys.stderr)
+        print("[elab] 这不该发生 —— 请反馈；设 ELAB_TRACE=1 重跑可看完整栈",
+              file=sys.stderr)
+        return 1
 
 
 def _dispatch(args) -> int:
@@ -334,6 +369,8 @@ def _dispatch(args) -> int:
         return cmd_monitor(cfg, args)
     if args.cmd == "serial":
         return cmd_serial(cfg, args)
+    if args.cmd == "runs":
+        return cmd_runs(cfg, args)
     return 2
 
 
@@ -564,6 +601,29 @@ def cmd_serial(cfg: Config, args) -> int:
     else:
         print(serialterm_mod.render(res))
     return 0 if res["ok"] else 1
+
+
+# ── runs：运行产物管理 ────────────────────────────────────────────
+def cmd_runs(cfg: Config, args) -> int:
+    """清理历史 run（盘点 #11）。
+
+    ★ 默认带 ``--dry-run`` 语义吗？**不**：清理是显式指令，但为了防手滑，
+      删除清单逐条打印；想先看不动手用 ``--dry-run``（产出与实删完全一致）。
+    """
+    from .kernel import events as ev_mod
+
+    res = ev_mod.prune_runs(run_mod.runs_dir_for(cfg),
+                            keep=args.keep, days=args.days,
+                            dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    tag = "（dry-run，未删除）" if res["dry_run"] else ""
+    for r in res["removed"]:
+        print(f"[elab] - {r['run']}  {r['bytes']/1024:.1f} KB  {len(r['files'])} 个文件")
+    print(f"[elab] 清理 {len(res['removed'])} 条、保留 {res['kept']} 条、"
+          f"释放 {res['freed_bytes']/1024/1024:.1f} MB{tag}")
+    return 0
 
 
 # ── loop：一键闭环 ────────────────────────────────────────────────

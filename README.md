@@ -127,6 +127,26 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 （成功后 HEX 直接填入发送框）。Agent 通过 `elab_frame_profile` 只写声明式 JSON，
 写操作受 `allowAgentWrite` + `rev` 乐观锁保护。
 
+#### ★ Agent 自学习协议：不认识的格式，抓一段字节就会解
+
+给 agent 一段**没人告诉过它**的抓包，它自己推出帧头、帧长、校验、消息 ID、字段切分，
+落成工程 profile 后立刻按该协议实时解码——**不需要按格式写代码，也不需要人先读手册**。
+2026-11-05 在 F103 上用一段故意"没人认识"的私有协议（`5A A5` + id + 4B 负载 + CRC8/Maxim）
+真机跑通：
+
+| 步骤 | Agent 工具 / 端点 | 真机结果 |
+|---|---|---|
+| 抓包 | `elab_serial_capture`（可**布防**：按字节 pattern / 解码字段 / 第 N 帧触发，带预录） | 命中 `field mv>3350`，45 批次 6.5 KB，命中前的现场一并留证 |
+| **自学** | `elab_frame_profile action=learn`（`capture=<录制文件>`） | 帧头 `5AA5`、定长 10、`crc8_maxim`、id@2 两种取值 → 置信度 **0.99**，回放 **168/168** |
+| 证明可逆 | `action=verify` | 解 → 逐字段重编 → 与线上字节比对 **177/177** 全等 |
+| 自动匹配 | `action=auto`（工程已有 4 个 profile 时挑最像的） | 选中 `profile:f103-private`（0.709），不并列不硬猜 |
+| 生成代码 | `action=codegen` | `generated/f103-private.h`，`gcc -std=c99 -Wall -Werror` 干净编译 |
+| 即刻解码 | `elab_serial_monitor action=decoder` | 直播 **59 帧 / 6 通道**，`ENV`(temp/hum) 与 `VSYS`(mV/mA) 按 id 分发，位标志 `DATA`/`VSYS` 同时给出 |
+
+`learn` **只产草稿、不写文件**：证据链（"帧头命中几次""校验通过率""哪些片段长度不符被排除"）
+与置信度一起返回，人复核后走 `save` 的 `rev` 乐观锁落盘——学习可证伪，不会偷偷改你的配置。
+字段名推断不出语义时诚实写成 `b3 / b5`，由 agent 读过固件源码后再改名（这份 profile 就是这么来的）。
+
 <div align="center">
 <table>
 <tr>

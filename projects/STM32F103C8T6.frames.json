@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "rev": 1,
+  "rev": 3,
   "profiles": [
     {
       "id": "hw_telemetry",
@@ -173,6 +173,185 @@
               "type": "u16",
               "endian": "le",
               "scale": 0.01
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "f103-private",
+      "label": "F103 私有协议（learn）",
+      "kind": "binary",
+      "frame": {
+        "head_hex": "5aa5",
+        "tail_hex": "",
+        "length": 10,
+        "max_bytes": 256,
+        "id_field": {
+          "offset": 2,
+          "type": "u8",
+          "endian": "le"
+        }
+      },
+      "checksum": {
+        "kind": "crc8",
+        "at": "tail",
+        "preset": "crc8_maxim",
+        "size": 1,
+        "endian": "le"
+      },
+      "fields": [
+        {
+          "name": "b3",
+          "unit": "",
+          "offset": 3,
+          "type": "u16",
+          "endian": "le",
+          "length": 2,
+          "scale": 1.0,
+          "bias": 0.0,
+          "enum": null,
+          "plot": true
+        },
+        {
+          "name": "b5",
+          "unit": "",
+          "offset": 5,
+          "type": "u16",
+          "endian": "le",
+          "length": 2,
+          "scale": 1.0,
+          "bias": 0.0,
+          "enum": null,
+          "plot": true
+        },
+        {
+          "name": "b7",
+          "unit": "",
+          "offset": 7,
+          "type": "u16",
+          "endian": "le",
+          "length": 2,
+          "scale": 1.0,
+          "bias": 0.0,
+          "enum": null,
+          "plot": true
+        }
+      ],
+      "variants": [
+        {
+          "id": 1,
+          "label": "ENV",
+          "fields": [
+            {
+              "name": "temp",
+              "unit": "C",
+              "offset": 3,
+              "type": "u16",
+              "endian": "le",
+              "length": 2,
+              "scale": 0.1,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "hum",
+              "unit": "%",
+              "offset": 5,
+              "type": "u16",
+              "endian": "le",
+              "length": 2,
+              "scale": 0.1,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "seq",
+              "unit": "",
+              "offset": 7,
+              "type": "u8",
+              "endian": "le",
+              "length": 1,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "flags",
+              "unit": "",
+              "offset": 8,
+              "type": "u8",
+              "endian": "le",
+              "length": 1,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true,
+              "bits": {
+                "0": "DATA",
+                "1": "VSYS"
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "label": "VSYS",
+          "fields": [
+            {
+              "name": "mv",
+              "unit": "mV",
+              "offset": 3,
+              "type": "u16",
+              "endian": "le",
+              "length": 2,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "ma",
+              "unit": "mA",
+              "offset": 5,
+              "type": "u16",
+              "endian": "le",
+              "length": 2,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "seq",
+              "unit": "",
+              "offset": 7,
+              "type": "u8",
+              "endian": "le",
+              "length": 1,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true
+            },
+            {
+              "name": "flags",
+              "unit": "",
+              "offset": 8,
+              "type": "u8",
+              "endian": "le",
+              "length": 1,
+              "scale": 1.0,
+              "bias": 0.0,
+              "enum": null,
+              "plot": true,
+              "bits": {
+                "0": "DATA",
+                "1": "VSYS"
+              }
             }
           ]
         }

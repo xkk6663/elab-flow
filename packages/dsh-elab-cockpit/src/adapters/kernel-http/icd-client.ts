@@ -51,7 +51,9 @@ import type {
   DebugOpenOptions,
   DebugPeripheralsResponse,
   DebugRegistersResponse,
+  DebugRegistersWriteResponse,
   DebugRtosResponse,
+  DebugSourceResponse,
   DebugSessionResponse,
   DebugStackResponse,
   DebugVariablesResponse,
@@ -74,15 +76,55 @@ export type {
 export interface ApiError {
   code: string
   message: string
+  hint?: string
 }
 
+/**
+ * 内核返回的错误（HTTP 非 2xx）。
+ *
+ * `code` / `hint` 必须原样保留到 UI —— hint 常常是唯一能定位现场的一句话
+ * （例：`CMSIS-DAP command mismatch. Sent 0x0 received 0x5`），丢了下游就
+ * 只剩 "HTTP 503"，用户只会觉得"点了没反应"。
+ */
 export class ElabApiError extends Error {
   readonly code: string
-  constructor(code: string, message: string) {
+  /** 内核给的人话建议（可空） */
+  readonly hint: string
+  /** HTTP 状态码；0 表示没拿到响应（网络层失败） */
+  readonly status: number
+  constructor(code: string, message: string, extra?: { hint?: string; status?: number }) {
     super(message)
     this.code = code
+    this.hint = extra?.hint ?? ''
+    this.status = extra?.status ?? 0
     this.name = 'ElabApiError'
   }
+}
+
+/** 取非空字符串，其余（undefined / null / 数字 / 对象）一律当没有 */
+function str(v: unknown): string {
+  return typeof v === 'string' && v !== '' ? v : ''
+}
+
+/**
+ * 解析内核的错误体。**两种形状都要认**：
+ *
+ * - 通用失败 `_err()`：`{"error": "人话"}` —— `error` 是字符串
+ * - 调试失败 `_debug_err()`：`{"error": "人话", "code": "debug-xxx", "message": "人话", "hint": "…"}`
+ *   —— `error` 仍是字符串，`code` / `hint` 是**同级**字段，不是 `error` 的子字段
+ *
+ * 早期实现按 `body.error.code` 取，对这两种形状都取不到 → code 退化成
+ * `http-503`、message 退化成 `HTTP 503`，hint 永久丢失。
+ */
+function parseApiError(body: unknown, status: number): ElabApiError {
+  const b = (body ?? {}) as Record<string, unknown>
+  const raw = b.error
+  const nested = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : null
+  const code = str(nested?.code) || str(b.code) || `http-${status}`
+  const message =
+    str(nested?.message) || str(raw) || str(b.message) || `HTTP ${status}`
+  const hint = str(nested?.hint) || str(b.hint)
+  return new ElabApiError(code, message, { hint, status })
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -98,8 +140,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ElabApiError('bad-json', `${path} 返回了非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`)
   }
   if (!res.ok) {
-    const err = (body as { error?: ApiError } | null)?.error
-    throw new ElabApiError(err?.code ?? `http-${res.status}`, err?.message ?? `HTTP ${res.status}`)
+    throw parseApiError(body, res.status)
   }
   return body as T
 }
@@ -129,6 +170,17 @@ function del<T>(path: string, payload: unknown, headers?: Record<string, string>
 function withSession(path: string, sessionId?: string): string {
   if (sessionId === undefined || sessionId === '') return path
   return `${path}${path.includes('?') ? '&' : '?'}sessionId=${encodeURIComponent(sessionId)}`
+}
+
+/**
+ * 追加**调试会话** id（`debug_session`）。
+ *
+ * ★ 与 `withSession` 的聊天 sessionId 语义不同：那个用于路由工程目录，
+ *   这个才选择 gdb 会话。两个都叫 session 是历史包袱，参数名必须区分（§3.4）。
+ */
+function withDebugSession(path: string, debugSession?: string): string {
+  if (debugSession === undefined || debugSession === '') return path
+  return `${path}${path.includes('?') ? '&' : '?'}debug_session=${encodeURIComponent(debugSession)}`
 }
 
 /** 后端契约版本；与 `EVENT_SCHEMA_VERSION` 比对，不一致显式报错而非渲染错位界面。 */
@@ -445,8 +497,12 @@ export const elabApi = {
     }),
 
   // ── 调试会话（§6 ICD；Agent 与面板同源）──────────────────────────
-  debugSession: (sessionId?: string) =>
-    request<DebugSessionResponse>(withSession('/elab/api/debug/session', sessionId)),
+  //   ★ 每个方法都接受 `debugSession`（选择哪条 gdb 会话）；
+  //     `sessionId` 仍是聊天 session（路由工程目录），两者不可混用。
+  debugSession: (sessionId?: string, debugSession?: string) =>
+    request<DebugSessionResponse>(
+      withDebugSession(withSession('/elab/api/debug/session', sessionId), debugSession),
+    ),
   /**
    * 打开会话。agent=true 时带上内部头（内核据此把 owner 设为 agent，
    * 租约到点自动关闭并恢复运行）。
@@ -470,34 +526,49 @@ export const elabApi = {
       opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     ),
   /** DELETE：关闭会话；默认 resume=true（monitor reset run）—— C36 延伸。 */
-  debugClose: (opts?: { resume?: boolean; reason?: string; agent?: boolean; sessionId?: string }) =>
+  debugClose: (opts?: { resume?: boolean; reason?: string; agent?: boolean; sessionId?: string
+    debugSession?: string }) =>
     del<{ closed: boolean; resumed?: boolean; session?: string }>(
-      withSession('/elab/api/debug/session', opts?.sessionId),
+      withDebugSession(withSession('/elab/api/debug/session', opts?.sessionId), opts?.debugSession),
       {
         resume: opts?.resume !== false,
         ...(opts?.reason !== undefined ? { reason: opts.reason } : {}),
+        ...(opts?.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
       },
       opts?.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     ),
   debugControl: (opts: {
     action: string
     addr?: string
+    file?: string
+    line?: number
     confirm?: boolean
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }) =>
     post<DebugControlResponse>(
       withSession('/elab/api/debug/control', opts.sessionId),
       {
         action: opts.action,
         ...(opts.addr !== undefined ? { addr: opts.addr } : {}),
+        ...(opts.file !== undefined ? { file: opts.file } : {}),
+        ...(opts.line !== undefined ? { line: opts.line } : {}),
         ...(opts.confirm === true ? { confirm: true } : {}),
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
       },
       opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     ),
-  debugStack: (opts?: { thread?: number; sessionId?: string }) => {
+  debugStack: (opts?: { thread?: number; sessionId?: string; debugSession?: string }) => {
     const q = new URLSearchParams()
     if (opts?.thread !== undefined) q.set('thread', String(opts.thread))
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     const qs = q.toString()
     return request<DebugStackResponse>(
       withSession(`/elab/api/debug/stack${qs === '' ? '' : `?${qs}`}`, opts?.sessionId),
@@ -508,28 +579,79 @@ export const elabApi = {
     scope?: 'locals' | 'args' | 'children'
     var?: string
     sessionId?: string
+    debugSession?: string
   }) => {
     const q = new URLSearchParams()
     if (opts?.frame !== undefined) q.set('frame', String(opts.frame))
     if (opts?.scope !== undefined) q.set('scope', opts.scope)
     if (opts?.var !== undefined && opts.var !== '') q.set('var', opts.var)
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     return request<DebugVariablesResponse>(
       withSession(`/elab/api/debug/variables?${q.toString()}`, opts?.sessionId),
     )
   },
-  debugRegisters: (opts?: { group?: string; format?: 'natural' | 'hex'; sessionId?: string }) => {
+  debugRegisters: (opts?: {
+    group?: string
+    format?: 'natural' | 'hex'
+    sessionId?: string
+    debugSession?: string
+  }) => {
     const q = new URLSearchParams()
     if (opts?.group !== undefined) q.set('group', opts.group)
     if (opts?.format !== undefined) q.set('format', opts.format)
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     return request<DebugRegistersResponse>(
       withSession(`/elab/api/debug/registers?${q.toString()}`, opts?.sessionId),
+    )
+  },
+  /** 按组批量写（P3-C）：POST 到同一路径，语义由动词区分（GET=读，POST=写）。 */
+  debugRegistersWrite: (opts: {
+    items: Array<{ name: string; value: string }>
+    confirm?: boolean
+    agent?: boolean
+    sessionId?: string
+    debugSession?: string
+  }) =>
+    post<DebugRegistersWriteResponse>(
+      withSession('/elab/api/debug/registers', opts.sessionId),
+      {
+        items: opts.items,
+        confirm: opts.confirm !== false,
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
+      },
+      opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
+    ),
+  /** 源码页签（P3-A）：`file` 缺省 = 当前停止帧。 */
+  debugSource: (opts?: {
+    file?: string
+    start?: number
+    count?: number
+    sessionId?: string
+    debugSession?: string
+  }) => {
+    const q = new URLSearchParams()
+    if (opts?.file !== undefined && opts.file !== '') q.set('file', opts.file)
+    if (opts?.start !== undefined) q.set('start', String(opts.start))
+    if (opts?.count !== undefined) q.set('count', String(opts.count))
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
+    const qs = q.toString()
+    return request<DebugSourceResponse>(
+      withSession(`/elab/api/debug/source${qs === '' ? '' : `?${qs}`}`, opts?.sessionId),
     )
   },
   debugBreakpoints: (
     opts?: {
       op?: 'list' | 'add' | 'update' | 'toggle' | 'remove'
       id?: string
-      kind?: 'func' | 'addr'
+      kind?: 'func' | 'addr' | 'source'
       location?: string
       condition?: string
       enabled?: boolean
@@ -537,11 +659,13 @@ export const elabApi = {
       temporary?: boolean
       agent?: boolean
       sessionId?: string
+      debugSession?: string
     },
   ) => {
     if (opts?.op === undefined || opts.op === 'list') {
       return request<DebugBreakpointsResponse>(
-        withSession('/elab/api/debug/breakpoints', opts?.sessionId),
+        withDebugSession(withSession('/elab/api/debug/breakpoints', opts?.sessionId),
+          opts?.debugSession),
       )
     }
     return post<DebugBreakpointsResponse>(
@@ -555,31 +679,58 @@ export const elabApi = {
         ...(opts.enabled !== undefined ? { enabled: opts.enabled } : {}),
         ...(opts.hardware === true ? { hardware: true } : {}),
         ...(opts.temporary === true ? { temporary: true } : {}),
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
       },
       opts?.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     )
   },
-  debugMemory: (opts: { addr: string; count?: number; sessionId?: string }) => {
+  debugMemory: (opts: { addr: string; count?: number; sessionId?: string; debugSession?: string }) => {
     const q = new URLSearchParams({ addr: opts.addr })
     if (opts.count !== undefined) q.set('count', String(opts.count))
+    if (opts.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     return request<DebugMemoryResponse>(
       withSession(`/elab/api/debug/memory?${q.toString()}`, opts.sessionId),
     )
   },
-  debugDisasm: (opts?: { addr?: string; count?: number; mode?: number; sessionId?: string }) => {
+  debugDisasm: (opts?: {
+    addr?: string
+    count?: number
+    mode?: number
+    sessionId?: string
+    debugSession?: string
+  }) => {
     const q = new URLSearchParams()
     if (opts?.addr !== undefined) q.set('addr', opts.addr)
     if (opts?.count !== undefined) q.set('count', String(opts.count))
     if (opts?.mode !== undefined) q.set('mode', String(opts.mode))
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     const qs = q.toString()
     return request<DebugDisasmResponse>(
       withSession(`/elab/api/debug/disasm${qs === '' ? '' : `?${qs}`}`, opts?.sessionId),
     )
   },
-  debugEvaluate: (opts: { expr: string; frame?: number; agent?: boolean; sessionId?: string }) =>
+  debugEvaluate: (opts: {
+    expr: string
+    frame?: number
+    agent?: boolean
+    sessionId?: string
+    debugSession?: string
+  }) =>
     post<DebugEvaluateResponse>(
       withSession('/elab/api/debug/evaluate', opts.sessionId),
-      { expr: opts.expr, ...(opts.frame !== undefined ? { frame: opts.frame } : {}) },
+      {
+        expr: opts.expr,
+        ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
+      },
       opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     ),
   /** 写内存/寄存器：必须 allow_write=true 的会话 + confirm=true。 */
@@ -591,6 +742,7 @@ export const elabApi = {
     confirm?: boolean
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }) =>
     post<DebugWriteResponse>(
       withSession('/elab/api/debug/write', opts.sessionId),
@@ -600,6 +752,9 @@ export const elabApi = {
         ...(opts.name !== undefined ? { name: opts.name } : {}),
         value: opts.value,
         confirm: opts.confirm === true,
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
       },
       opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     ),
@@ -612,10 +767,12 @@ export const elabApi = {
     rev?: number
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }) => {
     if (opts?.op === undefined || opts.op === 'list') {
       return request<DebugWatchResponse>(
-        withSession('/elab/api/debug/watch', opts?.sessionId),
+        withDebugSession(withSession('/elab/api/debug/watch', opts?.sessionId),
+          opts?.debugSession),
       )
     }
     return post<DebugWatchResponse>(
@@ -626,27 +783,43 @@ export const elabApi = {
         ...(opts.expr !== undefined ? { expr: opts.expr } : {}),
         ...(opts.format !== undefined ? { format: opts.format } : {}),
         ...(opts.rev !== undefined ? { rev: opts.rev } : {}),
+        ...(opts.debugSession !== undefined && opts.debugSession !== ''
+          ? { debug_session: opts.debugSession }
+          : {}),
       },
       opts.agent === true ? { 'x-elab-actor': 'agent' } : undefined,
     )
   },
-  debugAudit: (opts?: { limit?: number; sessionId?: string }) => {
+  debugAudit: (opts?: { limit?: number; sessionId?: string; debugSession?: string }) => {
     const q = new URLSearchParams()
     if (opts?.limit !== undefined) q.set('limit', String(opts.limit))
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     const qs = q.toString()
     return request<DebugAuditResponse>(
       withSession(`/elab/api/debug/audit${qs === '' ? '' : `?${qs}`}`, opts?.sessionId),
     )
   },
-  debugPeripherals: (opts?: { path?: string; read?: boolean; sessionId?: string }) => {
+  debugPeripherals: (opts?: {
+    path?: string
+    read?: boolean
+    sessionId?: string
+    debugSession?: string
+  }) => {
     const q = new URLSearchParams()
     if (opts?.path !== undefined && opts.path !== '') q.set('path', opts.path)
     if (opts?.read === true) q.set('read', '1')
+    if (opts?.debugSession !== undefined && opts.debugSession !== '') {
+      q.set('debug_session', opts.debugSession)
+    }
     const qs = q.toString()
     return request<DebugPeripheralsResponse>(
       withSession(`/elab/api/debug/peripherals${qs === '' ? '' : `?${qs}`}`, opts?.sessionId),
     )
   },
-  debugRtos: (opts?: { sessionId?: string }) =>
-    request<DebugRtosResponse>(withSession('/elab/api/debug/rtos', opts?.sessionId)),
+  debugRtos: (opts?: { sessionId?: string; debugSession?: string }) =>
+    request<DebugRtosResponse>(
+      withDebugSession(withSession('/elab/api/debug/rtos', opts?.sessionId), opts?.debugSession),
+    ),
 }

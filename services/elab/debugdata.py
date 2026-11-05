@@ -8,7 +8,18 @@
 
 from __future__ import annotations
 
+import re
 import struct
+
+#: FPU 寄存器名（**白名单**，不是"以 s/d/q/f/v 开头"—— 否则 ``faultmask`` 这种
+#: Cortex-M 系统寄存器会被错分到 FPU 组，M3 上就凭空多出一个 FPU 页签）。
+_FPU_NAME_RE = re.compile(
+    r"^(?:s(?:[0-9]|[12][0-9]|3[01])|d(?:[0-9]|1[0-5])|q(?:[0-9]|1[0-5])"
+    r"|fpscr|fpsr|fpcr)$", re.I)
+
+
+def is_fpu_register(name: str) -> bool:
+    return bool(_FPU_NAME_RE.match(str(name or "")))
 
 
 def _hex(v: object) -> str:
@@ -31,7 +42,11 @@ def _signed32(n: int) -> int:
 
 # ── 调用栈 ──────────────────────────────────────────────────────
 def stack(payload: dict) -> list[dict]:
-    """``-stack-list-frames`` → ``[{level,addr,func,file,line,arch}]``。"""
+    """``-stack-list-frames`` → ``[{level,addr,func,file,fullname,line,arch}]``。
+
+    ``fullname`` 是 MI 给的绝对路径（源码页签据此读文件）；老 gdb 可能没有该字段，
+    此时留给调用方用 ``plan.source_dir`` 建索引兜底（见 ``debugsource.resolve_hint``）。
+    """
     frames = []
     for fr in payload.get("stack") or []:
         if not isinstance(fr, dict):
@@ -47,6 +62,7 @@ def stack(payload: dict) -> list[dict]:
             "addr": _hex(f.get("addr")),
             "func": str(f.get("func") or "??"),
             "file": str(f.get("file") or ""),
+            "fullname": str(f.get("fullname") or ""),
             "line": line,
             "arch": str(f.get("arch") or ""),
             "pc": _hex(f.get("addr")) == _hex(payload.get("_pc")),
@@ -84,6 +100,7 @@ def stop_frame(record: dict) -> dict:
         "frame": {
             "func": str(frame_raw.get("func") or ""),
             "file": str(frame_raw.get("file") or ""),
+            "fullname": str(frame_raw.get("fullname") or ""),
             "line": int(frame_raw["line"]) if str(frame_raw.get("line") or "").isdigit() else None,
             "addr": _hex(frame_raw.get("addr")),
         },
@@ -110,8 +127,15 @@ def xpsr_flags(n: int) -> dict:
     return {name: (n >> bit) & 1 for name, bit in _XPSR_BITS}
 
 
-def registers(names_rec: dict, values_rec: dict, *, mode: str = "hex") -> list[dict]:
-    """``-data-list-register-names`` + ``-data-list-register-values`` → 分组。"""
+def registers(names_rec: dict, values_rec: dict, *, mode: str = "hex",
+              editable_fn=None, width_fn=None) -> list[dict]:
+    """``-data-list-register-names`` + ``-data-list-register-values`` → 分组。
+
+    ``editable_fn`` / ``width_fn`` 由调用方注入（白名单是**内核策略**，不在这里重复定义）；
+    缺省保持 P2 行为：只读 ``xpsr/pc/lr``，宽度一律 32 位。
+    """
+    editable_fn = editable_fn or (lambda n: n not in ("xpsr", "pc", "lr"))
+    width_fn = width_fn or (lambda n: 32)
     names = [str(x) for x in (names_rec.get("register-names") or [])]
     vals = values_rec.get("register-values") or []
     by_num: dict[int, str] = {}
@@ -135,14 +159,20 @@ def registers(names_rec: dict, values_rec: dict, *, mode: str = "hex") -> list[d
         value = by_num.get(idx, "")
         if not value:
             continue
+        width = int(width_fn(name))
+        editable = bool(editable_fn(name))
         reg = {"name": name, "hex": _hex(value), "natural": str(_signed32(_num(value) or 0)),
-               "editable": name not in ("xpsr", "pc", "lr")}
+               "editable": editable, "width": width}
+        if not editable:
+            # UI 只读原因（§7.3）：pc/lr/xpsr 与 64/128 位寄存器给出明确标注
+            reg["readonly"] = ("wide" if width > 32
+                               else "core-fixed")
         if name == "pc":
             reg["pc"] = True
         if name == "xpsr":
             reg["flags"] = xpsr_flags(_num(value) or 0)
-        (fpu if (name.startswith(("s", "d", "q", "f", "v"))
-                 and name not in _ARM_CORE) else core).append(reg)
+        (fpu if (is_fpu_register(name) and name not in _ARM_CORE)
+         else core).append(reg)
     # 若 names 表里没有 sp/lr/pc/xpsr 的别名（部分 gdb 版本用 r13/r14/r15），补映射
     if not any(r["name"] == "sp" for r in core):
         for r in core:

@@ -828,6 +828,26 @@ export interface SerialBytesTail extends SerialMonitorSnapshot {
   covered?: number;
 }
 
+// ── /api/serial/monitor/poll（盘点 #4：四路合并轮询）─────────────
+/**
+ * 一次带回四路增量（line/bytes 恒有；issues/decoded 由服务端按
+ * profile / decoder 是否开启决定 —— 与旧前端"开着才拉"的规则一致）。
+ * 动机：HTTP/1.1 同域 6 连接，500ms×4 个稳态请求占掉大半连接池；
+ * 合并后 1 个，且四路是同一时刻的快照，前端不必自己拼时序。
+ */
+export interface SerialPollResponse {
+  line: SerialMonitorTail;
+  bytes: SerialBytesTail;
+  issues?: SerialMonitorSnapshot & {
+    issues: SerialIssue[];
+    issue_total: number;
+    issue_covered: number;
+    gap: number;
+    profile: string;
+  };
+  decoded?: SerialDecodedTail;
+}
+
 // ── /api/serial/decode（P3，协议解码）────────────────────────────
 export interface SerialDecodeResult {
   ok: boolean;
@@ -856,6 +876,11 @@ export interface SerialDecodeResult {
   checksum_fail?: number;
   /** 多 ID：id_field 未命中任何 variant 且无兜底字段的帧数 */
   unknown_id?: number;
+  /**
+   * 解码失败分类（P2.2-C）：no_head / bad_length / short / tail_mismatch /
+   * checksum / unknown_id / bad_id / field。老内核没有这一项。
+   */
+  reasons?: Record<string, number>;
   /** 最近若干条解码错误（字段越界/校验失败原因） */
   errors?: string[];
 }
@@ -1362,6 +1387,8 @@ export type DebugActor = "agent" | "human";
 export interface DebugFrame {
   func: string;
   file: string;
+  /** MI 的绝对路径（源码页签据此定位）；老 gdb 可能为空 */
+  fullname?: string;
   line: number | null;
   addr: string;
 }
@@ -1405,7 +1432,13 @@ export interface DebugSessionSnapshot {
 }
 
 export interface DebugSessionResponse {
+  /** 默认/当前会话（单会话时与 sessions[0] 相同；无会话为 null） */
   session: DebugSessionSnapshot | null;
+  /** 多会话清单（P3）：每项与 session 同构 */
+  sessions?: DebugSessionSnapshot[];
+  session_id?: string;
+  max_sessions?: number;
+  allow_write?: boolean;
 }
 
 export interface DebugStackFrame {
@@ -1413,6 +1446,8 @@ export interface DebugStackFrame {
   addr: string;
   func: string;
   file: string;
+  /** 绝对路径（缺省时内核按 basename 唯一匹配兜底；多解不猜） */
+  fullname?: string;
   line: number | null;
   arch: string;
   pc: boolean;
@@ -1430,6 +1465,10 @@ export interface DebugReg {
   hex: string;
   natural: string;
   editable: boolean;
+  /** 位宽：32 / 64 / 128（P3 只开 32 位写，d/q 只读） */
+  width?: number;
+  /** 只读原因：core-fixed = pc/lr/xpsr；wide = 64/128 位待 P3b */
+  readonly?: "core-fixed" | "wide";
   pc?: boolean;
   flags?: Record<string, number>;
 }
@@ -1470,7 +1509,7 @@ export interface DebugVariablesResponse {
 export interface DebugBreakpoint {
   id: string;
   gdb_id: string;
-  kind: "func" | "addr" | "loc";
+  kind: "func" | "addr" | "loc" | "source";
   location: string;
   enabled: boolean;
   condition: string;
@@ -1485,6 +1524,37 @@ export interface DebugBreakpointsResponse {
   /** 工程级配置版本（乐观锁：写回时带上，冲突回 409 debug-rev-conflict） */
   rev?: number;
   allow_write?: boolean;
+}
+
+/** GET /api/debug/source —— 源码页签的一页行（P3-A）。 */
+export interface DebugSourceResponse {
+  ok: boolean;
+  /** 绝对路径（POSIX 分隔符） */
+  file: string;
+  /** 相对工程源码根的路径（POSIX），断点定位串用它 */
+  rel: string;
+  start: number;
+  end: number;
+  total: number;
+  lines: Array<{ no: number; text: string }>;
+  mtime: number;
+  /** 因 512KB 上限丢掉了文件尾部 */
+  truncated: boolean;
+  /** 本窗口之后还有行（翻页用，≠ truncated） */
+  has_more?: boolean;
+  stop_seq?: number;
+  /** 当前停止帧的行号（高亮用） */
+  stop_line?: number | null;
+  /** 当前停止帧的文件绝对路径 */
+  stop_file?: string;
+}
+
+/** POST /api/debug/registers —— 按组批量写（P3-C）。无事务回滚，如实返回。 */
+export interface DebugRegistersWriteResponse {
+  ok: boolean;
+  applied: Array<{ name: string; before: string; after: string }>;
+  failed?: { name: string; code: string; message: string };
+  stop_seq?: number;
 }
 
 export interface DebugWatchItem {
@@ -1520,6 +1590,8 @@ export interface DebugAuditRecord {
   id?: string;
   code?: string;
   message?: string;
+  /** 组写审计：一次提交的全部项（name/before/after，§7.2） */
+  items?: Array<{ name: string; before: string; after: string }>;
 }
 
 export interface DebugAuditResponse {

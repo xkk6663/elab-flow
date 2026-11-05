@@ -21,10 +21,6 @@ export function setKernelMeta(meta) {
 export function setProjectStepLabels(labels) {
     projectSteps = labels ?? {};
 }
-/** 读取当前内核 meta（未拿到 = null，调用方走内置默认）。 */
-export function kernelMeta() {
-    return current;
-}
 /** 步骤标签：项目覆盖优先，其次内核 meta，最后 fallback。 */
 export function kernelStepLabel(id, fallback) {
     const override = projectSteps[id];
@@ -38,11 +34,6 @@ export function kernelPlanTitle(planId, fallback) {
     const plan = current?.plans?.find((p) => p.id === planId);
     const title = plan?.title;
     return typeof title === 'string' && title !== '' ? title : fallback;
-}
-/** 档位的内核步骤集（用于 host 侧解析；未定义 = undefined，调用方走内置）。 */
-export function kernelPlanSteps(planId) {
-    const steps = current?.plans?.find((p) => p.id === planId)?.steps;
-    return Array.isArray(steps) ? steps.map(String) : undefined;
 }
 /** 调试面板是否可见：**只有**内核声明 `meta.debug.available=true` 才显示。 */
 export function kernelDebugAvailable() {

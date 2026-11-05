@@ -77,7 +77,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
-  const [conn, setConn] = useState<"idle" | "connecting" | "open" | "reconnecting">("idle");
+  const [conn, setConn] = useState<"idle" | "connecting" | "open" | "reconnecting" | "dead">("idle");
   /** 芯片适配包视图（市场 / 已安装；与 DSH 面板同形）。 */
   const [packsOpen, setPacksOpen] = useState(false);
   // ★ 工作区化瘦身（2026-10-08）：autoScroll → EvidenceRail 本地态；
@@ -89,6 +89,14 @@ export default function App() {
   const selectedRef = useRef("");
   /** 已跟随过的 agent run id：只跟"新出现"的，不每一拍把人手动切走的视图拽回来。 */
   const followedRunsRef = useRef<Set<string>>(new Set());
+  /**
+   * 跟随轮询的防重入标志。
+   *
+   * ★ 没有它时，只要一拍没在 2 s 内返回，下一拍照样发 —— 一旦内核变慢
+   *   （或请求挂住，虽然 `req()` 现在有 15 s 超时兜底），请求就会层层堆叠，
+   *   把浏览器连接池和内核线程一起占满。串口轮询早就有 `busyRef`，这里对齐。
+   */
+  const followBusyRef = useRef(false);
 
   const closeStream = useCallback(() => {
     streamRef.current?.close();
@@ -237,12 +245,18 @@ export default function App() {
    *   阶段轨/日志画面与真实现场脱节 —— 用户看到的是"没在跑"。
    *   只跟随**新出现**的 agent run（记 id），人工发起的 run 本来就在本地接管。
    *   agent 与人共用同一把仲裁锁，所以同一时刻至多一条活动 run。
+   *
+   * ★ 只打 `/api/runs/active`：这条**不扫历史目录**，开销与历史条数无关。
+   *   早先打的是 `/api/runs`（全量列表），历史 run 一多，单次扫描就可能超过
+   *   2 s 轮询周期 —— 轮询本身成了负载源（实测 800 条约 2.1 s）。
    */
   useEffect(() => {
     const timer = window.setInterval(() => {
+      if (followBusyRef.current) return;      // 上一拍还没回 → 跳过，别堆请求
+      followBusyRef.current = true;
       void (async () => {
         try {
-          const { active } = await api.runs();
+          const { active } = await api.runsActive();
           const a = active.find((x) => x.alive !== false && x.actor === "agent");
           if (!a || followedRunsRef.current.has(a.run)) return;
           // 工程目录还没加载完 → 不记 id，下一拍照样会重试
@@ -251,6 +265,8 @@ export default function App() {
           await selectProject(a.project);
         } catch {
           /* 轮询失败静默：不影响本地操作 */
+        } finally {
+          followBusyRef.current = false;
         }
       })();
     }, 2000);
@@ -381,8 +397,11 @@ export default function App() {
   const header = (
     <>
       <span className={s.brand}>elab cockpit</span>
-      <Pill tone={conn === "open" ? "green" : conn === "idle" ? "neutral" : "blue"}>
-        {conn === "idle" ? "空闲" : conn === "open" ? "已连接" : "连接中"}
+      <Pill tone={conn === "open" ? "green" : conn === "idle" ? "neutral" : conn === "dead" ? "red" : "blue"}>
+        {conn === "idle" ? "空闲"
+          : conn === "open" ? "已连接"
+          : conn === "dead" ? "事件流已断开"
+          : "连接中"}
       </Pill>
       {caps ? (
         <Tooltip side="bottom" tip={`契约版本 ${caps.schema_version} · 根目录 ${caps.root}`}>

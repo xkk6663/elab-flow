@@ -7,7 +7,6 @@ plan 里没有任何路径是手写的：全部来自 YAML 插值 + L0 主机层
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .config import Config, ElabError, Host, to_fwd
 from .ota_layout import gen_header_path, normalize_ota_layout

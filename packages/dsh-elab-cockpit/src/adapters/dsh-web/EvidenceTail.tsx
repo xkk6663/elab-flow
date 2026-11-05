@@ -346,6 +346,3 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
     </div>
   )
 }
-
-/** 全部通道（供容器初始化缓冲）。 */
-export const ALL_CHANNELS = LOG_CHANNELS

@@ -197,6 +197,14 @@ class _Session:
         self.dec_channels = 0           # 已推断出的通道数
         self.dec_updated = 0.0
         self.dec_error: str | None = None
+        # ── 帧级健康度（P3.1）：错误分类 + 每 variant 计数 ──
+        self.dec_reasons: dict = {k: 0 for k in codec.ERROR_KINDS}
+        self.dec_ck_fail = 0
+        self.dec_unknown_id = 0
+        self.variant_events: deque = deque(maxlen=RATE_MAX_EVENTS)
+        self.variant_totals: dict = {}
+        self._last_rx_us = 0            # 上一批 RX 的时刻（空闲分包用）
+        self.idle_drops = 0
 
         self.stop = threading.Event()
         self.error: str | None = None
@@ -265,6 +273,10 @@ class _Session:
                             time.time() - last_data > PARTIAL_FLUSH_S:
                         self._push_line(buf.decode("utf-8", errors="replace").rstrip("\r"))
                         buf = b""
+                    # 空闲分包协议：静默超过 idle_gap_ms 就是"一帧结束"
+                    if self.decoder and self._idle_gap_ms() and \
+                            time.time() - last_data >= self._idle_gap_ms() / 1000.0:
+                        self.flush_idle()
                     time.sleep(0.02)
                     continue
                 last_data = time.time()
@@ -484,16 +496,58 @@ class _Session:
             # 混进波形会把"设备在说什么"变成"我们刚才问了什么"。
             if direction == "rx" and self.decoder:
                 self._decode_locked(rec["data"], t_us, hms)
+            if direction == "rx":
+                self._last_rx_us = t_us
 
     # ── 会话级解码（共享帧环）──────────────────────────────────
-    def _decode_locked(self, data: bytes, t_us: int, hms: str) -> None:
+    def _idle_gap_ms(self) -> int:
+        fr = (self.frame_profile or {}).get("frame") or {}
+        try:
+            return int(fr.get("idle_gap_ms") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _idle_only(self) -> bool:
+        """只靠空闲分包定界的 profile（没有帧头/长度/帧尾）。"""
+        fr = (self.frame_profile or {}).get("frame") or {}
+        if not self._idle_gap_ms():
+            return False
+        return not (fr.get("head_hex") or fr.get("heads") or fr.get("length")
+                    or fr.get("length_field") or fr.get("tail_hex"))
+
+    def _decode_locked(self, data: bytes, t_us: int, hms: str,
+                       *, flush: bool = False) -> None:
         """增量解码一批 RX 字节。**调用方已持 dlock**。
 
         半帧不丢：``dec_pending`` 原样带到下一批（与 ``serialcodec`` 的语义
         同源）。解码失败不拖死读线程 —— 只记 ``dec_error``，下一批再试。
+
+        空闲分包（``frame.idle_gap_ms``）：字节先攒着，**等间隔超过阈值再解**
+        —— 这一类协议没有帧头/长度，"什么时候算一帧"只有时间能回答。
         """
+        gap_ms = 0
+        if self._last_rx_us and t_us > self._last_rx_us:
+            gap_ms = (t_us - self._last_rx_us) / 1000.0
+
+        if self._idle_only():
+            limit = int(((self.frame_profile or {}).get("frame") or {})
+                        .get("max_bytes") or 256)
+            if self.dec_pending and (flush or gap_ms >= self._idle_gap_ms()
+                                     or len(self.dec_pending) >= limit):
+                buf, self.dec_pending = self.dec_pending, b""
+                self._decode_buf(buf, t_us, hms)
+            self.dec_pending += bytes(data)
+            if len(self.dec_pending) >= limit:
+                buf, self.dec_pending = self.dec_pending, b""
+                self._decode_buf(buf, t_us, hms)
+            return
+
+        self._decode_buf(self.dec_pending + bytes(data), t_us, hms)
+
+    def _decode_buf(self, buf: bytes, t_us: int, hms: str) -> None:
+        """真正的解码 + 记账。**调用方已持 dlock**。"""
         try:
-            res = codec.decode(self.dec_pending + bytes(data), self.decoder,
+            res = codec.decode(buf, self.decoder,
                                channels=self.dec_channels or None,
                                profile=self.frame_profile)
         except Exception as exc:                   # noqa: BLE001
@@ -505,17 +559,29 @@ class _Session:
         self.dec_error = None
         self.dec_channels = int(res.get("channels") or self.dec_channels or 0)
         self.dec_skipped += int(res.get("skipped") or 0)
+        # 帧级健康度（P3.1）：错误按原因分类累计，不再只有一个 skipped
+        for key, n in (res.get("reasons") or {}).items():
+            if n:
+                self.dec_reasons[key] = self.dec_reasons.get(key, 0) + int(n)
+        self.dec_ck_fail = self.dec_reasons.get("checksum", 0)
+        self.dec_unknown_id = self.dec_reasons.get("unknown_id", 0)
         if res.get("fields"):
             self.dec_fields = list(res["fields"])
         records = res.get("records") or []
-        if records:
-            for rec in records[-20:]:
-                self.dec_records.append(rec)
+        for rec in records[-20:]:
+            self.dec_records.append(rec)
+        for rec in records:
+            label = rec.get("variant") or (f"id{rec['id']}" if rec.get("id") is not None else "")
+            if label:
+                self.variant_totals[label] = self.variant_totals.get(label, 0) + 1
+                self.variant_events.append((t_us, label))
+            self._cap_trigger_frame(rec, t_us)
         pending_b64 = str(res.get("pending_b64") or "")
         self.dec_pending = (base64.b64decode(pending_b64) if pending_b64 else b"")
         if len(self.dec_pending) > MAX_DEC_PENDING:
             # 混了不属于该解码器的字节：半帧不可能这么长 —— 丢掉并如实计跳过。
             self.dec_skipped += 1
+            self.dec_reasons["short"] = self.dec_reasons.get("short", 0) + 1
             self.dec_pending = b""
         for vals in res.get("frames") or []:
             self.dec_seq += 1
@@ -527,6 +593,17 @@ class _Session:
             self.frame_events.append(t_us)
         self.dec_updated = time.time()
 
+    def flush_idle(self) -> None:
+        """空闲超时：把攒着的字节当成完整一帧解掉（读完静默时调用）。"""
+        if not self._idle_only():
+            return
+        with self.dlock:
+            if not self.dec_pending:
+                return
+            buf, self.dec_pending = self.dec_pending, b""
+            _t, t_us, hms = _now()
+            self._decode_buf(buf, t_us, hms)
+
     def _decode_view_locked(self) -> dict:
         """解码状态投影（给快照 / 动作返回值用）。**调用方已持 dlock**。"""
         return {"decoder": self.decoder, "decoder_by": self.decoder_by,
@@ -535,6 +612,8 @@ class _Session:
                 "fields": list(self.dec_fields),
                 "records": list(self.dec_records),
                 "skipped": self.dec_skipped,
+                "reasons": dict(self.dec_reasons),
+                "variants": dict(self.variant_totals),
                 "pending_bytes": len(self.dec_pending),
                 "covered": self.dec_covered,
                 "updated_at": round(self.dec_updated, 3),
@@ -564,6 +643,11 @@ class _Session:
             self.dec_skipped = 0
             self.dec_channels = 0
             self.dec_error = None
+            self.dec_reasons = {k: 0 for k in codec.ERROR_KINDS}
+            self.dec_ck_fail = 0
+            self.dec_unknown_id = 0
+            self.variant_totals.clear()
+            self.variant_events.clear()
             self.decoder = dec
             self.frame_profile = dict(profile) if is_profile else None
             self.decoder_by = actor if dec else ""
@@ -618,19 +702,41 @@ class _Session:
         }
 
     # ── 录制（K5）──────────────────────────────────────────────
-    def _cap_emit(self, seq: int, t_us: int, direction: str,
-                  data: bytes) -> None:
-        """把一条批次写进录制文件。**调用方已持 dlock。**
+    def _decoder_field_names(self) -> set[str]:
+        """当前解码器可能产出的字段名。
 
-        只存字节（``bytes_b64``），不存文本投影 —— 行是投影，可随时重建；
-        录进去反而是把一份已经丢失信息的东西当证据。
+        profile 解码器在**解出第一帧之前** ``dec_fields`` 还是空的，所以名字要
+        从 profile 定义里取；内置解码器（justfloat/firewater）只能靠已解出的
+        字段。两处合起来判断"这个触发字段名到底存不存在"。
         """
+        names = {str(f.get("name")) for f in self.dec_fields if isinstance(f, dict)}
+        prof = self.frame_profile or {}
+        for f in prof.get("fields") or []:
+            if isinstance(f, dict) and f.get("name"):
+                names.add(str(f["name"]))
+        for v in prof.get("variants") or []:
+            for f in (v or {}).get("fields") or []:
+                if isinstance(f, dict) and f.get("name"):
+                    names.add(str(f["name"]))
+        return names
+
+    def _cap_match_bytes(self, data: bytes) -> bool:
+        cap = self.cap or {}
+        tr = cap.get("trigger") or {}
+        pat = tr.get("pattern")
+        if not pat:
+            return False
+        try:
+            needle = bytes.fromhex("".join(str(pat).split()).replace("0x", ""))
+        except ValueError:
+            return False
+        return bool(needle) and needle in data
+
+    def _cap_write(self, rec: dict) -> None:
         cap = self.cap
         if not cap or not cap["active"]:
             return
-        line = json.dumps({"seq": seq, "t_us": t_us, "dir": direction,
-                           "bytes_b64": base64.b64encode(data).decode("ascii")},
-                          ensure_ascii=False) + "\n"
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
         if cap["bytes"] + len(line.encode("utf-8")) > cap["max_bytes"]:
             # 到顶：停录 + 记 truncated。**不截半条**（半条 JSON 不可回放）。
             cap["truncated"] = True
@@ -646,6 +752,91 @@ class _Session:
         cap["bytes"] += len(line.encode("utf-8"))
         cap["chunks"] += 1
 
+    def _cap_fire(self, why: str, t_us: int) -> None:
+        """命中触发条件：把预录环形缓冲一次性落盘，并留一条标记。"""
+        cap = self.cap
+        if not cap or not cap["active"] or cap.get("triggered"):
+            return
+        cap["triggered"] = True
+        cap["triggered_by"] = why
+        cap["triggered_at"] = t_us
+        for item in cap["pre"]:
+            self._cap_write(item)
+        cap["pre"].clear()
+        self._cap_write({"event": "trigger", "why": why, "t_us": t_us})
+
+    def _cap_trigger_frame(self, rec: dict, t_us: int) -> None:
+        """按**解码后的字段**判断触发条件。**调用方已持 dlock**。"""
+        cap = self.cap
+        if not cap or not cap["active"] or cap.get("triggered"):
+            return
+        tr = cap.get("trigger") or {}
+        idx = tr.get("frame_index")
+        if idx:
+            cap["frame_seen"] = int(cap.get("frame_seen") or 0) + 1
+            if cap["frame_seen"] >= int(idx):
+                self._cap_fire(f"frame_index={idx}", t_us)
+                return
+        cond = tr.get("field")
+        if not isinstance(cond, dict):
+            return
+        name = str(cond.get("name") or "")
+        want = cond.get("value")
+        if not name:
+            return
+        got = (rec.get("fields") or {}).get(name)
+        if got is None:
+            return
+        op = str(cond.get("op") or "eq")
+        sym = {"eq": "==", "ne": "!=", "gt": ">", "ge": ">=",
+               "lt": "<", "le": "<="}.get(op, op)
+        try:
+            if op == "eq" and got == want:
+                self._cap_fire(f"field {name}=={want}", t_us)
+            elif op == "ne" and got != want:
+                self._cap_fire(f"field {name}!={want}", t_us)
+            elif op in ("gt", "ge", "lt", "le"):
+                a, b = float(got), float(want)
+                if {"gt": a > b, "ge": a >= b, "lt": a < b, "le": a <= b}[op]:
+                    self._cap_fire(f"field {name}{sym}{want}", t_us)
+        except (TypeError, ValueError):
+            return
+
+    def _cap_emit(self, seq: int, t_us: int, direction: str,
+                  data: bytes) -> None:
+        """把一条批次写进录制文件。**调用方已持 dlock。**
+
+        只存字节（``bytes_b64``），不存文本投影 —— 行是投影，可随时重建；
+        录进去反而是把一份已经丢失信息的东西当证据。
+
+        有触发条件时先入**预录环形缓冲**：命中那一刻把命中的"之前"也写出去
+        —— 只录命中之后的字节，等于把问题现场删掉。
+        """
+        cap = self.cap
+        if not cap or not cap["active"]:
+            return
+        rec = {"seq": seq, "t_us": t_us, "dir": direction,
+               "bytes_b64": base64.b64encode(data).decode("ascii")}
+        tr = cap.get("trigger")
+        if tr and not cap.get("triggered"):
+            if self._cap_match_bytes(data):
+                self._cap_fire("pattern", t_us)
+            else:
+                pre = cap["pre"]
+                pre.append(rec)
+                # 预录按**字节**封顶（帧数不是度量：一批可能是 1 字节也可能是 4 KiB）
+                #
+                # 「按字段/第 N 帧」触发是**解码之后**才知道的 —— 命中那一批
+                # 字节在此之前已经进过这里。所以这类触发至少保 1 批：否则命中
+                # 的现场被自己丢掉，文件里只剩一条标记，事故现场等于被删了。
+                keep_min = 1 if (tr.get("field") or tr.get("frame_index")) else 0
+                total = sum(len(x["bytes_b64"]) * 3 // 4 for x in pre)
+                while len(pre) > keep_min and total > cap["pre_bytes"]:
+                    total -= len(pre[0]["bytes_b64"]) * 3 // 4
+                    pre.popleft()
+                return
+        self._cap_write(rec)
+
     def _cap_close(self, cap: dict) -> None:
         """收口（幂等）。调用方已持 dlock。"""
         cap["active"] = False
@@ -656,14 +847,73 @@ class _Session:
             except Exception:                # noqa: BLE001
                 pass
 
-    def start_capture(self, out_dir: Path, *, max_bytes: int = CAP_MAX_BYTES) -> dict:
-        """开始录制到 ``out_dir``。已在录则拒绝（不静默换文件）。"""
+    def start_capture(self, out_dir: Path, *, max_bytes: int = CAP_MAX_BYTES,
+                      trigger: dict | None = None,
+                      pre_bytes: int = 0) -> dict:
+        """开始录制到 ``out_dir``。已在录则拒绝（不静默换文件）。
+
+        ``trigger`` 支持三种条件（可组合，先命中先算）：
+        ``{"pattern":"aa55"}`` 原始字节包含、``{"field":{"name","op","value"}}``
+        解码后字段比较、``{"frame_index":N}`` 第 N 帧。命中前只进预录环；
+        ``pre_bytes=0`` 表示不要预录，但**按字段/帧序号**触发仍会保留命中前的
+        最后一批字节（那是命中现场本身）。
+        """
         with self.dlock:
             if self.cap and self.cap["active"]:
                 return {"ok": False, "error": "录制已在进行",
                         "path": self.cap["path"], "bytes": self.cap["bytes"]}
             if not self.alive:
                 return {"ok": False, "error": "监视已结束（读线程已收摊）"}
+            if trigger is not None and not isinstance(trigger, dict):
+                return {"ok": False, "error": "trigger 必须是对象"}
+            if trigger and trigger.get("field") is not None \
+                    and not isinstance(trigger["field"], dict):
+                return {"ok": False, "error": "trigger.field 必须是对象"}
+            if trigger and trigger.get("field") and not self.decoder:
+                return {"ok": False,
+                        "error": "按字段触发需要会话已选定解码器"
+                                 "（elab_serial_monitor action=decoder）"}
+            # 触发条件**在布防时校验**，不要留到匹配时静默 return：
+            # pattern 拼错 / 字段名不存在 → 录制永远不命中，用户只会以为"设备没毛病"。
+            warnings: list[str] = []
+            if trigger:
+                pat = trigger.get("pattern")
+                if pat:
+                    try:
+                        needle = bytes.fromhex(
+                            "".join(str(pat).split()).replace("0x", "").replace("0X", ""))
+                    except ValueError:
+                        return {"ok": False, "error": f"trigger.pattern 不是合法 HEX：{pat!r}"}
+                    if not needle:
+                        return {"ok": False, "error": "trigger.pattern 为空"}
+                cond = trigger.get("field")
+                if isinstance(cond, dict):
+                    name = str(cond.get("name") or "")
+                    if not name:
+                        return {"ok": False, "error": "trigger.field 需要 name"}
+                    if "value" not in cond:
+                        return {"ok": False, "error": "trigger.field 需要 value"}
+                    op = str(cond.get("op") or "eq")
+                    if op not in ("eq", "ne", "gt", "ge", "lt", "le"):
+                        return {"ok": False,
+                                "error": f"trigger.field.op 只支持 eq/ne/gt/ge/lt/le：{op!r}"}
+                    known = self._decoder_field_names()
+                    if known and name not in known:
+                        warnings.append(
+                            f"当前解码器的字段里没有 {name!r}"
+                            f"（现有 {sorted(known)[:6]}），这条触发不会命中")
+                idx = trigger.get("frame_index")
+                if idx is not None:
+                    try:
+                        if int(idx) < 1:
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        return {"ok": False,
+                                "error": "trigger.frame_index 必须是 ≥1 的整数"}
+            try:
+                pre_bytes = max(0, min(int(pre_bytes or 0), max_bytes))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "pre_bytes 必须是整数"}
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = out_dir / f"serial-capture-e{self.epoch}-{ts}.jsonl"
@@ -674,9 +924,17 @@ class _Session:
                         "path": str(path)}
             self.cap = {"active": True, "path": str(path), "fh": fh,
                         "bytes": 0, "chunks": 0, "max_bytes": int(max_bytes),
-                        "truncated": False, "error": None, "epoch": self.epoch}
+                        "truncated": False, "error": None, "epoch": self.epoch,
+                        "trigger": dict(trigger) if trigger else None,
+                        "pre_bytes": pre_bytes, "pre": deque(),
+                        "triggered": not bool(trigger), "frame_seen": 0,
+                        "triggered_by": "", "triggered_at": 0}
             return {"ok": True, "path": str(path), "epoch": self.epoch,
-                    "max_bytes": int(max_bytes)}
+                    "max_bytes": int(max_bytes),
+                    "trigger": dict(trigger) if trigger else None,
+                    "pre_bytes": pre_bytes,
+                    "armed": bool(trigger),
+                    "warnings": warnings}
 
     def stop_capture(self) -> dict:
         """停止录制并返回统计。没在录也返回 ok（幂等）。"""
@@ -687,7 +945,62 @@ class _Session:
             self._cap_close(cap)
             return {"ok": True, "path": cap["path"], "bytes": cap["bytes"],
                     "chunks": cap["chunks"], "truncated": cap["truncated"],
-                    "error": cap["error"]}
+                    "error": cap["error"],
+                    "armed": bool(cap.get("trigger")),
+                    "triggered": bool(cap.get("triggered_by")),
+                    "triggered_by": cap.get("triggered_by") or "",
+                    "pre_bytes": cap.get("pre_bytes") or 0,
+                    "note": ("已布防但未命中触发条件 —— 文件里可能只有标记"
+                             if cap.get("trigger") and not cap.get("triggered_by")
+                             else "")}
+
+    # ── 帧级健康度（P3.1）──────────────────────────────────────
+    def frame_stats(self, window_s: float = 10.0) -> dict:
+        """最近窗口内的帧率、到达间隔、错误分类、每 variant 计数。"""
+        with self.dlock:
+            # ``window_s=0`` 是"给我最短窗口"，不是"没给" —— 别用 ``or`` 兜底
+            try:
+                win = float(10.0 if window_s is None else window_s)
+            except (TypeError, ValueError):
+                win = 10.0
+            window_s = max(1.0, min(60.0, win))
+            now_us = int(time.time() * 1_000_000)
+            cutoff = now_us - int(window_s * 1_000_000)
+            stamps = [t for t in self.frame_events if t >= cutoff]
+            frames = len(stamps)
+            elapsed = min(window_s, max(0.05, (now_us - self.started_us) / 1e6))
+            gaps = sorted((b - a) / 1000.0 for a, b in zip(stamps, stamps[1:]))
+            p95 = gaps[int(0.95 * (len(gaps) - 1))] if gaps else 0.0
+            variants: dict = {}
+            for t, label in self.variant_events:
+                if t >= cutoff:
+                    variants[label] = variants.get(label, 0) + 1
+            total = self.dec_total
+            bad = sum(self.dec_reasons.values())
+            return {
+                "window_s": window_s,
+                "decoder": self.decoder,
+                "profile": (self.frame_profile or {}).get("id", ""),
+                "frames": frames,
+                "fps": round(frames / elapsed, 2),
+                "interval_ms": {"mean": round(sum(gaps) / len(gaps), 2) if gaps else 0.0,
+                                "p95": round(p95, 2),
+                                "max": round(gaps[-1], 2) if gaps else 0.0,
+                                "min": round(gaps[0], 2) if gaps else 0.0},
+                "variants": variants,
+                "variant_totals": dict(self.variant_totals),
+                "reasons": dict(self.dec_reasons),
+                "checksum_fail": self.dec_ck_fail,
+                "unknown_id": self.dec_unknown_id,
+                "error_rate": round(bad / max(1, total + bad), 4),
+                "frames_total": total,
+                "skipped_total": self.dec_skipped,
+                "pending_bytes": len(self.dec_pending),
+                "idle_gap_ms": self._idle_gap_ms(),
+                "buffer": {"frames": round(len(self.dec_frames) / MAX_DEC_FRAMES, 3)},
+                "covered_frames": self.dec_covered,
+                "rate_bps": self._compute_stats(now_us)["rx_bps"],
+            }
 
     # ── 对外操作 ────────────────────────────────────────────────
     def write(self, data: bytes) -> int:
@@ -807,7 +1120,11 @@ def _snapshot(s: _Session | None) -> dict:
                     "active": s.cap["active"], "path": s.cap["path"],
                     "bytes": s.cap["bytes"], "chunks": s.cap["chunks"],
                     "truncated": s.cap["truncated"],
-                    "error": s.cap["error"], "max_bytes": s.cap["max_bytes"]}),
+                    "error": s.cap["error"], "max_bytes": s.cap["max_bytes"],
+                    "armed": bool(s.cap.get("trigger")),
+                    "triggered": bool(s.cap.get("triggered_by")),
+                    "triggered_by": s.cap.get("triggered_by") or "",
+                    "pre_bytes": s.cap.get("pre_bytes") or 0}),
                 # 会话级解码投影：agent 与人读的是同一份（'' = 未启用）
                 "decode": s._decode_view_locked()}
 
@@ -1145,17 +1462,33 @@ def set_paused(paused: bool) -> dict:
 
 
 def capture_start(cfg: Config, *, project: str = "",
-                  max_bytes: int = 0) -> dict:
+                  max_bytes: int = 0, trigger: dict | None = None,
+                  pre_bytes: int = 0) -> dict:
     """开始显式录制（K5）。文件落在 ``.work/.cockpit/``，**有界**、只存字节。
 
     与 console 留档的区别（C28）：capture 是"证据"（完整、有界、可回放），
     console 是"我敲过什么"（会滚动）。
+
+    P3.2 起可以**布防**：给 ``trigger`` 就只在命中时落盘（含预录），
+    这样"等到故障发生再录"不用人盯着屏幕。
     """
     s = _SESS
     if s is None:
         return {"ok": False, "error": "没有进行中的监视（先 open 再录制）"}
     cap_dir: Path = Path(cfg.root) / ".work" / ".cockpit"
-    return s.start_capture(cap_dir, max_bytes=max_bytes or CAP_MAX_BYTES)
+    return s.start_capture(cap_dir, max_bytes=max_bytes or CAP_MAX_BYTES,
+                           trigger=trigger, pre_bytes=pre_bytes)
+
+
+def frame_stats(window_s: float = 10.0) -> dict:
+    """帧级健康度（P3.1）。没有会话时返回空表而不是报错（面板要能常态渲染）。"""
+    s = _SESS
+    if s is None:
+        return {"active": False, "window_s": window_s, "frames": 0, "fps": 0.0,
+                "decoder": "", "reasons": {}, "variants": {}}
+    out = s.frame_stats(window_s)
+    out["active"] = s.state in ("live", "reconnecting", "suspended")
+    return out
 
 
 def capture_stop() -> dict:

@@ -14,12 +14,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from ._winproc import proc_kwargs
-from .config import ElabError, to_fwd
+from .config import to_fwd
 from .ota_layout import write_gen_file
 from .plan import Plan, plan_for
 from .version import alloc_build

@@ -22,18 +22,36 @@ from pathlib import Path
 
 from . import flash as flash_mod
 from . import debugdata as dd
+from . import debugsource as dsrc
 from . import debugstore as dstore
 from . import svd as svd_mod
 from . import rtos as rtos_mod
-from ._winproc import proc_kwargs
+from ._winproc import spawn
 from .config import to_fwd
 from .gdbmi import MiError, MiSession
 from .plan import Plan
 
 GDB_LISTEN_RE = re.compile(r"Listening on port (\d+) for gdb connections")
 
-#: 合法的寄存器名（写寄存器只允许这些；值必须是 32 位字面量）
-_REG_WRITE_RE = re.compile(r"^(r(?:[0-9]|1[0-2])|sp|lr|pc)$")
+#: 合法的寄存器名（写寄存器只允许这些；pc/lr/xpsr 只读，与 UI 对齐 —— D8）
+_REG_WRITE_RE = re.compile(r"^(r(?:[0-9]|1[0-2])|sp|s(?:[12]?[0-9]|3[01]))$")
+#: 只读寄存器（UI/后端都拒绝，需要跳转时用 run_to_line）
+_REG_READONLY = ("pc", "lr", "xpsr", "r13", "r14", "r15")
+#: FPU 寄存器只读原因（P3 不开放 64/128 位写）
+_REG_WIDE_RE = re.compile(r"^[dq](?:[0-9]|1[0-5])$")
+
+
+def register_width(name: str) -> int:
+    """``s*`` / ``r*`` / ``sp`` = 32；``d*`` = 64；``q*`` = 128（后者暂只读）。"""
+    n = str(name or "").lower()
+    if _REG_WIDE_RE.match(n):
+        return 64 if n.startswith("d") else 128
+    return 32
+
+
+def register_writable(name: str) -> bool:
+    n = str(name or "").lower()
+    return bool(_REG_WRITE_RE.match(n)) and n not in _REG_READONLY
 
 
 class DebugError(RuntimeError):
@@ -195,8 +213,14 @@ class DebugSession:
         self._watch_seq = 0
         # FreeRTOS 内省可用性（P3）：open 时探测一次，快照 features 据此渲染页签
         self._rtos_available: bool | None = None
+        # 源码页签：basename 索引只在缺 fullname 时才建，一次会话建一次
+        self._src_index: dict[str, list[str]] | None = None
 
     # ── 事件 ────────────────────────────────────────────────────
+    def bind_emit(self, cb) -> None:
+        """重绑事件出口（多会话：DebugManager 按 session_id 扇出，见 §6.2）。"""
+        self._emit_cb = cb or (lambda topic, data: None)
+
     def emit(self, topic: str, data: dict) -> None:
         try:
             self._emit_cb(topic, data)
@@ -266,10 +290,12 @@ class DebugSession:
         argv = flash_mod._openocd_argv(self.plan, "", pre_commands=pre)
         env = self.plan.host.build_env()
         try:
-            self._openocd = subprocess.Popen(
+            # spawn = Popen + 进「句柄关闭即终止」作业：内核被强杀（TerminateProcess /
+            # 关窗口）时 openocd 会被系统带走，不再留孤儿占着 CMSIS-DAP（§7.5）。
+            self._openocd = spawn(
                 argv, cwd=str(self.plan.cfg.root), env=env,
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1, **proc_kwargs(),
+                bufsize=1,
             )
         except OSError as exc:
             raise DebugError("debug-openocd-dead", f"无法启动 openocd：{exc}")
@@ -399,6 +425,7 @@ class DebugSession:
         frame = frames[0] if frames else {}
         stop = {"reason": "reset", "thread": "", "frame": {
             "func": frame.get("func", ""), "file": frame.get("file", ""),
+            "fullname": self._frame_fullname(frame),
             "line": frame.get("line"), "addr": frame.get("addr", ""),
         }, "pc": frame.get("addr", ""), "bkptno": ""}
         self._note_stop(stop, emit_stop=False)
@@ -422,10 +449,28 @@ class DebugSession:
             return
         frame = frames[0]
         self.stop["frame"] = {"func": frame.get("func", ""), "file": frame.get("file", ""),
+                             "fullname": self._frame_fullname(frame),
                              "line": frame.get("line"), "addr": frame.get("addr", "")}
         if not self.stop.get("pc"):
             self.stop["pc"] = frame.get("addr", "")
         self.emit("debug/stop", self.stop)
+
+    def _frame_fullname(self, frame: dict) -> str:
+        """帧的绝对源码路径：优先 MI 的 ``fullname``，缺失时按 basename 唯一匹配。
+
+        多解**不猜**（返回空串）——猜错文件会让 gutter 断点打到别的文件里。
+        """
+        fn = str(frame.get("fullname") or "")
+        if fn:
+            return fn
+        name = str(frame.get("file") or "")
+        if not name:
+            return ""
+        if not self.plan.source_dir:
+            return ""
+        if self._src_index is None:
+            self._src_index = dsrc.basename_index(self.plan.source_dir)
+        return dsrc.resolve_hint(self.plan.source_dir, name, self._src_index)
 
     def _top_frames(self) -> list[dict]:
         if self._gdb is None:
@@ -509,7 +554,8 @@ class DebugSession:
             return self.stop_seq > after_seq
 
     # ── 控制 ────────────────────────────────────────────────────
-    def control(self, action: str, *, addr: str = "", confirm: bool = False) -> dict:
+    def control(self, action: str, *, addr: str = "", confirm: bool = False,
+                file: str = "", line: int | str = 0) -> dict:
         with self._op_lock:
             if self.state in ("closed", "error"):
                 raise DebugError("debug-no-session", "会话已结束",
@@ -549,6 +595,21 @@ class DebugSession:
                 seq = self.stop_seq
                 tmp = self._gdb.command(f"-break-insert -t *{addr}", timeout=8.0)
                 self._state("running", "run-to")
+                self._send_continue()
+                self.wait_stop(seq, 15.0)
+                gdb_id = str(((tmp.get("results") or {}).get("bkpt") or {}).get("number") or "")
+                if gdb_id:
+                    try:
+                        self._gdb.command(f"-break-delete {gdb_id}", timeout=5.0)
+                    except MiError:
+                        pass
+                return {"state": self.state, "stop": self.stop}
+            if action == "run_to_line":
+                # 与 run_to 同构，只是定位方式换成 file:line（A4）
+                quoted = self._source_quoted(file, line)
+                seq = self.stop_seq
+                tmp = self._gdb.command(f"-break-insert -t {quoted}", timeout=8.0)
+                self._state("running", "run-to-line")
                 self._send_continue()
                 self.wait_stop(seq, 15.0)
                 gdb_id = str(((tmp.get("results") or {}).get("bkpt") or {}).get("number") or "")
@@ -639,7 +700,9 @@ class DebugSession:
                 self._reg_names = [str(x) for x in (names_rec.get("register-names") or [])]
             values = self._gdb.command("-data-list-register-values x",
                                        timeout=5.0).get("results") or {}
-            groups = dd.registers(names_rec, values, mode="hex")
+            groups = dd.registers(names_rec, values, mode="hex",
+                                  editable_fn=register_writable,
+                                  width_fn=register_width)
             if group and group != "all":
                 groups = [g for g in groups if g.get("name") == group]
             return {"ok": True, "stop_seq": self.stop_seq, "groups": groups,
@@ -753,8 +816,12 @@ class DebugSession:
     def _insert_stored(self, entry: dict) -> None:
         assert self._gdb is not None
         kind = str(entry.get("kind") or "func")
-        loc = entry["location"] if kind == "func" else (
-            f"*{entry['location']}" if kind == "addr" else str(entry["location"]))
+        try:
+            loc = self._bp_spec(kind, str(entry["location"]))
+        except (DebugError, KeyError) as exc:
+            self.emit("debug/output", {"stream": "log",
+                                       "text": f"断点恢复跳过：{entry.get('location','')}（{exc}）"})
+            return
         cmd = "-break-insert -h" if entry.get("hardware") else "-break-insert"
         try:
             rec = self._gdb.command(f"{cmd} {loc}", timeout=8.0)
@@ -903,6 +970,20 @@ class DebugSession:
             self._breakpoints = rows
             return rows
 
+    def _bp_spec(self, kind: str, location: str) -> str:
+        """断点 kind + location → 喂给 ``-break-insert`` 的定位串。
+
+        ``source`` 会把 ``<file>:<line>`` 绝对化并**按需整体加引号**：Windows 路径含空格时
+        ``-break-insert C:/a b/main.c:12`` 会被 MI 拆成两个参数（D1 spike 结论）。
+        """
+        k = str(kind or "func")
+        if k == "addr":
+            return f"*{location}"
+        if k == "source":
+            head, _, tail = str(location or "").rpartition(":")
+            return self._source_quoted(head, tail)
+        return location
+
     def breakpoint_add(self, *, kind: str = "func", location: str = "",
                        condition: str = "", hardware: bool = False,
                        temporary: bool = False, rev: int | None = None) -> dict:
@@ -911,7 +992,11 @@ class DebugSession:
             self._check_rev(rev)
             if not location:
                 raise DebugError("debug-bad-request", "断点需要 location（函数名或地址）")
-            loc = location if kind == "func" else (f"*{location}" if kind == "addr" else location)
+            loc = self._bp_spec(kind, location)
+            stored_loc = location
+            if kind == "source":
+                head, _, tail = str(location).rpartition(":")
+                stored_loc = self._source_rel(head, tail)
             cmd = "-break-insert"
             if hardware:
                 cmd += " -h"
@@ -933,7 +1018,7 @@ class DebugSession:
                     raise DebugError("debug-bad-request", f"条件断点失败：{exc}")
             if not temporary:
                 self._bp_entries[stable] = {
-                    "id": stable, "kind": kind, "location": location,
+                    "id": stable, "kind": kind, "location": stored_loc,
                     "condition": condition, "enabled": True, "hardware": hardware,
                 }
                 self._persist()
@@ -999,6 +1084,52 @@ class DebugSession:
         if bp_id.startswith("gdb-"):
             return bp_id[4:]
         raise DebugError("debug-bad-request", f"未知断点 id：{bp_id}")
+
+    # ── 源码（P3-A）────────────────────────────────────────────
+    def _source_quoted(self, file: str, line: int | str) -> str:
+        """``file``+``line`` → gdb 可用的 ``-break-insert`` 参数（已按需加引号）。"""
+        try:
+            return dsrc.breakpoint_spec(self.plan.source_dir, file, int(line or 0))["quoted"]
+        except dsrc.SourceError as exc:
+            raise DebugError("debug-bad-request", str(exc),
+                             "file 必须在工程源码根内；行号 ≥ 1")
+
+    def _source_rel(self, file: str, line: int | str) -> str:
+        """持久化用的 ``<相对路径>:<行>``（POSIX 分隔符，换机可复用）。"""
+        try:
+            spec = dsrc.breakpoint_spec(self.plan.source_dir, file, int(line or 0))
+        except dsrc.SourceError as exc:
+            raise DebugError("debug-bad-request", str(exc))
+        return f"{spec['rel']}:{spec['line']}"
+
+    def source(self, *, file: str = "", start: int = 1, count: int = 120) -> dict:
+        """源码行读取（路径受限，单次 ≤400 行 / 512 KB）。
+
+        ``file`` 省略时用当前停止帧（``stop.frame.fullname``）兜底，方便 UI「刷新本页」。
+        """
+        with self._op_lock:
+            target = str(file or "").strip()
+            if not target:
+                fr = (self.stop or {}).get("frame") or {}
+                target = str(fr.get("fullname") or "")
+                if not target:
+                    raise DebugError("debug-source-unavailable",
+                                     "当前停止点没有源码信息",
+                                     "ELF 需带 -g 调试信息；或在源码页签手动选择文件")
+            try:
+                out = dsrc.read_lines(self.plan.source_dir, target,
+                                      start=start, count=count)
+            except dsrc.SourceError as exc:
+                raise DebugError("debug-bad-request", str(exc),
+                                 "路径必须是工程源码根内的文件")
+            except dsrc.SourceUnavailable as exc:
+                raise DebugError("debug-source-unavailable", str(exc),
+                                 "ELF 无调试信息或源码已移动（改 -g / 重新构建）")
+            fr = (self.stop or {}).get("frame") or {}
+            out["stop_seq"] = self.stop_seq
+            out["stop_line"] = fr.get("line")
+            out["stop_file"] = fr.get("fullname") or fr.get("file") or ""
+            return out
 
     # ── 内存 / 反汇编 / 求值 / 写 ─────────────────────────────────
     def memory(self, *, addr: str, count: int = 256) -> dict:
@@ -1125,22 +1256,92 @@ class DebugSession:
         with self._op_lock:
             self._require_stopped()
             assert self._gdb is not None
-            if not _REG_WRITE_RE.match(name):
-                raise DebugError("debug-bad-request", f"寄存器名不在白名单：{name!r}")
-            word = str(value).strip()
-            if word.lower().startswith("0x"):
-                word = word[2:]
-            if not word or len(word) > 8 or any(c not in "0123456789abcdefABCDEF" for c in word):
-                raise DebugError("debug-bad-request", "寄存器值必须是 32 位十六进制")
+            word = self._reg_word(name, value)
             try:
-                self._gdb.command(
-                    f'-interpreter-exec console "set $ {name} = 0x{word}"'.replace("$ ", "$"),
-                    timeout=5.0)
+                self._gdb.command(f'-interpreter-exec console "set ${name} = 0x{word}"',
+                                  timeout=5.0)
             except MiError as exc:
                 raise DebugError("debug-write-denied", f"写寄存器失败：{exc}")
-            groups = self.registers(group="core")["groups"]
-            after = next((r for g in groups for r in g["regs"] if r["name"] == name), {})
+            after = self._reg_value(name)
             return {"ok": True, "register": name, "after": after}
+
+    @staticmethod
+    def _reg_word(name: str, value: object) -> str:
+        """校验寄存器名 + 值，返回纯 HEX 串（含宽度校验）。"""
+        n = str(name or "").strip().lstrip("$")
+        if n.lower() in _REG_READONLY:
+            raise DebugError("debug-write-denied", f"{n} 是只读寄存器（pc/lr/xpsr）",
+                             "要改 pc 位置请用 run_to_line / run_to")
+        if not register_writable(n):
+            if _REG_WIDE_RE.match(n.lower()):
+                raise DebugError("debug-write-denied", f"{n} 是 64/128 位寄存器，P3 只读",
+                                 "s0–s31 已开放；d/q 待 P3b")
+            raise DebugError("debug-bad-request", f"寄存器名不在白名单：{name!r}")
+        word = str(value).strip()
+        if word.lower().startswith("0x"):
+            word = word[2:]
+        width = register_width(n)
+        max_digits = width // 4
+        if (not word or len(word) > max_digits
+                or any(c not in "0123456789abcdefABCDEF" for c in word)):
+            raise DebugError("debug-bad-request",
+                             f"{n} 的值必须是 1–{max_digits} 位十六进制（{width} 位宽）")
+        return word
+
+    def _reg_value(self, name: str) -> dict:
+        """读单个寄存器当前值（复用整表读，避免两套解析）。"""
+        groups = self.registers(group="all")["groups"]
+        return next((r for g in groups for r in g["regs"] if r["name"] == name), {})
+
+    def write_registers(self, *, items: list[dict]) -> dict:
+        """按组批量写（§7.2）：**先整批校验**，任何一项不合法则一条都不写。
+
+        无事务回滚：中途 gdb 失败时把已应用的与失败项都返回，UI 明说不假装原子。
+        """
+        with self._op_lock:
+            self._require_stopped()
+            assert self._gdb is not None
+            if not isinstance(items, list) or not items:
+                raise DebugError("debug-bad-request", "items 不能为空")
+            if len(items) > 16:
+                raise DebugError("debug-limit", "单次最多写 16 个寄存器",
+                                 "分批提交")
+            prepared: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for raw in items:
+                if not isinstance(raw, dict):
+                    raise DebugError("debug-bad-request", "items 每项必须是 {name,value}")
+                name = str(raw.get("name") or "").strip().lstrip("$")
+                if name in seen:
+                    raise DebugError("debug-bad-request", f"重复的寄存器：{name}")
+                seen.add(name)
+                prepared.append((name, self._reg_word(name, raw.get("value"))))
+            before_map = {r["name"]: r.get("hex", "") for g in self.registers(group="all")["groups"]
+                          for r in g["regs"]}
+            applied: list[dict] = []
+            failed: dict | None = None
+            for name, word in prepared:
+                try:
+                    self._gdb.command(
+                        f'-interpreter-exec console "set ${name} = 0x{word}"', timeout=5.0)
+                except MiError as exc:
+                    failed = {"name": name, "code": "debug-write-denied", "message": str(exc)}
+                    break
+                applied.append({"name": name, "before": before_map.get(name, ""),
+                                "after": f"0x{int(word, 16):08x}" if len(word) <= 8 else f"0x{word.lower()}"})
+            actual = {r["name"]: r.get("hex", "") for g in self.registers(group="all")["groups"]
+                      for r in g["regs"]}
+            for row in applied:
+                row["after"] = actual.get(row["name"], row["after"])
+            out = {"ok": failed is None, "applied": applied,
+                   "stop_seq": self.stop_seq}
+            if failed:
+                out["failed"] = failed
+            self.emit("debug/output", {
+                "stream": "log",
+                "text": "registers <- " + ", ".join(f"{a['name']}={a['after']}" for a in applied)
+                        + (f"（失败：{failed['name']}）" if failed else "")})
+            return out
 
     # ── 关闭 ────────────────────────────────────────────────────
     def snapshot(self) -> dict:
@@ -1172,7 +1373,7 @@ class DebugSession:
     def _features(self) -> list[str]:
         """面板渲染白名单（§6.1）：没有的能力**不得**列出，否则页签会开出空屏。"""
         feats = ["session", "control", "stack", "variables",
-                 "registers", "breakpoints", "memory", "disasm", "watch"]
+                 "registers", "breakpoints", "memory", "disasm", "watch", "source"]
         if self.profile.get("svd"):
             feats.append("svd")
         # RTOS 能力**乐观**声明：只有端点真正报不可用后才置 false 并隐藏页签

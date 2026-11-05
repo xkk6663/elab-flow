@@ -20,7 +20,6 @@ import base64
 import mimetypes
 import os
 import queue
-import shutil
 import signal
 import subprocess
 import sys
@@ -42,12 +41,14 @@ from elab import flash as flash_mod                      # noqa: E402
 from elab import debugsession as dbgsess_mod           # noqa: E402
 from elab.plan import plan_for                          # noqa: E402
 from elab import run as run_mod                      # noqa: E402
+from elab._winproc import adopt as adopt_proc        # noqa: E402
 from elab import provider as provider_mod            # noqa: E402
 from elab import serialcodec as serialcodec_mod      # noqa: E402
 from elab import serialconsole as serialconsole_mod  # noqa: E402
 from elab import serialcontrol as serialcontrol_mod  # noqa: E402
 from elab import logdecode as ld                      # noqa: E402
 from elab import serialframes as sf                   # noqa: E402
+from elab import framelearn as framelearn_mod         # noqa: E402
 from elab import serialmon as serialmon_mod          # noqa: E402
 from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialtransport as serialtransport_mod  # noqa: E402
@@ -67,7 +68,11 @@ DEFAULT_PORT = 8333
 SSE_HEARTBEAT_S = 15.0        # §17.3
 PROC_BATCH_S = 0.10           # §17.3：proc 行 100ms 合并，事件数降 1~2 个数量级
 QUEUE_MAX = 2000              # §17.3：每连接有界队列
-MAX_SSE_CONNS = 8
+#: ★ 16（盘点 #3，原 8）：App 1 条 run 流 + 串口 1 条 + 调试壳层/pane 各 1 条，
+#:   两个会话双列时调试就吃 3 条 —— 3 个标签页就能撞满 8。
+#:   503 对 EventSource 是"直接关闭"，前端只会看到连接失败，所以满员的代价比
+#:   想象的大：静默停更。名额放宽 + 前端按需建流（无会话不建壳层）双管齐下。
+MAX_SSE_CONNS = 16
 DIST_DIR = _HERE / "web" / "dist"
 
 # ★ 内核自描述（§16 分层解耦）：业务词汇的唯一事实源。
@@ -110,6 +115,11 @@ SERIAL_META = {
                "max_variants": sf.MAX_VARIANTS,
                "types": list(sf.TYPES), "endians": list(sf.ENDIANS),
                "checksums": list(sf.CHECKS),
+               "crc_presets": list(serialcodec_mod.CRC_PRESETS),
+               "cover_anchors": list(serialcodec_mod.COVER_ANCHORS),
+               "encodings": list(sf.ENCODINGS),
+               "escape_applies": list(sf.ESCAPE_APPLIES),
+               "max_array": sf.MAX_ARRAY,
                "bit_orders": list(sf.BIT_ORDERS),
                "length_field_types": list(sf.LENGTH_FIELD_TYPES),
                # 声明式 schema：Agent/前端按此自行构造 profile，不猜字段
@@ -119,14 +129,22 @@ SERIAL_META = {
                        "label": "string",
                        "kind": "binary",
                        "frame": "frame（见下）",
-                       "checksum": "{kind: none|sum8|xor8|crc16modbus, at: tail|head}",
+                       "checksum": ("{kind: none|sum8|xor8|crc8|crc16|crc32|"
+                                    "crc16modbus, at: tail|head, "
+                                    "preset?, poly?, init?, xorout?, refin?, "
+                                    "refout?, size?, endian?, offset?, "
+                                    "cover?: {from,to}}"),
+                       "escape": "{escape_byte, xor, targets[], applies}（可选）",
                        "fields": "[field]（可选，variant 未命中时的兜底）",
                        "variants": "[variant]（可选，最多 max_variants）",
+                       "allow_overlap": "bool=false（字段区间重叠必须显式允许）",
                    },
                    "frame": {
-                       "head_hex": "hex（可选）",
+                       "head_hex": "hex（可选；与 heads 互斥）",
+                       "heads": "[hex]（可选，1..4 个帧头，最长匹配优先）",
                        "tail_hex": "hex（可选）",
                        "length": "int|null（固定帧长，与 length_field 互斥）",
+                       "idle_gap_ms": "int（可选，1..5000；按空闲间隔切帧）",
                        "max_bytes": "int（默认 256）",
                        "length_field": {
                            "offset": "int（从帧首字节算）",
@@ -144,16 +162,25 @@ SERIAL_META = {
                            "bit_order": "lsb0|msb0（可选）",
                        },
                    },
+                   "escape": {
+                       "escape_byte": "0x 字节",
+                       "xor": "0x 字节（转义后与原字节异或）",
+                       "targets": "[0x 字节]（需要转义的字节，含 escape_byte 自身）",
+                       "applies": "payload（默认，校验字节不转义）|body",
+                   },
                    "field": {
                        "name": "string（profile 内唯一）",
-                       "type": "u8|u16|u24|u32|i8|i16|i24|i32|f32|f64|ascii|bytes",
+                       "type": "u8|u16|u24|u32|i8|i16|i24|i32|f16|f32|f64|ascii|str|bytes",
                        "offset": "int",
                        "endian": "le|be",
-                       "length": "ascii/bytes 必填",
+                       "length": "ascii/str/bytes 必填",
+                       "encoding": "utf-8|gbk|ascii|latin-1（ascii/str）",
                        "scale": "number=1",
                        "bias": "number=0",
                        "unit": "string",
                        "enum": "{raw: label}（可选；有 enum 时不做波形通道）",
+                       "bits": "{bit: label}（可选，位标志；原始值仍保留）",
+                       "array": "{count: int, stride: int}（重复块，展开为 name[i]）",
                        "plot": "bool",
                        "bit_offset": "0..7（可选，需同时给 bit_length）",
                        "bit_length": "1..32（可选；只对整型）",
@@ -173,9 +200,19 @@ SERIAL_META = {
                              "save": "/api/serial/frames",
                              "preview": "/api/serial/frames/preview",
                              "encode": "/api/serial/frames/encode",
+                             "learn": "/api/serial/frames/learn",
+                             "verify": "/api/serial/frames/verify",
+                             "auto": "/api/serial/frames/auto",
+                             "codegen": "/api/serial/frames/codegen",
                              "templates": "/api/serial/frames/templates",
                              "template_import":
-                                 "/api/serial/frames/templates/import"}},
+                                 "/api/serial/frames/templates/import"},
+               "learn": {"min_head_hits": framelearn_mod.MIN_HEAD_HITS,
+                         "auto_min_score": framelearn_mod.AUTO_MIN_SCORE,
+                         "auto_margin": framelearn_mod.AUTO_MARGIN,
+                         "checksum_probes": list(framelearn_mod.LEARN_CHECKSUMS),
+                         "note": ("learn 只产草稿（不落盘）：保存仍走 save 的 "
+                                  "rev 乐观锁；草稿可直接喂 preview/verify")}},
     "features": ["hex", "search", "clear", "pause", "epoch", "lease",
                  "capture", "capture_export", "waveform",
                  # 通用发送面板（P1）：自动格式识别 + 服务端字节预览
@@ -201,6 +238,16 @@ SERIAL_META = {
                  # 帧协议增强（P0/P1）：位域 / 变长 / 多 ID / 反向组帧 / 模板
                  "frame_bitfields", "frame_length_field", "frame_variants",
                  "frame_encode", "frame_templates", "agent_frame_edit",
+                 # 帧协议补强（P2.2）：校验预设/覆盖范围、转义、多帧头、
+                 # 空闲分包、数组/字符串/f16/位标志、重叠校验、错误分类
+                 "frame_checksum_presets", "frame_escape", "frame_multi_head",
+                 "frame_idle_gap", "frame_arrays", "frame_strings",
+                 "frame_half_float", "frame_flag_bits", "frame_overlap_check",
+                 "frame_error_reasons",
+                 # Agent 生产力（P4）：抓包学习 / round-trip / 自动匹配 / C 头
+                 "frame_learn", "frame_verify", "frame_auto", "frame_codegen",
+                 # 观测（P3）：帧级健康度 + 触发式录制
+                 "frame_stats", "capture_trigger",
                  # 网络传输（M4）：TCP 客户端/服务端 + UDP，默认只绑回环
                  "net_transport", "udp", "allow_remote"],
     # 传输种类（M4，内核自描述）：面板按此渲染「连接方式」，不写死业务名词
@@ -254,6 +301,94 @@ SERIAL_META = {
     },
 }
 
+def _frame_profile_of(cfg, body: dict) -> dict:
+    """从请求体取 profile：优先**未保存草稿**，否则 project+id 装载。
+
+    Agent 的用法是"先学一个草稿 → preview/verify 验 → 再 save"，所以每个
+    帧协议端点都必须接受草稿，不然学习结果没法在落盘前验证。
+    """
+    draft = body.get("profile")
+    if isinstance(draft, dict):
+        try:
+            return sf.normalize_profile(draft)
+        except ValueError as exc:
+            raise ElabError(str(exc))
+    project = str(body.get("project") or "")
+    pid = str(body.get("id") or "")
+    if not project or not pid:
+        raise ElabError("需要 project+id，或 profile 草稿")
+    prof = sf.get(cfg, project, pid)
+    if prof is None:
+        raise ElabError(f"未找到帧协议 profile：{pid!r}")
+    return prof
+
+
+#: 录制文件读入上限：学/校验只用开头几万字节，几 MB 的文件纯属浪费内存。
+MAX_CAPTURE_FILE_BYTES = 16 * 1024 * 1024
+
+#: 请求体上限：正常配置/样本都远小于它；这条只挡"把几十 MB 字节塞进 body"的误用。
+MAX_BODY_BYTES = 8 * 1024 * 1024
+
+#: 拒收时最多读掉多少字节（读了才能把错误回给客户端，见 ``_drain_body``）。
+MAX_DRAIN_BYTES = 64 * 1024 * 1024
+
+
+def _capture_text(cfg: Config, raw) -> str:
+    """``capture`` 参数：既接受 JSONL **文本**，也接受录制文件**路径**。
+
+    agent 手里通常只有文件名（录制是它刚用 capture 端点起的），让它把几 KB
+    JSONL 塞进请求体不现实；而"按路径读文件"是个危险入口 —— 所以路径必须
+    落在本工程的 ``.work/.cockpit`` 里且是 ``.jsonl``，别处一律拒绝（源码、
+    配置、密钥都在别处）。
+    """
+    s = str(raw or "")
+    if not s.strip() or s.lstrip().startswith("{"):
+        return s                              # 已经是内容（或空）：原样交下去
+    p = Path(s)
+    if not p.is_absolute():
+        p = Path(cfg.root) / p
+    try:
+        p = p.resolve()
+    except OSError as exc:
+        raise ElabError(f"capture 路径无法解析：{s}（{exc}）")
+    cap_dir = (Path(cfg.root) / ".work" / ".cockpit").resolve()
+    if p.suffix.lower() != ".jsonl" or cap_dir not in p.parents:
+        raise ElabError(f"capture 只接受 {cap_dir} 下的 .jsonl 录制文件：{s}")
+    if not p.exists():
+        raise ElabError(f"录制文件不存在：{s}")
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        raise ElabError(f"读不到录制文件大小：{exc}")
+    if size > MAX_CAPTURE_FILE_BYTES:
+        raise ElabError(
+            f"录制文件 {size / 1048576:.1f} MB 太大（上限 "
+            f"{MAX_CAPTURE_FILE_BYTES // 1048576} MB）："
+            f"学习只需开头几万字节，请截一段再学，或重录一段更短的")
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ElabError(f"读取录制文件失败：{exc}")
+
+
+def _frame_bytes_of(body: dict, cfg: Config) -> bytes:
+    """请求体里的样本字节：b64 / hex / capture(JSONL 文本或录制路径) 三选一。"""
+    if body.get("capture"):
+        chunks, _ = framelearn_mod.parse_capture(_capture_text(cfg, body.get("capture")))
+        return b"".join(chunks)
+    if body.get("b64"):
+        try:
+            return base64.b64decode(str(body["b64"]))
+        except Exception as exc:                       # noqa: BLE001
+            raise ElabError(f"b64 不是合法 base64：{exc}")
+    if body.get("hex"):
+        try:
+            return bytes.fromhex("".join(str(body["hex"]).split()))
+        except ValueError as exc:
+            raise ElabError(f"hex 不是合法十六进制：{exc}")
+    return b""
+
+
 COCKPIT_VERSION = "3.1.0"
 
 
@@ -284,13 +419,14 @@ DEBUG_AUDIT_MAX = 500
 #: ★ 内核过旧（缺 ``meta.debug``）时插件隐藏调试入口 —— 不在工具层写兼容分支。
 DEBUG_META = {
     "available": True,
-    "max_sessions": 1,
+    "max_sessions": 2,
     "features": ["session", "control", "stack", "variables", "registers",
-                 "breakpoints", "memory", "disasm", "watch", "svd", "rtos"],
+                 "breakpoints", "memory", "disasm", "watch", "source",
+                 "svd", "rtos"],
     "actions": ["continue", "pause", "step_over", "step_in", "step_out",
-                "stepi", "reset", "restart", "run_to"],
+                "stepi", "reset", "restart", "run_to", "run_to_line"],
     "stop_at": ["main", "reset", "none"],
-    "breakpoint_kinds": ["func", "addr"],
+    "breakpoint_kinds": ["func", "addr", "source"],
     "registers_group": ["core", "fpu", "all"],
     "formats": ["natural", "hex"],
     "watch_formats": ["natural", "hex", "binary"],
@@ -300,13 +436,16 @@ DEBUG_META = {
               "max_s": DEBUG_LEASE_MAX_S},
     "limits": {"memory_read_max": 4096, "disasm_max": 128,
                "variables_depth": 8, "audit_records": DEBUG_AUDIT_MAX,
-               "watch_max": 32},
+               "watch_max": 32, "source_lines_max": 400,
+               "source_bytes_max": 512 * 1024, "register_batch_max": 16},
     "error_codes": ["debug-unavailable", "debug-busy", "debug-no-session",
                     "debug-elf-missing", "debug-gdb-missing", "debug-openocd-dead",
                     "debug-port-hijacked", "debug-timeout", "debug-target-running",
                     "debug-bad-request", "debug-write-denied", "debug-limit",
                     "debug-rev-conflict", "debug-svd-missing",
-                    "debug-rtos-unavailable", "debug-error"],
+                    "debug-rtos-unavailable", "debug-error",
+                    "debug-target-busy", "debug-session-limit",
+                    "debug-session-required", "debug-source-unavailable"],
     # 互斥语义（面板据此显示人话）
     "exclusive_with": ["run(flash/debug_verify/monitor)", "serial-monitor"],
     "on_close": {"resume": True, "method": "monitor reset run"},
@@ -315,7 +454,18 @@ DEBUG_META = {
 #: 调试页签的**项目级**收敛：全局 ``DEBUG_META.features`` 是内核能力上限，
 #: 实际显示按「项目（芯片）→ 会话（snapshot.features）」逐级收敛。
 _DEBUG_BASE_FEATURES = ["session", "control", "stack", "variables", "registers",
-                        "breakpoints", "memory", "disasm", "watch"]
+                        "breakpoints", "memory", "disasm", "watch", "source"]
+
+
+def _debug_meta(cfg: Config) -> dict:
+    """``capabilities.meta.debug`` —— 会话上限取 L0（``debug.max_sessions``）。"""
+    meta = dict(DEBUG_META)
+    try:
+        raw = int(((cfg.host or {}).get("debug") or {}).get("max_sessions", 2))
+    except (TypeError, ValueError):
+        raw = 2
+    meta["max_sessions"] = max(1, min(raw, 4))
+    return meta
 
 
 def _debug_features(chip: dict) -> list[str]:
@@ -556,6 +706,9 @@ class RunManager:
             kwargs["start_new_session"] = True
 
         proc = subprocess.Popen(argv, **kwargs)
+        # 进「句柄关闭即终止」作业：内核被强杀时，这条 run 进程树（含用户固件
+        # 程序，它会占串口）跟着一起走 —— 否则下次连串口会先遇到"端口被占用"。
+        adopt_proc(proc)
         ar = ActiveRun(run_id=run_id, project=project, steps=steps, actor=actor,
                        proc=proc, started_at=time.time(), on_finish=on_finish)
         with self._lock:
@@ -1049,7 +1202,7 @@ def capabilities(cfg: Config, mgr: RunManager) -> dict:
         "meta": {"steps": STEP_META, "plans": KERNEL_PLANS,
                  "channels": ["build", "flash", "debug", "serial"],
                  "serial": SERIAL_META,
-                 "debug": DEBUG_META,
+                 "debug": _debug_meta(cfg),
                  # 探针清单：面板据此渲染下拉（available = interface cfg 是否落地）
                  "probes": _probes_summary(cfg),
                  # R7 / P1-4：profile 决定右列工作区与启用工具（缺省 = 内置集合）
@@ -1214,6 +1367,11 @@ def _qs_int(qs: dict, key: str, default: int | None = 0) -> int | None:
         raise ElabError(f"{key} 必须是整数：{raw!r}")
 
 
+def _qs_dsess(qs: dict) -> str:
+    """调试会话 id（**不是**聊天 sessionId；命名冲突见 §3.4）。"""
+    return (qs.get("debug_session") or [""])[0]
+
+
 # ══════════════════════════════════════════════════════════════════
 #  调试会话管理（单会话 + 租约 + 互斥 + 审计）§7.7
 # ══════════════════════════════════════════════════════════════════
@@ -1256,13 +1414,14 @@ def _debug_audit(cfg: Config, rec: dict) -> None:
 
 
 class DebugManager:
-    """调试会话登记簿 + 事件扇出（``max_sessions=1``）。
+    """调试会话登记簿 + 事件扇出（多会话，``debug.max_sessions`` 钳制 1–4）。
 
-    与 :class:`RunManager` 同构的有界队列/单飞语义；差异：
-      - 只有**一个**会话；
+    语义（见执行计划_调试P3 §6）：
+      - **一个目标一条会话**：同工程第二条直接 ``409 debug-target-busy``；
       - 租约只对 ``owner=agent`` 生效（到期自动关闭并**恢复运行**）；
       - 关闭必须恢复目标运行（C36 延伸）；
-      - 与「会用到串口的闭环」「串口监视」互斥（N5）。
+      - 与「会用到串口的闭环」「串口监视」互斥（N5，**全局**，不因多会话放松）；
+      - ``debug_session`` 缺省时走**唯一**会话；多会话下缺省即 ``debug-session-required``。
     """
 
     def __init__(self, cfg: Config, runs: RunManager, *, log=print):
@@ -1270,64 +1429,111 @@ class DebugManager:
         self.runs = runs
         self.log = log
         self._lock = threading.Lock()
-        self._sess: dbgsess_mod.DebugSession | None = None
+        self._sessions: dict[str, dbgsess_mod.DebugSession] = {}
+        self._allow_write: dict[str, bool] = {}
         self._open_seq = 0
         self._seq = 0
-        self._allow_write = False
-        self._subs: set[queue.Queue] = set()
+        self._subs: dict[queue.Queue, str] = {}      # queue -> 过滤用 debug_session（""=全量）
         self._lease_thread = threading.Thread(target=self._lease_loop, daemon=True,
                                               name="elab-debug-lease")
         self._lease_thread.start()
 
     # ── 查询 ────────────────────────────────────────────────────
-    def get(self) -> dbgsess_mod.DebugSession | None:
+    @property
+    def max_sessions(self) -> int:
+        """``elab.host.yaml: debug.max_sessions``（缺省 2，钳制 1–4）。"""
+        try:
+            raw = int(((self.cfg.host or {}).get("debug") or {}).get("max_sessions", 2))
+        except (TypeError, ValueError):
+            raw = 2
+        return max(1, min(raw, 4))
+
+    def list(self) -> list[dbgsess_mod.DebugSession]:
         with self._lock:
-            return self._sess
+            return [s for s in self._sessions.values()
+                    if s.state not in ("closed", "error")]
 
-    def snapshot(self) -> dict:
-        sess = self.get()
-        if sess is None:
-            return {"session": None}
-        return {"session": sess.snapshot()}
+    def get(self, debug_session: str = "") -> dbgsess_mod.DebugSession | None:
+        """按 id 取会话；``debug_session`` 为空时返回**唯一**会话（多会话时 None）。"""
+        with self._lock:
+            if debug_session:
+                return self._sessions.get(debug_session)
+            alive = [s for s in self._sessions.values() if s.state not in ("closed", "error")]
+            return alive[0] if len(alive) == 1 else None
 
-    def require(self) -> dbgsess_mod.DebugSession:
-        sess = self.get()
-        if sess is None:
+    def snapshot(self, debug_session: str = "") -> dict:
+        """``{sessions:[摘要…], session: <默认会话快照|null>, session_id, max_sessions}``。
+
+        顶层 ``session`` 保持 P2 的形态（单会话旧前端零改动）。
+        """
+        alive = self.list()
+        rows = [s.snapshot() for s in alive]
+        cur = self.get(debug_session) if debug_session else (alive[0] if alive else None)
+        return {
+            "sessions": rows,
+            "session": cur.snapshot() if cur is not None else None,
+            "session_id": cur.session_id if cur is not None else "",
+            "max_sessions": self.max_sessions,
+            "allow_write": (self._allow_write.get(cur.session_id, False)
+                            if cur is not None else False),
+        }
+
+    def require(self, debug_session: str = "") -> dbgsess_mod.DebugSession:
+        alive = self.list()
+        if debug_session:
+            sess = self.get(debug_session)
+            if sess is None or sess.state in ("closed", "error"):
+                raise dbgsess_mod.DebugError(
+                    "debug-no-session", f"调试会话不存在或已结束：{debug_session}",
+                    "重新 elab_debug_open 或读取 GET /api/debug/session 的 sessions 列表")
+            return sess
+        if not alive:
             raise dbgsess_mod.DebugError("debug-no-session", "当前没有调试会话",
                                          "先 elab_debug_open / 面板点「开始调试」")
-        return sess
+        if len(alive) > 1:
+            raise dbgsess_mod.DebugError(
+                "debug-session-required",
+                f"当前有 {len(alive)} 个调试会话，必须显式指定 debug_session",
+                "从 GET /api/debug/session 的 sessions[].id 里选一个")
+        return alive[0]
 
     # ── 事件 ────────────────────────────────────────────────────
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, debug_session: str = "") -> queue.Queue:
+        """订阅调试事件；带 ``debug_session`` 时只收该会话的事件（D7）。"""
         q: queue.Queue = queue.Queue(maxsize=500)
         with self._lock:
-            self._subs.add(q)
+            self._subs[q] = str(debug_session or "")
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
-            self._subs.discard(q)
+            self._subs.pop(q, None)
 
-    def _emit(self, topic: str, data: dict) -> None:
-        sess = self.get()
+    def _emit_for(self, session_id: str, topic: str, data: dict) -> None:
         with self._lock:
             self._seq += 1
-            seq = self._seq
             envelope = {
                 "topic": topic,
-                "seq": seq,
+                "seq": self._seq,
                 "ts": time.time(),
-                "session": sess.session_id if sess else "",
+                "session": session_id,
                 "data": data,
             }
-            subs = list(self._subs)
-        for q in subs:
+            subs = list(self._subs.items())
+        for q, want in subs:
+            if want and want != session_id:
+                continue
             try:
                 if q.full():
                     q.get_nowait()                 # 丢最旧（与 RunManager 同款有界背压）
                 q.put_nowait(envelope)
             except (queue.Empty, queue.Full):
                 pass
+
+    def _emit(self, topic: str, data: dict) -> None:
+        """兼容 P2 的 manager 级 emit：绑定到当前唯一会话（多会话时留空）。"""
+        sess = self.get()
+        self._emit_for(sess.session_id if sess else "", topic, data)
 
     # ── 互斥 ────────────────────────────────────────────────────
     def _blocker(self) -> dict | None:
@@ -1353,11 +1559,20 @@ class DebugManager:
         if blocker:
             raise dbgsess_mod.DebugError(blocker["code"], blocker["message"], blocker["hint"])
         with self._lock:
-            cur = self._sess
-            if cur is not None and cur.state not in ("closed", "error"):
+            alive = [s for s in self._sessions.values()
+                     if s.state not in ("closed", "error")]
+            # 同一工程 = 同一目标：一个 SWD 目标只能被一个 GDB 附着（D3）
+            dup = next((s for s in alive if s.plan.name == project), None)
+            if dup is not None:
                 raise dbgsess_mod.DebugError(
-                    "debug-busy", f"已有调试会话（项目 {cur.plan.name}，owner={cur.owner}）",
-                    "先关闭现有会话（DELETE /api/debug/session）")
+                    "debug-target-busy",
+                    f"目标 {project} 已有调试会话（{dup.session_id}，owner={dup.owner}）",
+                    "同一块板/同一工程不能开第二会话；先关闭它，或选另一个工程")
+            if len(alive) >= self.max_sessions:
+                raise dbgsess_mod.DebugError(
+                    "debug-session-limit",
+                    f"已达会话上限（{self.max_sessions}，见 elab.host.yaml: debug.max_sessions）",
+                    "关闭一个会话后再开")
             self._open_seq += 1
             open_seq = self._open_seq
             lease = (0 if actor != "agent" else
@@ -1371,33 +1586,43 @@ class DebugManager:
             sess = dbgsess_mod.DebugSession(
                 plan, actor=actor, lease_s=lease, options=options or {},
                 open_seq=open_seq, emit=self._emit, log=self.log)
-            self._sess = sess
-            self._allow_write = bool(allow_write) and actor == "human"
-        _debug_audit(self.cfg, {"action": "open", "session": sess.session_id,
+            self._sessions[sess.session_id] = sess
+            self._allow_write[sess.session_id] = bool(allow_write) and actor == "human"
+        sid = sess.session_id
+        sess.bind_emit(lambda topic, data, _sid=sid: self._emit_for(_sid, topic, data))
+        _debug_audit(self.cfg, {"action": "open", "session": sid,
                                 "project": project, "actor": actor,
                                 "options": options or {}, "lease_s": lease})
         try:
             snap = sess.open()
         except dbgsess_mod.DebugError as exc:
             with self._lock:
-                if self._sess is sess:
-                    self._sess = None
+                self._sessions.pop(sid, None)
+                self._allow_write.pop(sid, None)
             sess.error = exc.as_dict()
-            _debug_audit(self.cfg, {"action": "open-failed", "session": sess.session_id,
+            _debug_audit(self.cfg, {"action": "open-failed", "session": sid,
                                     "project": project, "code": exc.code,
                                     "message": exc.message})
+            # 已有别的会话 + 探针类失败 → 明确告诉用户是**同一个探针**被占了，
+            # 而不是让 openocd 的随机报错糊在脸上（D3）
+            if self.list() and exc.code in ("debug-openocd-dead", "debug-timeout"):
+                raise dbgsess_mod.DebugError(
+                    "debug-port-hijacked",
+                    f"探针被占用：{exc.message}",
+                    "一个 CMSIS-DAP 探针同一时刻只能附着一颗芯片；换探针或先关另一会话")
             raise
-        self.log(f"[debug] 会话 {sess.session_id} 打开：{project} ({actor})")
-        return {"session": snap}
+        self.log(f"[debug] 会话 {sid} 打开：{project} ({actor})")
+        return {"session": snap, "session_id": sid, "sessions": self.snapshot()["sessions"]}
 
-    def close(self, *, reason: str = "user-closed", resume: bool = True,
-              actor: str = "human", force: bool = False) -> dict:
-        sess = self.get()
-        if sess is None:
+    def close(self, *, debug_session: str = "", reason: str = "user-closed",
+              resume: bool = True, actor: str = "human", force: bool = False) -> dict:
+        try:
+            sess = self.require(debug_session)
+        except dbgsess_mod.DebugError:
             return {"closed": False, "reason": "no-session"}
         with self._lock:
-            owner = sess.owner
-            self._sess = None
+            self._sessions.pop(sess.session_id, None)
+            self._allow_write.pop(sess.session_id, None)
         res = sess.close(resume=resume, reason=reason)
         self.log(f"[debug] 会话 {sess.session_id} 关闭：{reason}（resumed={res['resumed']}）")
         _debug_audit(self.cfg, {"action": "close", "session": sess.session_id,
@@ -1406,43 +1631,45 @@ class DebugManager:
 
     def drop(self, sess: dbgsess_mod.DebugSession) -> None:
         with self._lock:
-            if self._sess is sess:
-                self._sess = None
+            self._sessions.pop(sess.session_id, None)
+            self._allow_write.pop(sess.session_id, None)
 
-    # ── 写权限 ──────────────────────────────────────────────────
-    def require_write(self, *, confirm: bool) -> None:
-        if not self._allow_write:
+    # ── 写权限（按会话）──────────────────────────────────────────
+    def require_write(self, *, confirm: bool, debug_session: str = "") -> None:
+        sess = self.require(debug_session)
+        if not self._allow_write.get(sess.session_id, False):
             raise dbgsess_mod.DebugError(
                 "debug-write-denied", "会话未开启写权限",
                 "以人类身份重开会话并传 allow_write=true")
         if not confirm:
             raise dbgsess_mod.DebugError("debug-bad-request", "写操作需要 confirm=true")
 
-    def allow_write(self) -> bool:
-        return self._allow_write
+    def allow_write(self, debug_session: str = "") -> bool:
+        sess = self.get(debug_session)
+        return bool(self._allow_write.get(sess.session_id, False)) if sess else False
 
     # ── 租约回收 ────────────────────────────────────────────────
     def _lease_loop(self) -> None:
         while True:
             time.sleep(2.0)
-            sess = self.get()
-            if sess is None or sess.owner != "agent" or sess.lease_s <= 0:
-                continue
-            if sess.state in ("closed", "error"):
-                continue
-            idle = time.time() - sess.last_active
-            if idle < sess.lease_s:
-                continue
-            # 最后 30s 先发一条告警（面板显示"租约即将到期"）
-            if idle >= sess.lease_s - 30 and not getattr(sess, "_lease_warned", False):
-                sess._lease_warned = True
-                self._emit("debug/output", {"stream": "log",
-                                            "text": "租约将在 30s 后到期（agent 无活动）"})
-            if idle >= sess.lease_s:
-                try:
-                    self.close(reason="lease-expired", resume=True, actor="system")
-                except Exception as exc:             # noqa: BLE001
-                    self.log(f"[debug] 租约回收失败：{exc!r}")
+            for sess in self.list():
+                if sess.owner != "agent" or sess.lease_s <= 0:
+                    continue
+                idle = time.time() - sess.last_active
+                if idle < sess.lease_s:
+                    continue
+                # 最后 30s 先发一条告警（面板显示"租约即将到期"）
+                if idle >= sess.lease_s - 30 and not getattr(sess, "_lease_warned", False):
+                    sess._lease_warned = True
+                    self._emit_for(sess.session_id, "debug/output",
+                                   {"stream": "log",
+                                    "text": "租约将在 30s 后到期（agent 无活动）"})
+                if idle >= sess.lease_s:
+                    try:
+                        self.close(debug_session=sess.session_id, reason="lease-expired",
+                                   resume=True, actor="system")
+                    except Exception as exc:             # noqa: BLE001
+                        self.log(f"[debug] 租约回收失败：{exc!r}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1616,6 +1843,9 @@ class CockpitHandler(BaseHTTPRequestHandler):
         "debug-rtos-unavailable": 503, "debug-elf-missing": 409,
         "debug-gdb-missing": 503, "debug-openocd-dead": 500,
         "debug-port-hijacked": 409,
+        # P3 多会话 / 源码页（执行计划 §6.1 / §5.2）
+        "debug-target-busy": 409, "debug-session-limit": 409,
+        "debug-session-required": 409, "debug-source-unavailable": 404,
     }
 
     def _debug_err(self, exc: dbgsess_mod.DebugError):
@@ -1637,10 +1867,38 @@ class CockpitHandler(BaseHTTPRequestHandler):
             return
         self._err(500, f"{type(exc).__name__}: {exc}")
 
+    def _drain_body(self, n: int) -> None:
+        """读掉 n 字节并丢弃（最多 ``MAX_DRAIN_BYTES``）。
+
+        拒收大请求体时**必须先读掉**：客户端还在上传，服务端直接回错并关连接
+        会让对端收到 RST，看到的是 ``ConnectionAbortedError`` 而不是那条
+        "请求体太大"的说明 —— 用户永远不知道自己做错了什么。
+        超过丢弃上限就不读了（这种量级已经不该出现在客户端代码里），直接关连接。
+        """
+        if n > MAX_DRAIN_BYTES:
+            self.close_connection = True
+            return
+        left = n
+        try:
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            self.close_connection = True
+
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
             return {}
+        if n > MAX_BODY_BYTES:
+            self._drain_body(n)
+            self.close_connection = True
+            raise ElabError(
+                f"请求体 {n / 1048576:.1f} MB 超过上限 "
+                f"{MAX_BODY_BYTES // 1048576} MB：大样本请用 capture 指向录制文件，"
+                f"别把整段字节塞进请求体")
         raw = self.rfile.read(n)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -1673,32 +1931,48 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if path == "/api/runs":
                 return self._json({"runs": ev_mod.list_runs(self.mgr.runs_dir),
                                    "active": self.mgr.list_active()})
+            if path == "/api/runs/active":
+                # ★ 轻量端点：**不扫盘**，只读进程内登记簿（+ 首行回读 run/start）。
+                #   给「agent 在别的工程起跑了吗」这种 2s 轮询用。
+                #   历史 run 的全量扫描（含 proc 文件尺寸）留给 /api/runs，
+                #   那条只在切工程时调一次 —— 否则轮询开销随历史条数线性增长
+                #   （实测 800 条 2 s > 2 s 轮询周期，会自己把自己拖满）。
+                return self._json({"active": self.mgr.list_active()})
             if path == "/api/plan":
                 return self._json(_plan_preview(self.cfg, qs))
             if path == "/api/debug/session":
-                return self._json(self.dbg.snapshot())
+                return self._json(self.dbg.snapshot(_qs_dsess(qs)))
             if path == "/api/debug/events":
-                return self._sse_debug()
+                return self._sse_debug(_qs_dsess(qs))
             if path == "/api/debug/stack":
                 thread = _qs_int(qs, "thread", None)
-                return self._json(self.dbg.require().stack(thread=thread))
+                return self._json(self.dbg.require(_qs_dsess(qs)).stack(thread=thread))
             if path == "/api/debug/variables":
                 frame = _qs_int(qs, "frame", 0) or 0
                 scope = (qs.get("scope") or ["locals"])[0]
                 var = (qs.get("var") or [""])[0]
-                return self._json(self.dbg.require().variables(frame=frame, scope=scope,
-                                                               var=var))
+                return self._json(self.dbg.require(_qs_dsess(qs)).variables(
+                    frame=frame, scope=scope, var=var))
             if path == "/api/debug/registers":
                 group = (qs.get("group") or ["core"])[0]
                 fmt = (qs.get("format") or ["natural"])[0]
-                return self._json(self.dbg.require().registers(group=group, fmt=fmt))
+                return self._json(self.dbg.require(
+                    (qs.get("debug_session") or [""])[0]).registers(group=group, fmt=fmt))
+            if path == "/api/debug/source":
+                # 源码页签（P3-A）：路径受 plan.source_dir 沙箱约束
+                file = (qs.get("file") or [""])[0]
+                start = _qs_int(qs, "start", 1) or 1
+                count = _qs_int(qs, "count", 120) or 120
+                return self._json(self.dbg.require(
+                    (qs.get("debug_session") or [""])[0]).source(
+                        file=file, start=start, count=count))
             if path == "/api/debug/breakpoints":
-                sess = self.dbg.require()
+                sess = self.dbg.require(_qs_dsess(qs))
                 return self._json({"breakpoints": sess.breakpoints(),
                                    "rev": sess.store_rev(),
-                                   "allow_write": self.dbg.allow_write()})
+                                   "allow_write": self.dbg.allow_write(_qs_dsess(qs))})
             if path == "/api/debug/watch":
-                return self._json(self.dbg.require().watch())
+                return self._json(self.dbg.require(_qs_dsess(qs)).watch())
             if path == "/api/debug/audit":
                 limit = _qs_int(qs, "limit", 100) or 100
                 limit = max(1, min(limit, DEBUG_AUDIT_MAX))
@@ -1706,18 +1980,19 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if path == "/api/debug/peripherals":
                 p = (qs.get("path") or [""])[0]
                 read = (qs.get("read") or ["0"])[0] in ("1", "true", "yes")
-                return self._json(self.dbg.require().peripherals(path=p, read=read))
+                return self._json(self.dbg.require(_qs_dsess(qs)).peripherals(path=p, read=read))
             if path == "/api/debug/rtos":
-                return self._json(self.dbg.require().rtos())
+                return self._json(self.dbg.require(_qs_dsess(qs)).rtos())
             if path == "/api/debug/memory":
                 addr = (qs.get("addr") or [""])[0]
                 count = _qs_int(qs, "count", 256) or 256
-                return self._json(self.dbg.require().memory(addr=addr, count=count))
+                return self._json(self.dbg.require(_qs_dsess(qs)).memory(addr=addr, count=count))
             if path == "/api/debug/disasm":
                 addr = (qs.get("addr") or [""])[0]
                 count = _qs_int(qs, "count", 32) or 32
                 mode = _qs_int(qs, "mode", 2) or 2
-                return self._json(self.dbg.require().disasm(addr=addr, count=count, mode=mode))
+                return self._json(self.dbg.require(_qs_dsess(qs)).disasm(
+                    addr=addr, count=count, mode=mode))
             if path == "/api/events":
                 return self._sse(qs)
             if path == "/api/run-events":
@@ -1801,6 +2076,14 @@ class CockpitHandler(BaseHTTPRequestHandler):
             if path == "/api/serial/frames/templates":
                 # 只读模板库（P1）：协议数据，不是可执行代码。
                 return self._json(sf.list_templates(self.cfg))
+            if path == "/api/serial/monitor/stats":
+                # P3.1 帧级健康度：帧率 / 到达间隔 / 错误分类 / 每 variant 计数。
+                raw_w = (qs.get("window_s") or ["10"])[0]
+                try:
+                    window_s = float(raw_w)
+                except ValueError:
+                    raise ElabError(f"window_s 必须是数字：{raw_w!r}")
+                return self._json(serialmon_mod.frame_stats(window_s))
             if path == "/api/serial/monitor/issues":
                 # 结构化 issue 增量读回（panic / hardfault / 复位；M6）。
                 raw = (qs.get("after") or ["0"])[0]
@@ -1809,6 +2092,35 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ElabError(f"after 必须是整数：{raw!r}")
                 return self._json(serialmon_mod.tail_issues(after))
+            if path == "/api/serial/monitor/poll":
+                # 盘点 #4：串口轮询合并端点 —— 一次带回四路增量
+                # （行 tail + 字节批次 + 结构化 issue + 共享解码帧）。
+                # ★ 动机：前端每 500ms 并发 2~4 个请求，HTTP/1.1 同域只有
+                #   6 个连接，稳态就占掉 2~4 个；合并后 1 个，且四路数据
+                #   天然同拍（同一时刻的快照），前端不再需要自己拼时序。
+                #   每路游标独立传（line/byte/issue/dec），缺省 0 = 从头追。
+                def _cur(name: str) -> int:
+                    raw = (qs.get(name) or [""])[0]
+                    if not raw:
+                        return 0
+                    try:
+                        return int(raw)
+                    except ValueError:
+                        raise ElabError(f"{name} 必须是整数：{raw!r}")
+                direction = (qs.get("dir") or ["all"])[0]
+                if direction not in ("all", "rx", "tx"):
+                    raise ElabError(f"dir 必须是 all/rx/tx：{direction!r}")
+                lt = serialmon_mod.tail(_cur("line"))
+                out: dict = {"line": lt,
+                             "bytes": serialmon_mod.tail_bytes(
+                                 _cur("byte"), direction=direction, limit=0)}
+                # 与旧前端逻辑同规则：profile / decoder 开着才拉对应增量
+                if (lt.get("issues") or {}).get("profile"):
+                    out["issues"] = serialmon_mod.tail_issues(_cur("issue"))
+                decoder = (lt.get("decode") or {}).get("decoder") or ""
+                if decoder:
+                    out["decoded"] = serialmon_mod.tail_decoded(_cur("dec"))
+                return self._json(out)
             if path == "/api/serial/monitor":
                 # 常驻监视会话的增量读回（tail）。「after」= 浏览器已收到的最大 seq。
                 raw = (qs.get("after") or ["0"])[0]
@@ -1844,15 +2156,35 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 ))
             if u.path == "/api/debug/control":
                 body = self._body()
-                return self._json(self.dbg.require().control(
+                return self._json(self.dbg.require(
+                    str(body.get("debug_session") or "")).control(
                     str(body.get("action") or ""),
                     addr=str(body.get("addr") or ""),
                     confirm=bool(body.get("confirm")),
+                    file=str(body.get("file") or ""),
+                    line=int(body.get("line") or 0),
                 ))
+            if u.path == "/api/debug/registers":
+                # 按组批量写（§7.2）：整批校验 → 逐项 set → 一条审计
+                body = self._body()
+                dsid = str(body.get("debug_session") or "")
+                self.dbg.require_write(confirm=bool(body.get("confirm")), debug_session=dsid)
+                sess = self.dbg.require(dsid)
+                out = sess.write_registers(items=body.get("items") or [])
+                _debug_audit(self.cfg, {"action": "write", "target": "register-group",
+                                        "session": sess.session_id,
+                                        "project": sess.plan.name,
+                                        "actor": sess.owner,
+                                        "items": [{"name": a["name"], "before": a["before"],
+                                                   "after": a["after"]}
+                                                  for a in out.get("applied") or []],
+                                        "failed": out.get("failed")})
+                return self._json(out)
             if u.path == "/api/debug/breakpoints":
                 body = self._body()
                 op = str(body.get("op") or "list")
-                sess = self.dbg.require()
+                dsid = str(body.get("debug_session") or "")
+                sess = self.dbg.require(dsid)
                 rev = (None if body.get("rev") is None else int(body.get("rev")))
                 if op == "add":
                     out = sess.breakpoint_add(
@@ -1892,12 +2224,12 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 if op == "list":
                     return self._json({"breakpoints": sess.breakpoints(),
                                        "rev": sess.store_rev(),
-                                       "allow_write": self.dbg.allow_write()})
+                                       "allow_write": self.dbg.allow_write(dsid)})
                 raise ElabError(f"未知断点操作：{op!r}")
             if u.path == "/api/debug/watch":
                 body = self._body()
                 op = str(body.get("op") or "list")
-                sess = self.dbg.require()
+                sess = self.dbg.require(str(body.get("debug_session") or ""))
                 rev = (None if body.get("rev") is None else int(body.get("rev")))
                 if op == "add":
                     return self._json(sess.watch_add(
@@ -1917,15 +2249,17 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 raise ElabError(f"未知监视操作：{op!r}")
             if u.path == "/api/debug/evaluate":
                 body = self._body()
-                return self._json(self.dbg.require().evaluate(
+                return self._json(self.dbg.require(
+                    str(body.get("debug_session") or "")).evaluate(
                     expr=str(body.get("expr") or ""),
                     frame=(None if body.get("frame") is None else int(body.get("frame"))),
                 ))
             if u.path == "/api/debug/write":
                 body = self._body()
                 target = str(body.get("target") or "")
-                self.dbg.require_write(confirm=bool(body.get("confirm")))
-                sess = self.dbg.require()
+                dsid = str(body.get("debug_session") or "")
+                self.dbg.require_write(confirm=bool(body.get("confirm")), debug_session=dsid)
+                sess = self.dbg.require(dsid)
                 if target == "memory":
                     out = sess.write_memory(
                         addr=str(body.get("addr") or ""),
@@ -1949,6 +2283,17 @@ class CockpitHandler(BaseHTTPRequestHandler):
                                             "value": body.get("value") or ""})
                     return self._json(out)
                 raise ElabError(f"未知写目标：{target!r}")
+            if u.path == "/api/runs/prune":
+                # 盘点 #11：历史 run 清理入口（CLI `elab runs prune` 同一份实现）。
+                # ★ 与 CLI 同源（ev_mod.prune_runs），不存在"面板删的和 CLI 删的
+                #   规则不一样"。running 的 run 永不删（函数内保护）。
+                body = self._body()
+                # 缺省与 CLI 一致（keep=50 / days=30）；显式 days=0 关时间闸
+                keep = 50 if body.get("keep") is None else int(body["keep"])
+                days = 30.0 if body.get("days") is None else float(body["days"])
+                return self._json(ev_mod.prune_runs(
+                    self.mgr.runs_dir, keep=keep, days=days,
+                    dry_run=bool(body.get("dry_run"))), 200)
             if u.path == "/api/run":
                 body = self._body()
                 project = body.get("project") or ""
@@ -2349,6 +2694,92 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     prof, body.get("values") or {}, body.get("variant"),
                     body.get("length_value"))
                 return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/learn":
+                # P4.1：从抓包学一个**草稿** profile（不落盘）。
+                # 保存仍走 /api/serial/frames 的 rev 乐观锁 —— 学习不会偷偷改配置。
+                body = self._body()
+                hints = body.get("hints") or {}
+                if not isinstance(hints, dict):
+                    raise ElabError("hints 必须是对象")
+                try:
+                    fc = int(body.get("field_count") or 0)
+                except (TypeError, ValueError):
+                    raise ElabError("field_count 必须是整数")
+                try:
+                    res = framelearn_mod.learn(
+                        frames=body.get("frames"),
+                        hex=str(body.get("hex") or ""),
+                        b64=str(body.get("b64") or ""),
+                        capture=_capture_text(self.cfg, body.get("capture")),
+                        name=str(body.get("name") or "learned"),
+                        label=str(body.get("label") or ""),
+                        hints=hints, field_count=fc)
+                except ValueError as exc:
+                    raise ElabError(str(exc))
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/verify":
+                # P4.2：解 → 编 → 再解，逐帧比对（证明规则可逆）。
+                body = self._body()
+                prof = _frame_profile_of(self.cfg, body)
+                try:
+                    res = framelearn_mod.verify(
+                        prof, body.get("vectors"),
+                        hex=str(body.get("hex") or ""),
+                        b64=str(body.get("b64") or ""),
+                        capture=_capture_text(self.cfg, body.get("capture")))
+                except ValueError as exc:
+                    raise ElabError(str(exc))
+                return self._json(res, 200 if res.get("ok") else 400)
+            if u.path == "/api/serial/frames/auto":
+                # P4.3：给一段字节，在工程 profile 里选一个最像的（只推荐）。
+                body = self._body()
+                data = _frame_bytes_of(body, self.cfg)
+                if not data:
+                    raise ElabError("auto 需要 hex / b64 / capture 之一")
+                explicit = body.get("profiles")
+                if isinstance(explicit, list) and explicit:
+                    profiles = []
+                    for i, raw in enumerate(explicit):
+                        try:
+                            profiles.append(sf.normalize_profile(raw))
+                        except ValueError as exc:
+                            raise ElabError(f"profiles[{i}]：{exc}")
+                else:
+                    project = str(body.get("project") or "")
+                    if not project:
+                        raise ElabError("auto 需要 project，或直接传 profiles")
+                    profiles = sf.load(self.cfg, project).get("profiles") or []
+                    if not profiles:
+                        raise ElabError(f"工程 {project} 还没有帧协议 profile")
+                res = framelearn_mod.auto(profiles, data)
+                if res.get("ok") and body.get("apply"):
+                    pid = res["decoder"].split(":", 1)[1]
+                    applied = serialmon_mod.set_decoder(
+                        res["decoder"], actor="agent", cfg=self.cfg,
+                        project=str(body.get("project") or ""))
+                    res["applied"] = applied.get("ok", False)
+                    if not applied.get("ok"):
+                        res["apply_error"] = applied.get("error")
+                    del pid
+                return self._json(res, 200 if res.get("ok") else 409)
+            if u.path == "/api/serial/frames/codegen":
+                # P4.4：profile → C 头文件。默认只返回文本，写盘需 write=true。
+                body = self._body()
+                prof = _frame_profile_of(self.cfg, body)
+                res = framelearn_mod.codegen(prof, guard=str(body.get("guard") or ""))
+                if body.get("write"):
+                    target = Path(self.cfg.root) / "generated" / f"{prof['id']}.h"
+                    if target.exists() and not body.get("overwrite"):
+                        res["ok"] = False
+                        res["error"] = f"{target} 已存在；确需覆盖请带 overwrite=true"
+                        return self._json(res, 409)
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(res["text"], encoding="utf-8")
+                    except OSError as exc:
+                        raise ElabError(f"写文件失败：{exc}")
+                    res["written"] = str(target)
+                return self._json(res)
             if u.path == "/api/serial/frames/preview":
                 # 帧解析预览（M5）：不需要开串口/会话，改配置立即验证。
                 body = self._body()
@@ -2365,10 +2796,11 @@ class CockpitHandler(BaseHTTPRequestHandler):
                     prof = sf.get(self.cfg, project, pid) if pid else None
                 if prof is None:
                     raise ElabError(f"未找到帧协议 profile：{pid!r}")
-                if body.get("b64"):
+                if body.get("b64") or body.get("data_b64"):
                     import base64 as _b64mod
                     try:
-                        data = _b64mod.b64decode(str(body["b64"]))
+                        data = _b64mod.b64decode(
+                            str(body.get("b64") or body.get("data_b64")))
                     except Exception as exc:               # noqa: BLE001
                         raise ElabError(f"b64 不是合法 base64：{exc}")
                 elif body.get("hex"):
@@ -2403,9 +2835,18 @@ class CockpitHandler(BaseHTTPRequestHandler):
                         max_bytes = int(raw_mb or 0)
                     except (TypeError, ValueError):
                         raise ElabError(f"max_bytes 必须是整数：{raw_mb!r}")
-                    return self._json(serialmon_mod.capture_start(
+                    try:
+                        pre_bytes = int(body.get("pre_bytes") or 0)
+                    except (TypeError, ValueError):
+                        raise ElabError("pre_bytes 必须是整数")
+                    trigger = body.get("trigger")
+                    if trigger is not None and not isinstance(trigger, dict):
+                        raise ElabError("trigger 必须是对象")
+                    res = serialmon_mod.capture_start(
                         self.cfg, project=body.get("project") or "",
-                        max_bytes=max_bytes), 200)
+                        max_bytes=max_bytes, trigger=trigger,
+                        pre_bytes=pre_bytes)
+                    return self._json(res, 200 if res.get("ok") else 400)
                 if action == "stop":
                     return self._json(serialmon_mod.capture_stop(), 200)
                 if action == "status":
@@ -2476,6 +2917,7 @@ class CockpitHandler(BaseHTTPRequestHandler):
             body = self._body()
             resume = bool(body.get("resume", True))
             return self._json(self.dbg.close(
+                debug_session=str(body.get("debug_session") or ""),
                 reason=str(body.get("reason") or "user-closed"),
                 resume=resume, actor=str(body.get("actor") or "human"),
             ))
@@ -2765,15 +3207,16 @@ class CockpitHandler(BaseHTTPRequestHandler):
         self._send(200, target.read_bytes(), ctype)
 
     # ── SSE ─────────────────────────────────────────────────────
-    def _sse_debug(self):
+    def _sse_debug(self, debug_session: str = ""):
         """调试事件流（独立信封 §6.4）。
 
         ★ 与 run SSE 分开：``ElabEvent`` 的 ``run`` 字段是必填的，硬塞会把
           "调试会话"伪装成"某个 run"，工具层与前端都得靠猜。
+        ★ 多会话：``?debug_session=<id>`` 只推该会话的事件（信封 ``session`` 双保险）。
         """
         if not self.sse_sem.acquire(blocking=False):
             return self._err(503, f"SSE 连接数已达上限（{MAX_SSE_CONNS}）")
-        q = self.dbg.subscribe()
+        q = self.dbg.subscribe(debug_session)
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")

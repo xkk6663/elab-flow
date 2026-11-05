@@ -52,15 +52,37 @@ export interface StreamOpts {
   from?: number;
   /** 服务端宣告流结束（而非网络错误）时回调 */
   onClosed?: (reason: string, rc: number | null) => void;
-  /** EventSource 建立/断开时回调，供 UI 显示"连接中…" */
-  onState?: (s: "connecting" | "open" | "reconnecting") => void;
+  /**
+   * EventSource 建立/断开时回调，供 UI 显示"连接中…"。
+   *
+   * `dead` 是新增的终态：浏览器**放弃**了这条流（`readyState === CLOSED`），
+   * 自动重试 {@link DEAD_RETRY_MAX} 次仍连不上 —— 典型原因是服务端 503
+   * （SSE 连接数已满）。此时浏览器**不会**自己重连，UI 必须明说，
+   * 否则用户只看到"连接中"然后日志永远不动。
+   */
+  onState?: (s: "connecting" | "open" | "reconnecting" | "dead") => void;
 }
 
+/**
+ * `readyState === CLOSED`（浏览器放弃、不再自动重连）后的自建重连参数。
+ * 实测：服务端 SSE 满员回 503 时 EventSource 直接进 CLOSED —— 靠浏览器
+ * 重连是等不来的，必须自己起新连接。重试几次仍失败就报 `dead` 停手，
+ * 避免对"满员"这种短时间不会恢复的状态无限重连。
+ */
+const DEAD_RETRY_MAX = 5;
+const DEAD_RETRY_MS = 3000;
+
 export function openRunStream(run: string, opts: StreamOpts = {}): StreamHandle {
-  const url =
-    `/api/events?run=${encodeURIComponent(run)}` + `&from=${Math.max(0, opts.from ?? 0)}`;
-  const es = new EventSource(url);
+  let lastSeq = Math.max(0, opts.from ?? 0);
+  // ★ from 必须每次重连时**重新取** lastSeq：自建的新 EventSource 不带
+  //   浏览器记住的 Last-Event-ID，若仍用初始 from=，服务端会把断线期间的
+  //   事件整段重放（日志重复刷一遍）。onFrame 里持续更新 lastSeq。
+  const mkUrl = (): string =>
+    `/api/events?run=${encodeURIComponent(run)}` + `&from=${lastSeq}`;
+  let es = new EventSource(mkUrl());
   let done = false;
+  let retries = 0;
+  let retryTimer = 0;
 
   const onFrame = (ev: Event): void => {
     const me = ev as MessageEvent;
@@ -71,6 +93,7 @@ export function openRunStream(run: string, opts: StreamOpts = {}): StreamHandle 
       // 单条坏帧不该拖垮整个流：跳过并继续
       return;
     }
+    if (typeof e.seq === "number" && e.seq > lastSeq) lastSeq = e.seq;
     ingest(e);
   };
 
@@ -79,40 +102,66 @@ export function openRunStream(run: string, opts: StreamOpts = {}): StreamHandle 
   //   `stream/closed` 由下方**专用**处理器接管（要读 reason/rc 并主动 close），
   //   故不在这里重复注册 —— 双重注册虽无害（reduce 的 default 分支会忽略它），
   //   但会让人误以为它走的是普通事件通道。
-  for (const topic of KNOWN_TOPICS) {
-    if (topic === "stream/closed") continue;
-    es.addEventListener(topic, onFrame);
-  }
-
-  es.addEventListener("stream/closed", (ev) => {
-    if (done) return;
-    done = true;
-    const me = ev as MessageEvent;
-    let reason = "";
-    let rc: number | null = null;
-    try {
-      const d = JSON.parse(me.data) as { reason?: string; rc?: number | null };
-      reason = d.reason || "";
-      rc = typeof d.rc === "number" ? d.rc : null;
-    } catch {
-      /* 缺 reason 也能收尾 */
+  const wire = (source: EventSource): void => {
+    for (const topic of KNOWN_TOPICS) {
+      if (topic === "stream/closed") continue;
+      source.addEventListener(topic, onFrame);
     }
-    // 服务端已写终止块，主动关掉避免 EventSource 按默认 3s 无脑重连
-    es.close();
-    opts.onClosed?.(reason, rc);
-  });
 
-  // 无 `event:` 的帧（协议兜底）
-  es.onmessage = onFrame;
+    source.addEventListener("stream/closed", (ev) => {
+      if (done) return;
+      done = true;
+      const me = ev as MessageEvent;
+      let reason = "";
+      let rc: number | null = null;
+      try {
+        const d = JSON.parse(me.data) as { reason?: string; rc?: number | null };
+        reason = d.reason || "";
+        rc = typeof d.rc === "number" ? d.rc : null;
+      } catch {
+        /* 缺 reason 也能收尾 */
+      }
+      // 服务端已写终止块，主动关掉避免 EventSource 按默认 3s 无脑重连
+      source.close();
+      opts.onClosed?.(reason, rc);
+    });
 
-  es.onopen = () => opts.onState?.("open");
+    // 无 `event:` 的帧（协议兜底）
+    source.onmessage = onFrame;
 
-  es.onerror = () => {
-    // 已收 stream/closed → 这是 close() 引发的，忽略。
-    // 否则交给浏览器原生重连（它会带上 Last-Event-ID，§17.2）。
-    if (done) return;
-    opts.onState?.(es.readyState === EventSource.CLOSED ? "reconnecting" : "connecting");
+    source.onopen = () => {
+      retries = 0;               // 连上了就清零重试计数（下次断线重新计）
+      opts.onState?.("open");
+    };
+
+    source.onerror = () => {
+      // 已收 stream/closed → 这是 close() 引发的，忽略。
+      if (done) return;
+      if (source.readyState === EventSource.CLOSED) {
+        // ★ 浏览器已经放弃这条流（典型：服务端 503 满员 / 网络层直接拒绝），
+        //   **不会**自动重连 —— 必须自己起新连接。Last-Event-ID 由新连接的
+        //   `from=` 继承（首次连接触发过重放，之后服务端按 seq 幂等合并）。
+        if (retries >= DEAD_RETRY_MAX) {
+          opts.onState?.("dead");
+          return;
+        }
+        retries += 1;
+        opts.onState?.("reconnecting");
+        window.clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(() => {
+          if (done) return;
+          es.close();
+          es = new EventSource(mkUrl());
+          wire(es);
+        }, DEAD_RETRY_MS);
+      } else {
+        // CONNECTING：浏览器还在自动重连，交给它（会带 Last-Event-ID，§17.2）
+        opts.onState?.("connecting");
+      }
+    };
   };
+
+  wire(es);
 
   opts.onState?.("connecting");
 
@@ -120,6 +169,7 @@ export function openRunStream(run: string, opts: StreamOpts = {}): StreamHandle 
     run,
     close() {
       done = true;
+      window.clearTimeout(retryTimer);
       es.close();
     },
     closed() {

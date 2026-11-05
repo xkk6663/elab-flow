@@ -104,6 +104,243 @@ def crc16modbus(data: bytes) -> int:
     return crc & 0xFFFF
 
 
+# ── 通用 CRC 引擎（P2.2-A）──────────────────────────────────────
+#: 预设表：``(width, poly, init, xorout, refin, refout)``。
+#: 只用参数化实现，不为每种算法各写一份 —— 解码与编码共用同一处，
+#: 避免"解的时候对一个算法、编的时候对另一个算法"这种最难查的错。
+CRC_PRESETS = {
+    "crc8":             (8, 0x07, 0x00, 0x00000000, False, False),
+    "crc8_maxim":       (8, 0x31, 0x00, 0x00000000, True, True),
+    "crc8_j1850":       (8, 0x1D, 0xFF, 0x000000FF, False, False),
+    "crc16_ccitt_false": (16, 0x1021, 0xFFFF, 0x0000, False, False),
+    "crc16_xmodem":     (16, 0x1021, 0x0000, 0x0000, False, False),
+    "crc16_x25":        (16, 0x1021, 0xFFFF, 0xFFFF, True, True),
+    "crc16_modbus":     (16, 0x8005, 0xFFFF, 0x0000, True, True),
+    "crc16_ibm":        (16, 0x8005, 0x0000, 0x0000, True, True),
+    "crc32":            (32, 0x04C11DB7, 0xFFFFFFFF, 0xFFFFFFFF, True, True),
+}
+
+#: 老写法 → 预设名（``crc16modbus`` 是 P0 就有的快捷写法，必须一直认）。
+CHECK_ALIASES = {"crc16modbus": "crc16_modbus"}
+
+#: ``cover`` 里的锚点（相对帧的语义位置）。
+COVER_ANCHORS = ("frame", "after_head", "before_checksum", "before_tail", "payload")
+
+
+def _reflect(value: int, bits: int) -> int:
+    out = 0
+    for i in range(bits):
+        if value & (1 << i):
+            out |= 1 << (bits - 1 - i)
+    return out
+
+
+def crc_compute(data: bytes, *, width: int, poly: int, init: int,
+                xorout: int, refin: bool, refout: bool) -> int:
+    """参数化 CRC（Rocksoft 模型）。覆盖 CCITT / XMODEM / MODBUS / CRC32 等。"""
+    mask = (1 << width) - 1
+    top = 1 << (width - 1)
+    crc = init & mask
+    for b in data:
+        if refin:
+            b = _reflect(b, 8)          # 反射输入：按 MSB-first 引擎跑
+        crc ^= b << (width - 8)
+        for _ in range(8):
+            crc = ((crc << 1) ^ poly) & mask if crc & top else (crc << 1) & mask
+    if refout:
+        crc = _reflect(crc, width)
+    return (crc ^ xorout) & mask
+
+
+def resolve_checksum(ck: dict) -> dict:
+    """把 profile 里的 ``checksum`` 声明解析成"能算"的完整参数。
+
+    老写法 ``{"kind":"crc16modbus"}`` 与 ``{"kind":"crc16","preset":...}``
+    走同一条路 —— 解析结果里一定有 ``func`` 名字与 ``size``，调用方不再
+    自己 if/else 猜字节宽度（P0 时代那种"按 kind 猜 size"就是漂移来源）。
+    """
+    kind = str(ck.get("kind") or "none").strip().lower()
+    at = str(ck.get("at") or "tail").strip().lower()
+    offset = ck.get("offset")
+    offset = int(offset) if offset not in (None, "") else None
+    cover = ck.get("cover") or {"from": "frame", "to": "before_checksum"}
+    out = {"kind": kind, "at": at, "offset": offset, "cover": cover,
+           "size": 0, "endian": str(ck.get("endian") or "le"),
+           "algo": "none", "params": None}
+    if kind == "none":
+        return out
+    if kind == "sum8":
+        out.update({"algo": "sum8", "size": 1, "endian": "le"})
+        return out
+    if kind == "xor8":
+        out.update({"algo": "xor8", "size": 1, "endian": "le"})
+        return out
+    preset = str(ck.get("preset") or CHECK_ALIASES.get(kind) or "").strip().lower()
+    if preset in CHECK_ALIASES:
+        preset = CHECK_ALIASES[preset]
+    if kind in CHECK_ALIASES:
+        preset = preset or CHECK_ALIASES[kind]
+    base = CRC_PRESETS.get(preset)
+    if base is None:
+        raise ValueError(f"未知 CRC 预设：{preset!r}")
+    width, poly, init, xorout, refin, refout = base
+    # 显式参数覆盖预设（只覆盖给了的）
+    if ck.get("poly") is not None:
+        poly = int(ck["poly"])
+    if ck.get("init") is not None:
+        init = int(ck["init"])
+    if ck.get("xorout") is not None:
+        xorout = int(ck["xorout"])
+    if ck.get("refin") is not None:
+        refin = bool(ck["refin"])
+    if ck.get("refout") is not None:
+        refout = bool(ck["refout"])
+    size = int(ck.get("size") or (width // 8))
+    out.update({"algo": "crc", "size": size, "preset": preset,
+                "endian": str(ck.get("endian") or "le"),
+                "params": {"width": width, "poly": poly, "init": init,
+                           "xorout": xorout, "refin": refin, "refout": refout}})
+    return out
+
+
+def checksum_value(spec: dict, payload: bytes) -> int:
+    algo = spec.get("algo") or "none"
+    if algo == "sum8":
+        return sum(payload) & 0xFF
+    if algo == "xor8":
+        val = 0
+        for b in payload:
+            val ^= b
+        return val
+    if algo == "crc":
+        return crc_compute(payload, **spec["params"])
+    return 0
+
+
+def _anchor_offset(name, *, frame_len: int, head_len: int, ck_start: int,
+                   tail_len: int) -> int:
+    if isinstance(name, int):
+        return name
+    key = str(name or "frame").strip().lower()
+    if key == "frame":
+        return 0
+    if key == "after_head":
+        return head_len
+    if key == "before_checksum":
+        return ck_start
+    if key == "before_tail":
+        return frame_len - tail_len
+    if key == "payload":
+        return head_len
+    raise ValueError(f"未知 cover 锚点：{name!r}")
+
+
+def checksum_span(frame: bytes, spec: dict, *, head_len: int = 0,
+                  tail_len: int = 0) -> tuple[int, bytes] | None:
+    """算出「哪几个字节是校验」和「校验覆盖哪段」。
+
+    返回 ``(start, expect_bytes)``；帧太短返回 ``None``。
+    """
+    size = int(spec.get("size") or 0)
+    if size <= 0:
+        return None
+    n = len(frame)
+    if spec.get("offset") is not None:
+        start = int(spec["offset"])
+    elif spec.get("at") == "head":
+        start = 0
+    else:
+        start = n - tail_len - size
+    if start < 0 or start + size > n:
+        return None
+    ck_start = start
+    cover = spec.get("cover") or {"from": "frame", "to": "before_checksum"}
+    lo = _anchor_offset(cover.get("from", "frame"), frame_len=n,
+                        head_len=head_len, ck_start=ck_start, tail_len=tail_len)
+    hi = _anchor_offset(cover.get("to", "before_checksum"), frame_len=n,
+                        head_len=head_len, ck_start=ck_start, tail_len=tail_len)
+    lo = max(0, min(lo, n))
+    hi = max(lo, min(hi, n))
+    return start, frame[lo:hi]
+
+
+# ── 转义 / 字节填充（P2.2-B）──────────────────────────────────
+def _esc_spec(profile: dict) -> dict | None:
+    esc = profile.get("escape")
+    if not isinstance(esc, dict):
+        return None
+    byte = esc.get("escape_byte")
+    if byte in (None, ""):
+        return None
+    try:
+        esc_byte = int(str(byte), 0) if isinstance(byte, str) else int(byte)
+        xor = int(str(esc.get("xor") or 0), 0)
+    except (TypeError, ValueError):
+        return None
+    targets = []
+    for t in esc.get("targets") or []:
+        try:
+            targets.append(int(str(t), 0) if isinstance(t, str) else int(t))
+        except (TypeError, ValueError):
+            continue
+    if not targets:
+        targets = [esc_byte]
+    if esc_byte not in targets:
+        targets.append(esc_byte)
+    return {"escape_byte": esc_byte & 0xFF, "xor": xor & 0xFF,
+            "targets": sorted({t & 0xFF for t in targets}),
+            "applies": str(esc.get("applies") or "payload").strip().lower()}
+
+
+def _unescape(buf: bytes, esc: dict) -> bytes:
+    out = bytearray()
+    eb = esc["escape_byte"]
+    xor = esc["xor"]
+    i = 0
+    n = len(buf)
+    while i < n:
+        b = buf[i]
+        if b == eb and i + 1 < n:
+            out.append(buf[i + 1] ^ xor)
+            i += 2
+            continue
+        out.append(b)
+        i += 1
+    return bytes(out)
+
+
+def _escape(buf: bytes, esc: dict) -> bytes:
+    out = bytearray()
+    eb = esc["escape_byte"]
+    xor = esc["xor"]
+    for b in buf:
+        if b in esc["targets"]:
+            out.append(eb)
+            out.append(b ^ xor)
+        else:
+            out.append(b)
+    return bytes(out)
+
+
+def _maybe_unescape(frame: bytes, esc: dict, head_len: int,
+                    tail_len: int, ck_size: int) -> bytes:
+    """反转义帧体。**帧头/帧尾永远不转义**（否则协议就没法分帧了）。
+
+    与计划书 "先反转义再切帧" 的差别是刻意的：转义的目标字节里通常就含
+    帧定界符（0x7D/0x7E 家族），先反转义会把定界符还原进负载、随即切错帧。
+    正确顺序只能是**先按定界符切、再反转义帧体**。
+    """
+    body_start = head_len
+    body_end = len(frame) - tail_len
+    if esc["applies"] == "payload":
+        body_end -= ck_size          # 校验字节不参与转义
+    if body_end <= body_start:
+        return frame
+    return (frame[:body_start]
+            + _unescape(frame[body_start:body_end], esc)
+            + frame[body_end:])
+
+
 def _hexb(value) -> bytes:
     text = "".join(str(value or "").split())
     if not text:
@@ -125,7 +362,7 @@ def _read_num(frame: bytes, offset: int, typ: str, endian: str):
         v = int.from_bytes(b, "big" if endian == "be" else "little", signed=True)
         return v
     fmt = {"u8": "B", "u16": "H", "u32": "I", "i8": "b", "i16": "h",
-           "i32": "i", "f32": "f", "f64": "d"}[typ]
+           "i32": "i", "f32": "f", "f64": "d", "f16": "e"}[typ]
     size = struct.calcsize(fmt)
     b = frame[offset:offset + size]
     if len(b) != size:
@@ -173,17 +410,26 @@ def _read_spec_value(frame: bytes, spec: dict) -> int:
 
 
 def _read_field(frame: bytes, f: dict):
-    """解一个字段；返回 (value, is_numeric_plot)。"""
+    """解一个字段；返回 (value, is_numeric_plot)。
+
+    ``array`` 的展开在记录层做（这里只解单个元素）。
+    """
     name = f.get("name", "")
     typ = f.get("type", "")
     off = int(f.get("offset") or 0)
-    if typ in ("ascii", "bytes"):
+    if typ in ("ascii", "bytes", "str"):
         ln = int(f.get("length") or 0)
         raw = frame[off:off + ln]
         if len(raw) != ln:
             raise ValueError("越界")
-        return (raw.decode("utf-8", errors="replace") if typ == "ascii"
-                else raw.hex()), False
+        if typ == "bytes":
+            return raw.hex(), False
+        enc = str(f.get("encoding") or "utf-8")
+        try:
+            text = raw.decode(enc, errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+        return text, False
     if f.get("bit_length"):
         val = _read_bits(frame, off, int(f.get("bit_offset") or 0),
                          int(f["bit_length"]),
@@ -195,6 +441,56 @@ def _read_field(frame: bytes, f: dict):
         val = f["enum"].get(str(val), val)
         return val, False
     return val * float(f.get("scale", 1)) + float(f.get("bias", 0)), True
+
+
+def _read_raw(frame: bytes, f: dict):
+    """解一个字段的**原始**数值（不套 scale/bias/enum）—— verify 用。"""
+    typ = f.get("type", "")
+    off = int(f.get("offset") or 0)
+    if typ in ("ascii", "bytes", "str"):
+        return frame[off:off + int(f.get("length") or 0)].hex()
+    if f.get("bit_length"):
+        return _read_bits(frame, off, int(f.get("bit_offset") or 0),
+                          int(f["bit_length"]),
+                          str(f.get("bit_order") or "lsb0"),
+                          signed=typ.startswith("i"))
+    return _read_num(frame, off, typ, str(f.get("endian") or "le"))
+
+
+def _flag_labels(f: dict, raw) -> list[str]:
+    """位标志 → 命中的标签列表（原始值仍保留在 ``fields`` 里）。"""
+    bits = f.get("bits") or {}
+    if not bits or isinstance(raw, str):
+        return []
+    try:
+        iv = int(raw)
+    except (TypeError, ValueError):
+        return []
+    out = [label for k, label in sorted(bits.items(), key=lambda kv: int(kv[0]))
+           if iv & (1 << int(k))]
+    return out
+
+
+def _heads_of(fr: dict) -> list[bytes]:
+    heads = [_hexb(h) for h in (fr.get("heads") or [])]
+    heads = [h for h in heads if h]
+    if not heads:
+        single = _hexb(fr.get("head_hex"))
+        if single:
+            heads = [single]
+    heads.sort(key=len, reverse=True)     # 最长匹配优先
+    return heads
+
+
+def _find_head(data: bytes, pos: int, heads: list[bytes]) -> int:
+    best = -1
+    for h in heads:
+        idx = data.find(h, pos)
+        if idx < 0:
+            continue
+        if best < 0 or idx < best:
+            best = idx
+    return best
 
 
 def _union_fields(profile: dict) -> list[dict]:
@@ -215,44 +511,78 @@ def _union_fields(profile: dict) -> list[dict]:
     return out
 
 
-def _profile_fields(profile: dict) -> list[dict]:
-    out = []
+def _channel_fields(profile: dict) -> list[dict]:
+    """波形通道清单：数组字段按元素展开成 ``name[0..n-1]``。"""
+    out: list[dict] = []
     for f in _union_fields(profile):
-        item = {"name": f.get("name", ""), "unit": f.get("unit", ""),
-                "type": f.get("type", ""), "plot": bool(f.get("plot", True))}
-        if f.get("bit_length"):
-            item.update({"bit_offset": int(f.get("bit_offset") or 0),
-                         "bit_length": int(f["bit_length"]),
-                         "bit_order": str(f.get("bit_order") or "lsb0")})
-        out.append(item)
+        arr = f.get("array")
+        if arr and f.get("plot"):
+            for i in range(int(arr.get("count") or 0)):
+                out.append({"name": f"{f.get('name', '')}[{i}]",
+                            "src": f.get("name", ""), "idx": i})
+        elif f.get("plot"):
+            out.append({"name": f.get("name", ""),
+                        "src": f.get("name", ""), "idx": None})
     return out
 
 
-def _decode_profile(data: bytes, profile: dict) -> dict:
+def _profile_fields(profile: dict) -> list[dict]:
+    """字段元数据（**全部**字段，含不作波形的）—— 面板按此渲染字段表。"""
+    out = []
+    for f in _union_fields(profile):
+        base = {"unit": f.get("unit", ""), "type": f.get("type", ""),
+                "plot": bool(f.get("plot", True))}
+        if f.get("bit_length"):
+            base.update({"bit_offset": int(f.get("bit_offset") or 0),
+                         "bit_length": int(f["bit_length"]),
+                         "bit_order": str(f.get("bit_order") or "lsb0")})
+        if f.get("bits"):
+            base["bits"] = dict(f["bits"])
+        arr = f.get("array")
+        if arr:
+            for i in range(int(arr.get("count") or 0)):
+                out.append({"name": f"{f.get('name', '')}[{i}]",
+                            "src": f.get("name", ""), "index": i, **base})
+        else:
+            out.append({"name": f.get("name", ""), **base})
+    return out
+
+
+#: 解码失败分类（P2.2-C）。老 ``skipped`` 仍然保留 = 这些计数之和，
+#: 但界面/Agent 该看的是"到底为什么没解出来"。
+ERROR_KINDS = ("no_head", "bad_length", "short", "tail_mismatch",
+               "checksum", "unknown_id", "bad_id", "field")
+
+
+def _decode_profile(data: bytes, profile: dict, *, keep_raw: bool = False) -> dict:
     fr = profile.get("frame") or {}
-    head = _hexb(fr.get("head_hex"))
+    heads = _heads_of(fr)
+    head = heads[0] if heads else b""
     tail = _hexb(fr.get("tail_hex"))
     length = fr.get("length")
     length = int(length) if length else None
     lf = fr.get("length_field") or None
     id_field = fr.get("id_field") or None
     max_bytes = int(fr.get("max_bytes") or 256)
+    idle_only = bool(not heads and not lf and not length and not tail)
     ck = profile.get("checksum") or {}
-    ck_kind = str(ck.get("kind") or "none")
-    ck_at = str(ck.get("at") or "tail")
+    esc = _esc_spec(profile)
     variants = profile.get("variants") or []
     dispatch = bool(variants) or id_field is not None
-    channel_fields = [f for f in _union_fields(profile) if f.get("plot")]
+    channels = _channel_fields(profile)
 
     frames: list[list] = []
     records: list[dict] = []
-    skipped = 0
-    checksum_fail = 0
-    unknown_id = 0
+    reasons = {k: 0 for k in ERROR_KINDS}
     errors: list[str] = []
     pos = 0
     n = len(data)
     pending = b""
+
+    def fail(kind: str, msg: str = "") -> None:
+        reasons[kind] = reasons.get(kind, 0) + 1
+        if msg and len(errors) < 40:
+            errors.append(msg)
 
     def frame_total(start: int):
         """按 length_field 从帧首算总长；返回 ("ok", total) / "pending" / "bad"。"""
@@ -273,23 +603,41 @@ def _decode_profile(data: bytes, profile: dict) -> dict:
             return "bad"
         return "ok", total
 
+    if idle_only:
+        # 空闲分包型：这批字节就是**一帧**（切分由 serialmon 按时间戳做）。
+        if data:
+            frame = data[:max_bytes]
+            if len(data) > max_bytes:
+                fail("bad_length", "空闲分包帧超过 max_bytes，已截断")
+            rec = _record_for(frame, profile, variants, id_field, ck, esc,
+                              head_len=0, tail=tail, dispatch=dispatch,
+                              channels=channels, fail=fail,
+                              keep_raw=keep_raw, frame_hex=frame.hex())
+            if rec is not None:
+                records.append(rec)
+                frames.append(rec["values"])
+        return _result(profile, frames, records, reasons, errors, pending,
+                       channels, len(data))
+
     while pos < n:
-        if head:
-            idx = data.find(head, pos)
+        head_len = 0
+        if heads:
+            idx = _find_head(data, pos, heads)
             if idx < 0:
                 if n - pos:
-                    skipped += 1                   # 找不到帧头 → 这段是垃圾
+                    fail("no_head", "找不到帧头（尾部字节无法归帧）")
                 break
             pos = idx
+            head_len = next((len(h) for h in heads if data.startswith(h, pos)),
+                            len(head))
             if lf:
                 got = frame_total(pos)
                 if got == "pending":
                     pending = data[pos:]
                     break
                 if got == "bad":
-                    skipped += 1
-                    errors.append(f"长度字段非法（profile {profile.get('id', '')}）")
-                    pos += 1                   # 重新同步到下一个 head
+                    fail("bad_length", f"长度字段非法（{profile.get('id', '')}）")
+                    pos += 1
                     continue
                 end = pos + got[1]
                 if end > n:
@@ -301,17 +649,17 @@ def _decode_profile(data: bytes, profile: dict) -> dict:
                     pending = data[pos:]
                     break
             elif tail:
-                tidx = data.find(tail, pos + len(head))
+                tidx = data.find(tail, pos + head_len)
                 if tidx < 0:
                     if n - pos > max_bytes:
-                        skipped += 1           # 超长仍找不到尾 → 重新同步
+                        fail("short", "超长仍找不到帧尾 → 重新同步")
                         pos += 1
                         continue
                     pending = data[pos:]
                     break
                 end = tidx + len(tail)
             else:
-                nxt = data.find(head, pos + len(head))
+                nxt = _find_head(data, pos + head_len, heads)
                 if nxt < 0:
                     pending = data[pos:]
                     break
@@ -323,8 +671,7 @@ def _decode_profile(data: bytes, profile: dict) -> dict:
                     pending = data[pos:]
                     break
                 if got == "bad":
-                    skipped += 1
-                    errors.append(f"长度字段非法（profile {profile.get('id', '')}）")
+                    fail("bad_length", f"长度字段非法（{profile.get('id', '')}）")
                     pos += 1
                     continue
                 end = pos + got[1]
@@ -338,119 +685,158 @@ def _decode_profile(data: bytes, profile: dict) -> dict:
                     break
         frame = data[pos:end]
         if tail and length and not frame.endswith(tail):
-            skipped += 1
-            errors.append("帧尾标记不匹配")
+            fail("tail_mismatch", "帧尾标记不匹配")
             pos = end
             continue
-
-        # ── 多 ID：先选 variant（校验和可能被 variant 覆盖）─────────
-        variant = None
-        vid = None
-        active = profile.get("fields") or []
-        ck_use = ck
-        if id_field is not None:
-            try:
-                vid = _read_spec_value(frame, id_field)
-            except (ValueError, IndexError) as exc:
-                skipped += 1
-                errors.append(f"消息 id 读取失败：{exc}")
-                pos = end
-                continue
-            variant = next((v for v in variants if int(v.get("id", -1)) == vid), None)
-            if variant is not None:
-                active = variant.get("fields") or []
-                ck_use = variant.get("checksum") or ck
-            elif not active:
-                unknown_id += 1
-                skipped += 1
-                errors.append(f"未知消息 id {vid}（profile {profile.get('id', '')}）")
-                pos = end
-                continue
-
-        ck_kind_use = str(ck_use.get("kind") or "none")
-        ck_at_use = str(ck_use.get("at") or "tail")
-        tag = profile.get("id", "") + (f"/{variant.get('label')}" if variant else "")
-        if ck_kind_use != "none":
-            size = 2 if ck_kind_use == "crc16modbus" else 1
-            # 校验字节**不包含**尾标记（典型帧：head + data + checksum + tail）。
-            tail_len = len(tail) if tail and frame.endswith(tail) else 0
-            if len(frame) < tail_len + size:
-                skipped += 1
-                errors.append(f"帧太短，无法校验（{tag}）")
-                pos = end
-                continue
-            if ck_at_use == "tail":
-                expect = frame[len(frame) - tail_len - size:len(frame) - tail_len]
-                payload = frame[:len(frame) - tail_len - size]
-            else:
-                expect = frame[:size]
-                payload = frame[size:]
-            if ck_kind_use == "sum8":
-                ok_ck = (sum(payload) & 0xFF) == expect[0]
-            elif ck_kind_use == "xor8":
-                calc = 0
-                for b in payload:
-                    calc ^= b
-                ok_ck = calc == expect[0]
-            else:
-                ok_ck = crc16modbus(payload) == int.from_bytes(expect, "little")
-            if not ok_ck:
-                checksum_fail += 1
-                skipped += 1
-                errors.append(f"校验失败（{ck_kind_use}，{tag}）")
-                pos = end
-                continue
-
-        # ── 字段解析（variant 命中时只解该 variant 的字段）────────
-        fields_map: dict = {}
-        for f in active:
-            name = f.get("name", "")
-            try:
-                val, _numeric = _read_field(frame, f)
-            except (ValueError, IndexError, struct.error) as exc:
-                val = None
-                errors.append(f"{name} 解析失败：{exc}")
-            fields_map[name] = val
-        values: list = []
-        for cf in channel_fields:
-            val = fields_map.get(cf["name"])
-            values.append(float(val) if isinstance(val, (int, float))
-                          and not isinstance(val, bool) else None)
-        rec = {"fields": fields_map, "values": values}
-        if dispatch:
-            rec["id"] = vid
-            rec["variant"] = variant.get("label") if variant else None
-        records.append(rec)
-        frames.append(values)
+        rec = _record_for(frame, profile, variants, id_field, ck, esc,
+                          head_len=head_len, tail=tail, dispatch=dispatch,
+                          channels=channels, fail=fail,
+                          keep_raw=keep_raw, frame_hex=frame.hex())
+        if rec is not None:
+            records.append(rec)
+            frames.append(rec["values"])
         pos = end
 
-    fields_meta = _profile_fields(profile)
+    return _result(profile, frames, records, reasons, errors, pending,
+                   channels, len(data))
+
+
+def _record_for(frame: bytes, profile: dict, variants: list, id_field,
+                ck: dict, esc: dict | None, *, head_len: int, tail: bytes,
+                dispatch: bool, channels: list[dict], fail,
+                keep_raw: bool, frame_hex: str) -> dict | None:
+    """校验 + 解字段，产出一条记录。``None`` = 这帧该丢（原因已记进 fail）。"""
+    tag = profile.get("id", "")
+    body = frame
+    tail_len = len(tail) if tail and frame.endswith(tail) else 0
+
+    # ── 多 ID：先选 variant（校验和可能被 variant 覆盖）─────────
+    variant = None
+    vid = None
+    active = profile.get("fields") or []
+    ck_use = ck
+    if id_field is not None:
+        try:
+            vid = _read_spec_value(body, id_field)
+        except (ValueError, IndexError) as exc:
+            fail("bad_id", f"消息 id 读取失败：{exc}")
+            return None
+        variant = next((v for v in variants if int(v.get("id", -1)) == vid), None)
+        if variant is not None:
+            active = variant.get("fields") or []
+            ck_use = variant.get("checksum") or ck
+        elif not active:
+            fail("unknown_id", f"未知消息 id {vid}（profile {tag}）")
+            return None
+
+    spec = resolve_checksum(ck_use)
+    ck_size = int(spec.get("size") or 0)
+
+    # ── 反转义（先切帧再反转义：定界符不参与转义）──────────────
+    if esc:
+        body = _maybe_unescape(body, esc, head_len, tail_len, ck_size)
+        if len(body) != len(frame):
+            tail_len = len(tail) if tail and body.endswith(tail) else 0
+
+    if spec["algo"] != "none":
+        span = checksum_span(body, spec, head_len=head_len, tail_len=tail_len)
+        if span is None:
+            fail("short", f"帧太短，无法校验（{tag}）")
+            return None
+        start, payload = span
+        got = int.from_bytes(body[start:start + ck_size],
+                            "big" if spec.get("endian") == "be" else "little")
+        want = checksum_value(spec, payload)
+        if got != want:
+            name = spec.get("preset") or spec["algo"]
+            fail("checksum", f"校验失败（{name}，{tag}）")
+            return None
+
+    # ── 字段解析 ──────────────────────────────────────────────
+    fields_map: dict = {}
+    raw_map: dict = {}
+    flags: dict = {}
+    for f in active:
+        name = f.get("name", "")
+        arr = f.get("array")
+        try:
+            if arr:
+                vals = []
+                for i in range(int(arr.get("count") or 0)):
+                    sub = dict(f)
+                    sub["offset"] = int(f.get("offset") or 0) + i * int(arr["stride"])
+                    vals.append(_read_field(body, sub)[0])
+                fields_map[name] = vals
+                if keep_raw:
+                    raw_map[name] = [v for v in vals]
+            else:
+                val, _numeric = _read_field(body, f)
+                fields_map[name] = val
+                if f.get("bits"):
+                    labels = _flag_labels(f, val)
+                    if labels:
+                        flags[name] = labels
+                if keep_raw:
+                    raw_map[name] = _read_raw(body, f)
+        except (ValueError, IndexError, struct.error) as exc:
+            fields_map[name] = None
+            fail("field", f"{name} 解析失败：{exc}")
+
+    values: list = []
+    for ch in channels:
+        val = fields_map.get(ch["src"])
+        if ch["idx"] is not None:
+            val = val[ch["idx"]] if isinstance(val, list) and \
+                ch["idx"] < len(val) else None
+        values.append(float(val) if isinstance(val, (int, float))
+                      and not isinstance(val, bool) else None)
+
+    rec: dict = {"fields": fields_map, "values": values}
+    if flags:
+        rec["flags"] = flags
+    if dispatch:
+        rec["id"] = vid
+        rec["variant"] = variant.get("label") if variant else None
+    if keep_raw:
+        rec["raw"] = raw_map
+        rec["frame_hex"] = frame_hex
+    return rec
+
+
+def _result(profile: dict, frames, records, reasons, errors, pending,
+            channels, input_bytes) -> dict:
+    skipped = sum(reasons.values())
     return {
         "ok": True, "decoder": f"profile:{profile.get('id', '')}",
-        "channels": len(channel_fields),
+        "channels": len(channels),
         "frames": frames, "records": records,
-        "fields": fields_meta,
+        "fields": _profile_fields(profile),
         "total_frames": len(frames),
-        "skipped": skipped, "checksum_fail": checksum_fail,
-        "unknown_id": unknown_id,
+        "skipped": skipped,
+        "checksum_fail": reasons.get("checksum", 0),
+        "unknown_id": reasons.get("unknown_id", 0),
+        "reasons": dict(reasons),
         "errors": errors[-20:],
         "pending_bytes": len(pending), "pending_b64": _b64(pending),
-        "input_bytes": len(data),
+        "input_bytes": input_bytes,
     }
 
 
 def decode(data: bytes, decoder: str = "justfloat",
-           channels: int | None = None, profile: dict | None = None) -> dict:
+           channels: int | None = None, profile: dict | None = None,
+           keep_raw: bool = False) -> dict:
     """解一段字节。返回可直接 JSON 化的结果（``frames`` 是二维 float 数组）。
 
     ``decoder`` 为 ``"profile"`` 或 ``"profile:<id>"`` 时使用 ``profile`` 字典
     （由 ``serialframes`` 装载/校验）。内置两种解码器行为不变。
+    ``keep_raw`` 额外带上每个字段的原始数值与线上帧字节 —— 只给 ``verify`` 用，
+    正常解码不带（那是给"证明这条规则真的可逆"的，不是给界面的）。
     """
     if decoder == "profile" or decoder.startswith("profile:"):
         if not isinstance(profile, dict):
             return {"ok": False, "error": "profile 解码需要 profile 配置",
                     "decoder": decoder, "frames": [], "channels": 0}
-        return _decode_profile(data, profile)
+        return _decode_profile(data, profile, keep_raw=keep_raw)
     if decoder not in ("justfloat", "firewater"):
         return {"ok": False, "error": f"未知解码器：{decoder!r}",
                 "decoder": decoder, "frames": [], "channels": 0}
@@ -487,20 +873,25 @@ def _b64(data: bytes) -> str:
 
 # ── 反向组帧（P1）：字段 → 字节 ──────────────────────────────────
 _TYPE_SIZE = {"u8": 1, "u16": 2, "u24": 3, "u32": 4, "i8": 1, "i16": 2,
-              "i24": 3, "i32": 4, "f32": 4, "f64": 8}
+              "i24": 3, "i32": 4, "f32": 4, "f64": 8, "f16": 2}
 _INT_BITS = {"u8": 8, "u16": 16, "u24": 24, "u32": 32,
              "i8": 8, "i16": 16, "i24": 24, "i32": 32}
 _INT_FMT = {"u8": "B", "u16": "H", "u32": "I", "i8": "b", "i16": "h",
-            "i32": "i", "f32": "f", "f64": "d"}
+            "i32": "i", "f32": "f", "f64": "d", "f16": "e"}
 
 
 def _field_span(f: dict) -> int:
     typ = f.get("type", "")
-    if typ in ("ascii", "bytes"):
-        return int(f.get("length") or 0)
-    if f.get("bit_length"):
-        return (int(f.get("bit_offset") or 0) + int(f["bit_length"]) + 7) // 8
-    return _TYPE_SIZE[typ]
+    if typ in ("ascii", "bytes", "str"):
+        span = int(f.get("length") or 0)
+    elif f.get("bit_length"):
+        span = (int(f.get("bit_offset") or 0) + int(f["bit_length"]) + 7) // 8
+    else:
+        span = _TYPE_SIZE[typ]
+    arr = f.get("array")
+    if arr:
+        return int(arr["stride"]) * (int(arr["count"]) - 1) + span
+    return span
 
 
 def _spec_span(spec: dict) -> int:
@@ -587,14 +978,30 @@ def _encode_field(buf: bytearray, f: dict, value) -> None:
     name = f.get("name", "")
     typ = f.get("type", "")
     off = int(f.get("offset") or 0)
-    if typ in ("ascii", "bytes"):
+    arr = f.get("array")
+    if arr:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{name} 是数组字段，值必须是数组（{arr['count']} 项）")
+        if len(value) != int(arr["count"]):
+            raise ValueError(
+                f"{name} 需要 {arr['count']} 项，收到 {len(value)} 项")
+        for i, item in enumerate(value):
+            sub = dict(f)
+            sub.pop("array", None)
+            sub["offset"] = off + i * int(arr["stride"])
+            _encode_field(buf, sub, item)
+        return
+    if typ in ("ascii", "bytes", "str"):
         ln = int(f.get("length") or 0)
-        if typ == "ascii":
-            raw = b"" if value in (None, "") else str(value).encode("utf-8")
-        elif isinstance(value, (bytes, bytearray)):
-            raw = bytes(value)
+        if typ == "bytes":
+            raw = bytes(value) if isinstance(value, (bytes, bytearray)) \
+                else _hexb(value)
         else:
-            raw = _hexb(value)
+            enc = str(f.get("encoding") or "utf-8")
+            try:
+                raw = b"" if value in (None, "") else str(value).encode(enc)
+            except LookupError:
+                raw = str(value).encode("utf-8")
         if len(raw) > ln:
             raise ValueError(f"{name} 超过字段长度 {ln}：{len(raw)} 字节")
         buf[off:off + len(raw)] = raw
@@ -671,11 +1078,12 @@ def _encode(profile: dict, values: dict, variant_id, length_value) -> dict:
         fields = profile.get("fields") or []
         ck = profile.get("checksum") or {}
         vid_value = None
-    ck_kind = str(ck.get("kind") or "none")
-    ck_at = str(ck.get("at") or "tail")
-    ck_size = 0 if ck_kind == "none" else (2 if ck_kind == "crc16modbus" else 1)
-    if ck_at == "head" and head:
-        raise ValueError("checksum.at=head 不能与 head_hex 同时使用")
+    spec = resolve_checksum(ck)
+    esc = _esc_spec(profile)
+    ck_size = int(spec.get("size") or 0)
+    if spec["at"] == "head" and head and spec.get("offset") is None:
+        raise ValueError("checksum.at=head 不能与 head_hex 同时使用"
+                         "（校验不在帧首请用 checksum.offset）")
 
     need = len(head)
     for f in fields:
@@ -686,6 +1094,7 @@ def _encode(profile: dict, values: dict, variant_id, length_value) -> dict:
         need = max(need, int(lf.get("offset") or 0)
                    + (2 if str(lf.get("type")) == "u16" else 1))
 
+    ck_at = str(spec.get("at") or "tail")
     if length is not None:
         total = length
         if total > int(fr.get("max_bytes") or 256):
@@ -753,32 +1162,38 @@ def _encode(profile: dict, values: dict, variant_id, length_value) -> dict:
     if tail:
         buf[total - len(tail):] = tail
     ck_val = None
-    if ck_kind != "none":
-        if ck_at == "tail":
-            start = total - len(tail) - ck_size
-            payload = bytes(buf[:start])
-            ck_val = _checksum_value(ck_kind, payload)
-            if ck_size == 2:
-                buf[start:start + 2] = ck_val.to_bytes(2, "little")
-            else:
-                buf[start] = ck_val & 0xFF
-        else:
-            payload = bytes(buf[ck_size:])
-            ck_val = _checksum_value(ck_kind, payload)
-            if ck_size == 2:
-                buf[:2] = ck_val.to_bytes(2, "little")
-            else:
-                buf[0] = ck_val & 0xFF
+    if spec["algo"] != "none":
+        span = checksum_span(bytes(buf), spec, head_len=len(head),
+                             tail_len=len(tail) if tail else 0)
+        if span is None:
+            raise ValueError("校验字节位置超出帧范围（检查 checksum.offset）")
+        start, payload = span
+        ck_val = checksum_value(spec, payload)
+        endian = "big" if spec.get("endian") == "be" else "little"
+        buf[start:start + ck_size] = ck_val.to_bytes(ck_size, endian)
+
+    # 转义（P2.2-B）：只在**校验算完之后**做，且帧头/帧尾不转义。
+    wire = bytes(buf)
+    if esc:
+        body_start = len(head)
+        body_end = len(wire) - (len(tail) if tail else 0)
+        if esc["applies"] == "payload":
+            body_end -= ck_size
+        if body_end > body_start:
+            wire = (wire[:body_start] + _escape(wire[body_start:body_end], esc)
+                    + wire[body_end:])
 
     out = {
         "ok": True,
         "id": profile.get("id", ""),
         "variant": variant.get("label") if variant else None,
-        "hex": bytes(buf).hex(),
-        "bytes": total,
+        "hex": wire.hex(),
+        "bytes": len(wire),
+        "frame_bytes": total,
+        "escaped": bool(esc),
         "length_field": raw_len,
-        "checksum": (f"0x{ck_val:04X}" if ck_size == 2
-                     else f"0x{ck_val:02X}") if ck_val is not None else None,
+        "checksum": (f"0x{ck_val:0{ck_size * 2}X}" if ck_val is not None
+                     else None),
     }
     if variant is not None:
         out["variant_id"] = int(variant["id"])

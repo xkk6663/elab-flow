@@ -1268,8 +1268,56 @@ var INPUT = {
   background: "var(--elab-bg-code)",
   color: "var(--elab-fg-primary)"
 };
-function DebugView(props) {
-  const { sessionId, visible = true, project, available, disabled = false, onBack, api } = props;
+function toPanelError(e, fallbackCode) {
+  const any = e;
+  const code = typeof any?.code === "string" && any.code !== "" ? any.code : fallbackCode;
+  const message = typeof any?.message === "string" && any.message !== "" ? any.message : e instanceof Error ? e.message : String(e);
+  const hint = typeof any?.hint === "string" && any.hint !== "" ? any.hint : void 0;
+  return hint === void 0 ? { code, message } : { code, message, hint };
+}
+var RECOVERY = {
+  "debug-gdb-missing": "\u591A\u534A\u662F\u63A2\u9488\u88AB\u522B\u7684\u8FDB\u7A0B\u5360\u7740\uFF1A\u2460 \u5148\u5728\u4F1A\u8BDD\u6761\u5173\u6389\u5176\u5B83\u8C03\u8BD5\u4F1A\u8BDD\uFF08\xD7 \u4F1A\u6062\u590D\u76EE\u6807\u8FD0\u884C\uFF09\uFF1B\u2461 \u82E5\u4E4B\u524D\u5F3A\u6740\u8FC7\u5185\u6838\uFF0C\u6B8B\u7559\u7684 openocd \u4ECD\u5728\u5360 DAP\u2014\u2014\u5728\u4EFB\u52A1\u7BA1\u7406\u5668\u7ED3\u675F\u8BE5 openocd \u8FDB\u7A0B\u540E\u91CD\u8BD5\u3002",
+  "debug-openocd-dead": 'openocd \u5DF2\u9000\u51FA\uFF1A\u770B"\u8F93\u51FA"\u9875\u7684 stderr \u5C3E\u90E8\uFF1B\u5E38\u89C1\u662F\u63A2\u9488\u88AB\u5360\u7528\u6216\u4F9B\u7535/\u63A5\u7EBF\u677E\u52A8\u3002\u6E05\u573A\u540E\u91CD\u8BD5\u3002',
+  "debug-target-busy": "\u8FD9\u4E2A\u76EE\u6807\u5DF2\u6709\u8C03\u8BD5\u4F1A\u8BDD\uFF1A\u5173\u6389\u90A3\u4E2A\u4F1A\u8BDD\uFF08\u6216\u7B49\u5B83\u7684\u79DF\u7EA6\u5230\u671F\uFF09\u518D\u6765\uFF1B\u540C\u4E00\u76EE\u6807\u4E0D\u652F\u6301\u5E76\u53D1\u8C03\u8BD5\u3002",
+  "debug-port-hijacked": "gdb \u7AEF\u53E3\u88AB\u975E\u672C\u5DE5\u7A0B\u7684\u8FDB\u7A0B\u5360\u4E86\uFF1A\u6362\u7AEF\u53E3\u6216\u7ED3\u675F\u5360\u7528\u8FDB\u7A0B\u540E\u91CD\u8BD5\u3002",
+  "debug-elf-missing": "\u5148\u7F16\u8BD1\u51FA ELF\uFF08\u5DE5\u7A0B\u9875\u8DD1\u4E00\u6B21\u6784\u5EFA\uFF09\uFF0C\u518D\u5F00\u59CB\u8C03\u8BD5\u3002"
+};
+function DebugPane(props) {
+  const {
+    sessionId,
+    debugSessionId,
+    embedded = false,
+    visible = true,
+    project,
+    available,
+    disabled = false,
+    onBack,
+    api
+  } = props;
+  const dsid = debugSessionId ?? "";
+  const dbg = useMemo(() => {
+    const src2 = api;
+    return {
+      ...src2,
+      debugSession: (sid) => src2.debugSession(sid, dsid),
+      debugClose: (o) => src2.debugClose({ ...o, debugSession: o?.debugSession ?? dsid }),
+      debugControl: (o) => src2.debugControl({ ...o, debugSession: dsid }),
+      debugStack: (o) => src2.debugStack({ ...o, debugSession: dsid }),
+      debugVariables: (o) => src2.debugVariables({ ...o, debugSession: dsid }),
+      debugRegisters: (o) => src2.debugRegisters({ ...o, debugSession: dsid }),
+      debugRegistersWrite: (o) => src2.debugRegistersWrite({ ...o, debugSession: dsid }),
+      debugSource: (o) => src2.debugSource({ ...o, debugSession: dsid }),
+      debugBreakpoints: (o) => src2.debugBreakpoints({ ...o, debugSession: dsid }),
+      debugMemory: (o) => src2.debugMemory({ ...o, debugSession: dsid }),
+      debugDisasm: (o) => src2.debugDisasm({ ...o, debugSession: dsid }),
+      debugEvaluate: (o) => src2.debugEvaluate({ ...o, debugSession: dsid }),
+      debugWrite: (o) => src2.debugWrite({ ...o, debugSession: dsid }),
+      debugWatch: (o) => src2.debugWatch({ ...o, debugSession: dsid }),
+      debugAudit: (o) => src2.debugAudit({ ...o, debugSession: dsid }),
+      debugPeripherals: (o) => src2.debugPeripherals({ ...o, debugSession: dsid }),
+      debugRtos: (o) => src2.debugRtos({ ...o, debugSession: dsid })
+    };
+  }, [api, dsid]);
   const [snap, setSnap] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1280,6 +1328,13 @@ function DebugView(props) {
   const [vars, setVars] = useState([]);
   const [children, setChildren] = useState({});
   const [regs, setRegs] = useState([]);
+  const [regGroup, setRegGroup] = useState("all");
+  const [regDraft, setRegDraft] = useState({});
+  const [src, setSrc] = useState(null);
+  const [srcStart, setSrcStart] = useState(1);
+  const [srcPick, setSrcPick] = useState(0);
+  const [srcErr, setSrcErr] = useState("");
+  const srcStopRef = useRef(null);
   const [bps, setBps] = useState([]);
   const [allowWrite, setAllowWrite] = useState(false);
   const [output, setOutput] = useState([]);
@@ -1317,7 +1372,7 @@ function DebugView(props) {
   }, []);
   const reloadSession = useCallback(async () => {
     try {
-      const r = await api.debugSession(sessionId);
+      const r = await dbg.debugSession(sessionId);
       applySnap(r.session);
     } catch {
     }
@@ -1327,7 +1382,7 @@ function DebugView(props) {
     let cancelled = false;
     const tick = async () => {
       try {
-        const r = await api.debugSession(sessionId);
+        const r = await dbg.debugSession(sessionId);
         if (!cancelled) applySnap(r.session);
       } catch {
       }
@@ -1344,10 +1399,10 @@ function DebugView(props) {
     setChildren({});
     try {
       const [st, vs, rg, bp] = await Promise.all([
-        api.debugStack({ sessionId }),
-        api.debugVariables({ frame, scope: varsMode, sessionId }),
-        api.debugRegisters({ group: "core", sessionId }),
-        api.debugBreakpoints({ sessionId })
+        dbg.debugStack({ sessionId }),
+        dbg.debugVariables({ frame, scope: varsMode, sessionId }),
+        dbg.debugRegisters({ group: "all", sessionId }),
+        dbg.debugBreakpoints({ sessionId })
       ]);
       setFrames(st.frames);
       setVars(vs.nodes);
@@ -1367,23 +1422,23 @@ function DebugView(props) {
     if (snap === null || snap.state !== "stopped") return;
     try {
       if (tab === "watch") {
-        const w = await api.debugWatch({ sessionId });
+        const w = await dbg.debugWatch({ sessionId });
         setWatches(w.watches);
         setWatchRev(w.rev);
       } else if (tab === "mem") {
-        setMem(await api.debugMemory({
+        setMem(await dbg.debugMemory({
           addr: memAddr,
           count: Math.max(1, Math.min(1024, Number(memCount) || 64)),
           sessionId
         }));
       } else if (tab === "disasm") {
-        setDisasm(await api.debugDisasm({ sessionId }));
+        setDisasm(await dbg.debugDisasm({ sessionId }));
       } else if (tab === "periph") {
-        setPeriph(await api.debugPeripherals({ sessionId }));
+        setPeriph(await dbg.debugPeripherals({ sessionId }));
       } else if (tab === "rtos") {
-        setRtos(await api.debugRtos({ sessionId }));
+        setRtos(await dbg.debugRtos({ sessionId }));
       } else if (tab === "audit") {
-        const a = await api.debugAudit({ limit: 100, sessionId });
+        const a = await dbg.debugAudit({ limit: 100, sessionId });
         setAudit(a.records);
       }
     } catch (e) {
@@ -1399,34 +1454,34 @@ function DebugView(props) {
     const expr = watchExpr.trim();
     if (expr === "") return;
     try {
-      const r = await api.debugWatch({ op: "add", expr, format: "natural", rev: watchRev, sessionId });
+      const r = await dbg.debugWatch({ op: "add", expr, format: "natural", rev: watchRev, sessionId });
       setWatches(r.watches);
       setWatchRev(r.rev);
       setWatchExpr("");
     } catch (e) {
-      setError({ code: "debug-watch-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-watch-failed"));
     }
   }, [watchExpr, watchRev, sessionId]);
   const removeWatch = useCallback(async (id) => {
     try {
-      const r = await api.debugWatch({ op: "remove", id, rev: watchRev, sessionId });
+      const r = await dbg.debugWatch({ op: "remove", id, rev: watchRev, sessionId });
       setWatches(r.watches);
       setWatchRev(r.rev);
     } catch (e) {
-      setError({ code: "debug-watch-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-watch-failed"));
     }
   }, [watchRev, sessionId]);
   const readMem = useCallback(async () => {
     try {
-      setMem(await api.debugMemory({
+      setMem(await dbg.debugMemory({
         addr: memAddr,
         count: Math.max(1, Math.min(1024, Number(memCount) || 64)),
         sessionId
       }));
     } catch (e) {
-      setError({ code: "debug-memory-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-memory-failed"));
     }
-  }, [memAddr, memCount, sessionId]);
+  }, [memAddr, memCount, sessionId, dbg]);
   const commitByte = useCallback(async (addr, raw, orig) => {
     const v = raw.trim().replace(/^0x/i, "");
     if (!/^[0-9a-fA-F]{1,2}$/.test(v)) {
@@ -1437,33 +1492,88 @@ function DebugView(props) {
     setEditCell(null);
     if (value === orig.toLowerCase()) return;
     try {
-      await api.debugWrite({ target: "memory", addr, value, confirm: true, sessionId });
+      await dbg.debugWrite({ target: "memory", addr, value, confirm: true, sessionId });
       pushOut(`\u5199\u5185\u5B58 ${addr} <- 0x${value}`);
       await readMem();
     } catch (e) {
-      setError({ code: "debug-write-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-write-failed"));
     }
-  }, [api, sessionId, pushOut, readMem]);
-  const commitReg = useCallback(async (name, raw, orig) => {
+  }, [dbg, sessionId, pushOut, readMem]);
+  const stageReg = useCallback((name, raw, orig, width = 32) => {
     let v = raw.trim();
     if (v.toLowerCase().startsWith("0x")) v = v.slice(2);
-    if (!/^[0-9a-fA-F]{1,8}$/.test(v)) {
-      setError({ code: "debug-write-invalid", message: "\u5BC4\u5B58\u5668\u503C\u9700 1\u20138 \u4F4D HEX\uFF0832 \u4F4D\uFF09" });
+    const digits = Math.max(1, Math.round(width / 4));
+    if (!new RegExp(`^[0-9a-fA-F]{1,${digits}}$`).test(v)) {
+      setError({ code: "debug-write-invalid", message: `\u5BC4\u5B58\u5668\u503C\u9700 1\u2013${digits} \u4F4D HEX\uFF08${width} \u4F4D\u5BBD\uFF09` });
       return;
     }
-    const value = v.padStart(8, "0").toLowerCase();
+    const value = v.padStart(digits, "0").toLowerCase();
     setEditReg(null);
-    const normOrig = orig.trim().toLowerCase().replace(/^0x/, "").padStart(8, "0");
-    if (value === normOrig) return;
+    const normOrig = orig.trim().toLowerCase().replace(/^0x/, "").padStart(digits, "0");
+    setRegDraft((prev) => {
+      const next = { ...prev };
+      if (value === normOrig) delete next[name];
+      else next[name] = value;
+      return next;
+    });
+  }, []);
+  const applyRegDraft = useCallback(async () => {
+    const items = Object.entries(regDraft).map(([name, value]) => ({ name, value }));
+    if (items.length === 0) return;
     try {
-      await api.debugWrite({ target: "register", name, value, confirm: true, sessionId });
-      pushOut(`\u5199\u5BC4\u5B58\u5668 ${name} <- 0x${value}`);
-      const r = await api.debugRegisters({ group: "core", sessionId });
-      setRegs(r.groups);
+      const r = await dbg.debugRegistersWrite({ items, confirm: true, sessionId });
+      pushOut(`\u5E94\u7528 ${r.applied.length} \u4E2A\u5BC4\u5B58\u5668\uFF1A${r.applied.map((a) => `${a.name}=${a.after}`).join(" ")}`);
+      if (!r.ok && r.failed !== void 0) {
+        setError({ code: r.failed.code, message: `\u6279\u91CF\u5199\u672A\u5B8C\u6210\uFF1A${r.failed.name}\uFF08\u5DF2\u5199\u5165 ${r.applied.length} \u9879\uFF09` });
+      }
+      setRegDraft({});
+      const g = await dbg.debugRegisters({ group: "all", sessionId });
+      setRegs(g.groups);
     } catch (e) {
-      setError({ code: "debug-write-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-write-failed"));
     }
-  }, [api, sessionId, pushOut]);
+  }, [dbg, regDraft, sessionId, pushOut]);
+  const loadSource = useCallback(async (file, start) => {
+    setSrcErr("");
+    try {
+      const r = await dbg.debugSource({ file, start: start ?? srcStart, count: 160, sessionId });
+      setSrc(r);
+      setSrcStart(r.start);
+      if (r.stop_line !== void 0 && r.stop_line !== null) setSrcPick(r.stop_line);
+    } catch (e) {
+      setSrc(null);
+      setSrcErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [dbg, sessionId, srcStart]);
+  const toggleSourceBp = useCallback(async (rel, line) => {
+    const loc = `${rel}:${line}`;
+    const cur = bps.find((b) => b.kind === "source" && b.location === loc);
+    try {
+      if (cur !== void 0) await dbg.debugBreakpoints({ op: "remove", id: cur.id, sessionId });
+      else await dbg.debugBreakpoints({ op: "add", kind: "source", location: loc, sessionId });
+      const r = await dbg.debugBreakpoints({ sessionId });
+      setBps(r.breakpoints);
+      setAllowWrite(r.allow_write === true);
+      pushOut(`${cur !== void 0 ? "\u5220\u9664" : "\u65B0\u589E"}\u6E90\u7801\u65AD\u70B9 ${loc}`);
+    } catch (e) {
+      setError(toPanelError(e, "debug-breakpoint-failed"));
+    }
+  }, [dbg, bps, sessionId, pushOut]);
+  useEffect(() => {
+    if (tab !== "src" || !available) return;
+    const st = snap;
+    if (st === null || st.state !== "stopped") return;
+    const ln = st.stop?.frame.line ?? null;
+    const start = ln !== null && ln > 0 ? Math.max(1, ln - 60) : 1;
+    void loadSource(void 0, start);
+  }, [tab, available, snap?.state, snap?.stop?.seq, frameIdx]);
+  useEffect(() => {
+    if (tab !== "src") return;
+    const el = srcStopRef.current;
+    if (el !== null && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "center", behavior: "auto" });
+    }
+  }, [tab, src]);
   const commitField = useCallback(async () => {
     const ef = editField;
     if (ef === null) return;
@@ -1483,36 +1593,36 @@ function DebugView(props) {
     ).join("");
     setEditField(null);
     try {
-      await api.debugWrite({ target: "memory", addr: ef.addr, value, confirm: true, sessionId });
+      await dbg.debugWrite({ target: "memory", addr: ef.addr, value, confirm: true, sessionId });
       pushOut(`\u5199\u5B57\u6BB5 ${ef.reg} <- ${raw}\uFF08\u5BC4\u5B58\u5668 0x${value}\uFF09`);
-      setPeriph(await api.debugPeripherals({ path: ef.reg, read: true, sessionId }));
+      setPeriph(await dbg.debugPeripherals({ path: ef.reg, read: true, sessionId }));
     } catch (e) {
-      setError({ code: "debug-write-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-write-failed"));
     }
-  }, [api, editField, sessionId, pushOut]);
+  }, [dbg, editField, sessionId, pushOut]);
   const addAddrBp = useCallback(async (addr) => {
     try {
-      await api.debugBreakpoints({ op: "add", kind: "addr", location: addr, sessionId });
-      const r = await api.debugBreakpoints({ sessionId });
+      await dbg.debugBreakpoints({ op: "add", kind: "addr", location: addr, sessionId });
+      const r = await dbg.debugBreakpoints({ sessionId });
       setBps(r.breakpoints);
       setAllowWrite(r.allow_write === true);
       pushOut(`\u5730\u5740\u65AD\u70B9 + ${addr}`);
     } catch (e) {
-      setError({ code: "debug-breakpoint-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-breakpoint-failed"));
     }
-  }, [api, sessionId, pushOut]);
+  }, [dbg, sessionId, pushOut]);
   const loadPeriph = useCallback(async (path, read) => {
     try {
-      setPeriph(await api.debugPeripherals({ path, read, sessionId }));
+      setPeriph(await dbg.debugPeripherals({ path, read, sessionId }));
     } catch (e) {
-      setError({ code: "debug-svd-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-svd-failed"));
     }
   }, [sessionId]);
   const selectFrame = useCallback((idx) => {
     setFrameIdx(idx);
     const s = snap;
     if (s === null || s.state !== "stopped") return;
-    void api.debugVariables({ frame: idx, scope: varsMode, sessionId }).then((r) => {
+    void dbg.debugVariables({ frame: idx, scope: varsMode, sessionId }).then((r) => {
       setVars(r.nodes);
       setChildren({});
     }).catch(() => {
@@ -1520,7 +1630,7 @@ function DebugView(props) {
   }, [snap, varsMode, sessionId]);
   useEffect(() => {
     if (snap?.state !== "stopped") return;
-    void api.debugVariables({ frame: frameIdx, scope: varsMode, sessionId }).then((r) => {
+    void dbg.debugVariables({ frame: frameIdx, scope: varsMode, sessionId }).then((r) => {
       setVars(r.nodes);
       setChildren({});
     }).catch(() => {
@@ -1530,6 +1640,7 @@ function DebugView(props) {
     if (!visible || !available || snap === null) return;
     const q = new URLSearchParams();
     if (sessionId !== void 0 && sessionId !== "") q.set("sessionId", sessionId);
+    if (dsid !== "") q.set("debug_session", dsid);
     const es = new EventSource(`/elab/debug/events?${q.toString()}`);
     const onMsg = (ev) => {
       let env;
@@ -1629,7 +1740,7 @@ function DebugView(props) {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.debugOpen({
+      const r = await dbg.debugOpen({
         project,
         options: { stop_at: "main" },
         lease_s: 600,
@@ -1640,31 +1751,31 @@ function DebugView(props) {
       pushOut(`\u8C03\u8BD5\u4F1A\u8BDD\u5DF2\u6253\u5F00\uFF08${r.session?.id ?? ""}\uFF09`);
       setTab("stack");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError({ code: "debug-open-failed", message: msg });
+      setError(toPanelError(e, "debug-open-failed"));
     } finally {
       setBusy(false);
     }
   }, [applySnap, project, pushOut, sessionId]);
-  const control = useCallback(async (action) => {
+  const control = useCallback(async (action, line = 0) => {
     setBusy(true);
     try {
-      await api.debugControl({
+      await dbg.debugControl({
         action,
         sessionId,
-        ...action === "reset" ? { confirm: true } : {}
+        ...action === "reset" ? { confirm: true } : {},
+        ...action === "run_to_line" && src !== null && line > 0 ? { file: src.rel, line } : {}
       });
       await reloadSession();
     } catch (e) {
-      setError({ code: "debug-control-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-control-failed"));
     } finally {
       setBusy(false);
     }
-  }, [reloadSession, sessionId]);
+  }, [reloadSession, sessionId, src]);
   const closeSession = useCallback(async () => {
     setBusy(true);
     try {
-      const r = await api.debugClose({ resume: true, sessionId });
+      const r = await dbg.debugClose({ resume: true, sessionId });
       pushOut(`\u4F1A\u8BDD\u5DF2\u5173\u95ED\uFF08resumed=${String(r.resumed)}\uFF09`);
       applySnap(null);
       setFrames([]);
@@ -1673,7 +1784,7 @@ function DebugView(props) {
       setBps([]);
       setChildren({});
     } catch (e) {
-      setError({ code: "debug-close-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-close-failed"));
     } finally {
       setBusy(false);
     }
@@ -1682,7 +1793,7 @@ function DebugView(props) {
     const loc = bpLocation.trim();
     if (loc === "") return;
     try {
-      await api.debugBreakpoints({
+      await dbg.debugBreakpoints({
         op: "add",
         kind: bpKind,
         location: loc,
@@ -1691,19 +1802,19 @@ function DebugView(props) {
       });
       setBpLocation("");
       setBpCond("");
-      const r = await api.debugBreakpoints({ sessionId });
+      const r = await dbg.debugBreakpoints({ sessionId });
       setBps(r.breakpoints);
     } catch (e) {
-      setError({ code: "debug-breakpoint-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-breakpoint-failed"));
     }
   }, [bpCond, bpKind, bpLocation, sessionId]);
   const bpOp = useCallback(async (op, id) => {
     try {
-      await api.debugBreakpoints({ op, id, sessionId });
-      const r = await api.debugBreakpoints({ sessionId });
+      await dbg.debugBreakpoints({ op, id, sessionId });
+      const r = await dbg.debugBreakpoints({ sessionId });
       setBps(r.breakpoints);
     } catch (e) {
-      setError({ code: "debug-breakpoint-failed", message: e instanceof Error ? e.message : String(e) });
+      setError(toPanelError(e, "debug-breakpoint-failed"));
     }
   }, [sessionId]);
   const expandVar = useCallback(async (node, path) => {
@@ -1716,7 +1827,7 @@ function DebugView(props) {
       return;
     }
     try {
-      const r = await api.debugVariables({ frame: frameIdx, scope: "children", var: node.name, sessionId });
+      const r = await dbg.debugVariables({ frame: frameIdx, scope: "children", var: node.name, sessionId });
       setChildren((prev) => ({ ...prev, [path]: r.nodes }));
     } catch (e) {
       pushOut(`\u5C55\u5F00 ${node.name} \u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`, "alert");
@@ -1733,6 +1844,7 @@ function DebugView(props) {
     ["regs", "\u5BC4\u5B58\u5668"],
     ["bps", `\u65AD\u70B9 ${bps.length}`],
     ...features.includes("watch") ? [["watch", "\u76D1\u89C6"]] : [],
+    ...features.includes("source") ? [["src", "\u6E90\u7801"]] : [],
     ["mem", "\u5185\u5B58"],
     ["disasm", "\u53CD\u6C47\u7F16"],
     ...features.includes("svd") ? [["periph", "\u5916\u8BBE"]] : [],
@@ -1741,6 +1853,14 @@ function DebugView(props) {
     ["out", "\u8F93\u51FA"]
   ];
   const stopView = snap?.stop == null ? null : snap.stop.frame.func === "" && frames.length > 0 ? { ...snap.stop, frame: frames[0], pc: snap.stop.pc !== "" ? snap.stop.pc : frames[0].addr } : snap.stop;
+  const regGroups = regGroup === "all" ? regs : regs.filter((g) => g.name === regGroup);
+  const draftCount = Object.keys(regDraft).length;
+  const srcBpMap = /* @__PURE__ */ new Map();
+  if (src !== null) {
+    for (const b of bps) {
+      if (b.kind === "source") srcBpMap.set(b.location, b);
+    }
+  }
   return /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, /* @__PURE__ */ react_default.createElement("div", { style: {
     display: "flex",
     alignItems: "center",
@@ -1766,12 +1886,21 @@ function DebugView(props) {
       disabled: busy,
       onClick: () => void closeSession(),
       style: { ...BTN, borderColor: "var(--elab-status-fail)", color: "var(--elab-status-fail)" },
-      title: "\u5173\u95ED\u4F1A\u8BDD\u5E76\u6062\u590D\u76EE\u6807\u8FD0\u884C\uFF08C36\uFF09"
+      title: embedded ? "\u5173\u95ED\u672C\u4F1A\u8BDD\uFF08\u4E0E\u4F1A\u8BDD\u6761\u91CC\u7684 \xD7 \u540C\u6548\uFF0C\u4E0D\u5F71\u54CD\u5176\u5B83\u4F1A\u8BDD\uFF09" : "\u5173\u95ED\u4F1A\u8BDD\u5E76\u6062\u590D\u76EE\u6807\u8FD0\u884C\uFF08C36\uFF09"
     },
     "\u5173\u95ED"
   )), snap !== null && /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", ...MONO, color: "var(--elab-fg-muted)" } }, /* @__PURE__ */ react_default.createElement("span", { style: {
     color: snap.state === "stopped" ? "var(--elab-status-run)" : snap.state === "running" ? "var(--elab-status-ok)" : "var(--elab-fg-muted)"
-  } }, STATE_TEXT[snap.state] ?? snap.state), ` \xB7 ${OWNER_TEXT[snap.owner] ?? snap.owner}${lease ? ` \xB7 ${snap.lease_remaining_s}s` : ""}`)), stopped && stopView !== null && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-accent)" } }, stopView.frame.func || "??"), stopView.frame.file !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-secondary)" } }, ` @ ${stopView.frame.file}${stopView.frame.line === null ? "" : `:${stopView.frame.line}`}`), stopView.pc !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)" } }, `  ${stopView.pc}`), stopView.warn !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-run)" } }, `  \u26A0 ${stopView.warn}`)), error !== null && /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", color: "var(--elab-status-fail)", fontSize: "var(--elab-fs-xs)" } }, `${error.code}\uFF1A${error.message}`, error.hint !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)" } }, `\uFF08${error.hint}\uFF09`)), bpToast !== "" && /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", margin: "3px 6px", padding: "3px 8px", border: "1px solid var(--elab-accent)", borderRadius: "var(--elab-radius-sm)", background: "var(--elab-bg-raised)", color: "var(--elab-accent)", fontSize: "var(--elab-fs-xs)" } }, bpToast), snap !== null && /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "2px", flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", flexWrap: "wrap" } }, tabs.map(([id, label]) => /* @__PURE__ */ react_default.createElement(
+  } }, STATE_TEXT[snap.state] ?? snap.state), ` \xB7 ${OWNER_TEXT[snap.owner] ?? snap.owner}${lease ? ` \xB7 ${snap.lease_remaining_s}s` : ""}`)), stopped && stopView !== null && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-accent)" } }, stopView.frame.func || "??"), stopView.frame.file !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-secondary)" } }, ` @ ${stopView.frame.file}${stopView.frame.line === null ? "" : `:${stopView.frame.line}`}`), stopView.pc !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)" } }, `  ${stopView.pc}`), stopView.warn !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-run)" } }, `  \u26A0 ${stopView.warn}`)), error !== null && snap !== null && /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", color: "var(--elab-status-fail)", fontSize: "var(--elab-fs-xs)" } }, `${error.code}\uFF1A${error.message}`, error.hint !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)" } }, `\uFF08${error.hint}\uFF09`), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => setError(null),
+      style: { ...BTN, marginLeft: "6px", padding: "0 4px" },
+      title: "\u6536\u8D77\u8FD9\u6761\u9519\u8BEF"
+    },
+    "\xD7"
+  )), bpToast !== "" && /* @__PURE__ */ react_default.createElement("div", { style: { flex: "0 0 auto", margin: "3px 6px", padding: "3px 8px", border: "1px solid var(--elab-accent)", borderRadius: "var(--elab-radius-sm)", background: "var(--elab-bg-raised)", color: "var(--elab-accent)", fontSize: "var(--elab-fs-xs)" } }, bpToast), snap !== null && /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "2px", flex: "0 0 auto", padding: "3px 6px", borderBottom: "1px solid var(--elab-border)", flexWrap: "wrap" } }, tabs.map(([id, label]) => /* @__PURE__ */ react_default.createElement(
     "button",
     {
       key: id,
@@ -1784,7 +1913,29 @@ function DebugView(props) {
       }
     },
     label
-  ))), /* @__PURE__ */ react_default.createElement("div", { ref: dataRef, style: { flex: "1 1 auto", minHeight: 0, display: "flex", overflow: "hidden", background: "var(--elab-bg-surface)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minWidth: 0, minHeight: 0, overflow: "auto" } }, snap === null && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "var(--elab-space-3)", color: "var(--elab-fg-secondary)", fontSize: "var(--elab-fs-sm)", lineHeight: 1.6 } }, project === "" ? "\u5148\u5728\u5DE5\u4F5C\u533A\u9009\u4E2D/\u63A5\u5165\u4E00\u4E2A\u5DE5\u7A0B\u3002" : `\u5DE5\u7A0B\u300C${project}\u300D\uFF1A\u70B9\u300C\u5F00\u59CB\u8C03\u8BD5\u300D\u4F1A\u590D\u4F4D\u3001\u4E0B\u8F7D ELF \u5E76\u505C\u5728 main\u3002\u6CE8\u518C\u5668\u548C\u8C03\u7528\u6808\u4E0E Agent \u5171\u7528\u540C\u4E00\u4EFD\u4F1A\u8BDD\u6570\u636E\u3002`), snap !== null && snap.state === "starting" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "var(--elab-space-3)", color: "var(--elab-fg-secondary)", fontSize: "var(--elab-fs-sm)" } }, "\u6B63\u5728\u542F\u52A8 openocd / gdb \u2026"), tab === "stack" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, frames.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u65E0\u6808\u5E27 / \u76EE\u6807\u6B63\u5728\u8FD0\u884C\uFF09"), frames.map((f) => /* @__PURE__ */ react_default.createElement(
+  ))), /* @__PURE__ */ react_default.createElement("div", { ref: dataRef, style: { flex: "1 1 auto", minHeight: 0, display: "flex", overflow: "hidden", background: "var(--elab-bg-surface)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minWidth: 0, minHeight: 0, overflow: "auto" } }, snap === null && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "var(--elab-space-3)", color: "var(--elab-fg-secondary)", fontSize: "var(--elab-fs-sm)", lineHeight: 1.6 } }, error === null ? project === "" ? "\u5148\u5728\u5DE5\u4F5C\u533A\u9009\u4E2D/\u63A5\u5165\u4E00\u4E2A\u5DE5\u7A0B\u3002" : `\u5DE5\u7A0B\u300C${project}\u300D\uFF1A\u70B9\u300C\u5F00\u59CB\u8C03\u8BD5\u300D\u4F1A\u590D\u4F4D\u3001\u4E0B\u8F7D ELF \u5E76\u505C\u5728 main\u3002\u6CE8\u518C\u5668\u548C\u8C03\u7528\u6808\u4E0E Agent \u5171\u7528\u540C\u4E00\u4EFD\u4F1A\u8BDD\u6570\u636E\u3002` : (
+    // 空态是用户视线的落点：失败时正文必须给出"为什么 + 怎么办"，
+    // 只在顶部挂一条细字报错，用户会以为"点了没反应"。
+    /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        role: "alert",
+        style: {
+          border: "1px solid var(--elab-status-fail)",
+          borderLeft: "3px solid var(--elab-status-fail)",
+          borderRadius: "var(--elab-radius-sm)",
+          background: "var(--elab-bg-raised)",
+          padding: "8px 10px",
+          color: "var(--elab-fg-primary)"
+        }
+      },
+      /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-status-fail)", fontWeight: 600 } }, `\u6253\u4E0D\u5F00\u8C03\u8BD5\u4F1A\u8BDD \xB7 ${error.code}`),
+      /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "3px" } }, error.message),
+      error.hint !== void 0 && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, marginTop: "4px", color: "var(--elab-fg-muted)", whiteSpace: "pre-wrap" } }, error.hint),
+      RECOVERY[error.code] !== void 0 && /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", color: "var(--elab-fg-secondary)" } }, `\u600E\u4E48\u529E\uFF1A${RECOVERY[error.code]}`),
+      /* @__PURE__ */ react_default.createElement("div", { style: { marginTop: "6px", color: "var(--elab-fg-muted)", fontSize: "var(--elab-fs-xs)" } }, "\u6539\u597D\u4E4B\u540E\u70B9\u5DE6\u4E0A\u89D2\u300C\u5F00\u59CB\u8C03\u8BD5\u300D\u91CD\u8BD5\u3002")
+    )
+  )), snap !== null && snap.state === "starting" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "var(--elab-space-3)", color: "var(--elab-fg-secondary)", fontSize: "var(--elab-fs-sm)" } }, "\u6B63\u5728\u542F\u52A8 openocd / gdb \u2026"), tab === "stack" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, frames.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u65E0\u6808\u5E27 / \u76EE\u6807\u6B63\u5728\u8FD0\u884C\uFF09"), frames.map((f) => /* @__PURE__ */ react_default.createElement(
     "button",
     {
       key: f.level,
@@ -1804,34 +1955,79 @@ function DebugView(props) {
     /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", maxWidth: "45%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: f.pc ? "var(--elab-accent)" : "var(--elab-fg-primary)", fontFamily: "var(--elab-font-mono)", fontSize: "var(--elab-fs-xs)" } }, f.func),
     /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto", minWidth: 0, marginLeft: "auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--elab-fg-muted)", fontFamily: "var(--elab-font-mono)", fontSize: "var(--elab-fs-xs)" }, title: f.file === "" ? "" : `${f.file}:${f.line ?? "?"}` }, f.file === "" ? "" : `${f.file}:${f.line ?? "?"}`),
     f.addr !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { flex: "0 0 auto", color: "var(--elab-fg-muted)", fontFamily: "var(--elab-font-mono)", fontSize: "var(--elab-fs-xs)" } }, f.addr)
-  )), snap.threads.length > 1 && /* @__PURE__ */ react_default.createElement("div", { style: { ...ROW, color: "var(--elab-fg-muted)" } }, snap.threads.map((t) => `${t.current ? "\u25CF" : "\u25CB"} ${t.name || `#${t.id}`}`).join("   "))), tab === "vars" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setVarsMode("locals"), style: { ...BTN, color: varsMode === "locals" ? "var(--elab-accent)" : "var(--elab-fg-muted)" } }, "\u5C40\u90E8"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setVarsMode("args"), style: { ...BTN, color: varsMode === "args" ? "var(--elab-accent)" : "var(--elab-fg-muted)" } }, "\u53C2\u6570"), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, `\u5E27 #${frameIdx}`)), vars.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u65E0\u53D8\u91CF\uFF1B\u53EF\u80FD\u672A\u5E26 -g \u6216\u5DF2\u4F18\u5316\uFF09"), vars.map((v) => /* @__PURE__ */ react_default.createElement(VarRow, { key: v.name, node: v, path: v.name, depth: 0, open: children, onToggle: expandVar }))), tab === "regs" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, regs.map((g) => /* @__PURE__ */ react_default.createElement("div", { key: g.name }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "3px 6px", color: "var(--elab-fg-muted)", ...MONO } }, g.label), g.regs.map((r) => {
+  )), snap.threads.length > 1 && /* @__PURE__ */ react_default.createElement("div", { style: { ...ROW, color: "var(--elab-fg-muted)" } }, snap.threads.map((t) => `${t.current ? "\u25CF" : "\u25CB"} ${t.name || `#${t.id}`}`).join("   "))), tab === "vars" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setVarsMode("locals"), style: { ...BTN, color: varsMode === "locals" ? "var(--elab-accent)" : "var(--elab-fg-muted)" } }, "\u5C40\u90E8"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setVarsMode("args"), style: { ...BTN, color: varsMode === "args" ? "var(--elab-accent)" : "var(--elab-fg-muted)" } }, "\u53C2\u6570"), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, `\u5E27 #${frameIdx}`)), vars.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u65E0\u53D8\u91CF\uFF1B\u53EF\u80FD\u672A\u5E26 -g \u6216\u5DF2\u4F18\u5316\uFF09"), vars.map((v) => /* @__PURE__ */ react_default.createElement(VarRow, { key: v.name, node: v, path: v.name, depth: 0, open: children, onToggle: expandVar }))), tab === "regs" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", alignItems: "center", padding: "4px 6px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement(
+    "select",
+    {
+      value: regGroup,
+      "aria-label": "\u5BC4\u5B58\u5668\u7EC4",
+      onChange: (e) => {
+        setRegGroup(e.currentTarget.value);
+        setRegDraft({});
+      },
+      style: { ...INPUT, flex: "0 0 auto" }
+    },
+    /* @__PURE__ */ react_default.createElement("option", { value: "all" }, "\u5168\u90E8\u7EC4"),
+    regs.map((g) => /* @__PURE__ */ react_default.createElement("option", { key: g.name, value: g.name }, g.label))
+  ), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: busy || draftCount === 0 || !allowWrite,
+      onClick: () => void applyRegDraft(),
+      style: {
+        ...BTN,
+        borderColor: draftCount > 0 ? "var(--elab-accent)" : "var(--elab-border)",
+        color: draftCount > 0 ? "var(--elab-accent)" : "var(--elab-fg-muted)"
+      },
+      title: "\u628A\u672C\u7EC4\u8349\u7A3F\u4E00\u6B21\u5199\u5165\uFF08\u5185\u6838\u5EFA\u4E00\u6761 target=register-group \u5BA1\u8BA1\uFF09"
+    },
+    `\u5E94\u7528\u672C\u7EC4\uFF08${draftCount}\uFF09`
+  ), draftCount > 0 && /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setRegDraft({}), style: BTN }, "\u653E\u5F03\u8349\u7A3F"), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, allowWrite ? "\u6539\u503C\u2192\u5E94\u7528\u672C\u7EC4\uFF08\u4E00\u6761\u5BA1\u8BA1\uFF09" : "\u53EA\u8BFB")), regGroups.map((g) => /* @__PURE__ */ react_default.createElement("div", { key: g.name }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "3px 6px", color: "var(--elab-fg-muted)", ...MONO } }, g.label), g.regs.map((r) => {
     const editable = r.editable === true && allowWrite;
     const editing = editReg?.name === r.name;
-    return /* @__PURE__ */ react_default.createElement("div", { key: r.name, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { color: r.pc ? "var(--elab-accent)" : "var(--elab-fg-secondary)", flex: "0 0 52px" } }, r.name), editing ? /* @__PURE__ */ react_default.createElement(
-      "input",
+    const draft = regDraft[r.name];
+    const dirty = draft !== void 0 && draft !== r.hex.replace(/^0x/i, "").padStart(2, "0");
+    const width = r.width ?? 32;
+    return /* @__PURE__ */ react_default.createElement(
+      "div",
       {
-        autoFocus: true,
-        maxLength: 10,
-        value: editReg.value,
-        "aria-label": `\u7F16\u8F91\u5BC4\u5B58\u5668 ${r.name}`,
-        onChange: (e) => setEditReg({ ...editReg, value: e.currentTarget.value }),
-        onKeyDown: (e) => {
-          if (e.key === "Enter") void commitReg(r.name, editReg.value, editReg.orig);
-          if (e.key === "Escape") setEditReg(null);
-        },
-        onBlur: () => setEditReg(null),
-        style: { width: "84px", padding: "0 3px", border: "1px solid var(--elab-accent)", borderRadius: "2px", background: "var(--elab-bg-code)", color: "var(--elab-fg-primary)", ...MONO }
-      }
-    ) : /* @__PURE__ */ react_default.createElement(
-      "button",
-      {
-        type: "button",
-        title: editable ? `\u70B9\u51FB\u6539\u5199 ${r.name}` : "\u4E0D\u53EF\u5199",
-        onClick: () => editable ? setEditReg({ name: r.name, value: r.hex, orig: r.hex }) : void 0,
-        style: { padding: "0 2px", border: "1px dashed transparent", borderRadius: "2px", background: "transparent", color: "var(--elab-fg-primary)", cursor: editable ? "pointer" : "default", ...MONO }
+        key: r.name,
+        style: {
+          ...ROW,
+          background: dirty ? "var(--elab-bg-raised)" : "transparent",
+          borderLeft: dirty ? "2px solid var(--elab-accent)" : "2px solid transparent"
+        }
       },
-      r.hex
-    ), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, r.natural), r.flags !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-run)", ...MONO } }, Object.entries(r.flags).filter(([, v]) => v === 1).map(([k]) => k).join("")));
+      /* @__PURE__ */ react_default.createElement("span", { style: { color: r.pc ? "var(--elab-accent)" : "var(--elab-fg-secondary)", flex: "0 0 52px" } }, r.name),
+      editing ? /* @__PURE__ */ react_default.createElement(
+        "input",
+        {
+          autoFocus: true,
+          maxLength: 18,
+          value: editReg.value,
+          "aria-label": `\u7F16\u8F91\u5BC4\u5B58\u5668 ${r.name}`,
+          onChange: (e) => setEditReg({ ...editReg, value: e.currentTarget.value }),
+          onKeyDown: (e) => {
+            if (e.key === "Enter") stageReg(r.name, editReg.value, editReg.orig, width);
+            if (e.key === "Escape") setEditReg(null);
+          },
+          onBlur: () => setEditReg(null),
+          style: { width: "84px", padding: "0 3px", border: "1px solid var(--elab-accent)", borderRadius: "2px", background: "var(--elab-bg-code)", color: "var(--elab-fg-primary)", ...MONO }
+        }
+      ) : /* @__PURE__ */ react_default.createElement(
+        "button",
+        {
+          type: "button",
+          title: editable ? `\u6539 ${r.name}\uFF08\u53EA\u8FDB\u8349\u7A3F\uFF0C\u4E0D\u7ACB\u5373\u5199\uFF09` : r.readonly === "wide" ? `${width} \u4F4D\u53EA\u8BFB` : "\u53EA\u8BFB\uFF08pc/lr/xpsr\uFF09",
+          onClick: () => editable ? setEditReg({ name: r.name, value: draft ?? r.hex, orig: r.hex }) : void 0,
+          style: { padding: "0 2px", border: "1px dashed transparent", borderRadius: "2px", background: "transparent", color: dirty ? "var(--elab-accent)" : "var(--elab-fg-primary)", cursor: editable ? "pointer" : "default", ...MONO }
+        },
+        draft !== void 0 ? `0x${draft}` : r.hex
+      ),
+      dirty ? /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-faint)", ...MONO } }, "\u8349\u7A3F") : /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, r.natural),
+      width > 32 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)", ...MONO } }, `${width}b`),
+      r.flags !== void 0 && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-run)", ...MONO } }, Object.entries(r.flags).filter(([, v]) => v === 1).map(([k]) => k).join(""))
+    );
   }))), regs.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u76EE\u6807\u8FD0\u884C\u4E2D\uFF0C\u5BC4\u5B58\u5668\u4E0D\u53EF\u8BFB\uFF09")), tab === "bps" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("select", { value: bpKind, onChange: (e) => setBpKind(e.currentTarget.value === "addr" ? "addr" : "func"), style: { ...INPUT, flex: "0 0 64px" } }, /* @__PURE__ */ react_default.createElement("option", { value: "func" }, "\u51FD\u6570"), /* @__PURE__ */ react_default.createElement("option", { value: "addr" }, "\u5730\u5740")), /* @__PURE__ */ react_default.createElement(
     "input",
     {
@@ -1851,7 +2047,100 @@ function DebugView(props) {
       placeholder: "\u8868\u8FBE\u5F0F\uFF0C\u5982 g_hb_frame.on_frame",
       style: INPUT
     }
-  ), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void addWatch(), style: { ...BTN, color: "var(--elab-accent)" } }, "\u6DFB\u52A0")), watches.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u76D1\u89C6\u3002\u53EA\u5728\u6682\u505C\u6001\u6C42\u503C\uFF0C\u5217\u8868\u8DE8\u4F1A\u8BDD\u4FDD\u7559\uFF09"), watches.map((w) => /* @__PURE__ */ react_default.createElement("div", { key: w.id, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-secondary)" } }, w.expr), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", ...MONO, color: w.error !== void 0 ? "var(--elab-status-fail)" : "var(--elab-fg-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, w.error !== void 0 ? w.error : w.natural || w.value || w.hex), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void removeWatch(w.id), style: BTN }, "\u5220\u9664")))), tab === "mem" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("input", { value: memAddr, onChange: (e) => setMemAddr(e.currentTarget.value), placeholder: "\u5730\u5740\uFF0C\u5982 0x20000010", style: { ...INPUT, flex: "1 1 110px" } }), /* @__PURE__ */ react_default.createElement("input", { value: memCount, onChange: (e) => setMemCount(e.currentTarget.value), placeholder: "\u5B57\u8282\u6570", style: { ...INPUT, flex: "0 0 56px" } }), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void readMem(), style: BTN }, "\u8BFB\u53D6")), mem !== null && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, padding: "4px 6px", color: "var(--elab-fg-primary)" } }, memRows(mem).map((row) => /* @__PURE__ */ react_default.createElement("div", { key: row.addr, style: { display: "flex", alignItems: "center", whiteSpace: "pre" } }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)", marginRight: "6px" } }, row.addr), row.bytes.map((b, i) => {
+  ), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void addWatch(), style: { ...BTN, color: "var(--elab-accent)" } }, "\u6DFB\u52A0")), watches.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u76D1\u89C6\u3002\u53EA\u5728\u6682\u505C\u6001\u6C42\u503C\uFF0C\u5217\u8868\u8DE8\u4F1A\u8BDD\u4FDD\u7559\uFF09"), watches.map((w) => /* @__PURE__ */ react_default.createElement("div", { key: w.id, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-secondary)" } }, w.expr), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", ...MONO, color: w.error !== void 0 ? "var(--elab-status-fail)" : "var(--elab-fg-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, w.error !== void 0 ? w.error : w.natural || w.value || w.hex), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void removeWatch(w.id), style: BTN }, "\u5220\u9664")))), tab === "src" && snap !== null && /**
+   * 自带滚动区：停止行 scrollIntoView 若落在**祖先**滚动容器上，会把
+   * 「上一页/下一页/运行到本行」一起顶出视野（实测）。列表独立滚动即可。
+   */
+  /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "hidden" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", alignItems: "center", padding: "4px 6px", flexWrap: "wrap", flex: "0 0 auto" } }, /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: src === null || busy,
+      onClick: () => void loadSource(src?.file, Math.max(1, srcStart - 60)),
+      style: BTN
+    },
+    "\u2191 \u4E0A\u4E00\u9875"
+  ), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: src === null || busy || src.has_more !== true,
+      onClick: () => void loadSource(src?.file, srcStart + 160),
+      style: BTN
+    },
+    "\u2193 \u4E0B\u4E00\u9875"
+  ), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: busy || !stopped || src === null || srcPick <= 0,
+      onClick: () => void control("run_to_line", srcPick),
+      style: { ...BTN, borderColor: "var(--elab-accent)", color: "var(--elab-accent)" },
+      title: "\u5728\u5F53\u524D\u6587\u4EF6\u7684\u76EE\u6807\u884C\u5EFA\u4E34\u65F6\u65AD\u70B9\u5E76\u7EE7\u7EED\uFF08\u547D\u4E2D\u540E\u81EA\u52A8\u5220\u9664\uFF09"
+    },
+    `\u8FD0\u884C\u5230\u672C\u884C${srcPick > 0 ? `\uFF08${srcPick}\uFF09` : ""}`
+  ), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, src === null ? "\u2014" : `${src.rel} \xB7 \u5171 ${src.total} \u884C`)), srcErr !== "" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-status-fail)", ...MONO } }, srcErr), src !== null && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, paddingBottom: "6px", flex: "1 1 auto", minHeight: 0, overflow: "auto" } }, src.lines.map((ln) => {
+    const loc = `${src.rel}:${ln.no}`;
+    const bp = srcBpMap.get(loc);
+    const isStop = src.stop_line !== null && src.stop_line !== void 0 && src.stop_line === ln.no;
+    const isPick = srcPick === ln.no;
+    return /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        key: ln.no,
+        ref: isStop ? srcStopRef : void 0,
+        style: {
+          display: "flex",
+          alignItems: "baseline",
+          gap: "4px",
+          background: isStop ? "var(--elab-bg-raised)" : "transparent",
+          borderLeft: isStop ? "2px solid var(--elab-status-run)" : isPick ? "2px solid var(--elab-accent)" : "2px solid transparent"
+        }
+      },
+      /* @__PURE__ */ react_default.createElement(
+        "button",
+        {
+          type: "button",
+          onClick: () => void toggleSourceBp(src.rel, ln.no),
+          title: bp === void 0 ? `\u5728 ${loc} \u8BBE\u65AD\u70B9` : `\u5220\u9664\u65AD\u70B9 ${loc}`,
+          style: {
+            flex: "0 0 auto",
+            display: "flex",
+            alignItems: "center",
+            gap: "3px",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            padding: "0 2px",
+            font: "inherit"
+          }
+        },
+        /* @__PURE__ */ react_default.createElement("span", { style: {
+          color: bp === void 0 ? "transparent" : bp.enabled ? "var(--elab-status-fail)" : "var(--elab-fg-faint)"
+        } }, bp === void 0 ? "\xB7" : bp.enabled ? "\u25CF" : "\u25CB"),
+        /* @__PURE__ */ react_default.createElement("span", { style: {
+          minWidth: "26px",
+          textAlign: "right",
+          color: isStop ? "var(--elab-status-run)" : "var(--elab-fg-faint)"
+        } }, ln.no)
+      ),
+      /* @__PURE__ */ react_default.createElement(
+        "code",
+        {
+          onClick: () => setSrcPick(ln.no),
+          style: {
+            flex: "1 1 auto",
+            minWidth: 0,
+            overflowX: "auto",
+            whiteSpace: "pre",
+            cursor: "pointer",
+            color: isStop ? "var(--elab-fg-primary)" : "var(--elab-fg-secondary)"
+          }
+        },
+        ln.text === "" ? " " : ln.text
+      )
+    );
+  })), src === null && srcErr === "" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, stopped ? "\u6B63\u5728\u8BFB\u53D6\u6E90\u7801\u2026" : "\u6682\u505C\u540E\u663E\u793A\u6E90\u7801")), tab === "mem" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px", flexWrap: "wrap" } }, /* @__PURE__ */ react_default.createElement("input", { value: memAddr, onChange: (e) => setMemAddr(e.currentTarget.value), placeholder: "\u5730\u5740\uFF0C\u5982 0x20000010", style: { ...INPUT, flex: "1 1 110px" } }), /* @__PURE__ */ react_default.createElement("input", { value: memCount, onChange: (e) => setMemCount(e.currentTarget.value), placeholder: "\u5B57\u8282\u6570", style: { ...INPUT, flex: "0 0 56px" } }), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void readMem(), style: BTN }, "\u8BFB\u53D6")), mem !== null && /* @__PURE__ */ react_default.createElement("div", { style: { ...MONO, padding: "4px 6px", color: "var(--elab-fg-primary)" } }, memRows(mem).map((row) => /* @__PURE__ */ react_default.createElement("div", { key: row.addr, style: { display: "flex", alignItems: "center", whiteSpace: "pre" } }, /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)", marginRight: "6px" } }, row.addr), row.bytes.map((b, i) => {
     const addr = `0x${(Number.parseInt(row.addr, 16) + i).toString(16).padStart(8, "0")}`;
     const editing = editCell?.addr === addr;
     if (editing) {
@@ -1884,7 +2173,7 @@ function DebugView(props) {
       },
       b
     ) : /* @__PURE__ */ react_default.createElement("span", { key: addr, style: { minWidth: "17px", margin: "0 1px", textAlign: "center" } }, b);
-  }), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)", marginLeft: "6px" } }, row.ascii)))), /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", fontSize: "var(--elab-fs-xs)" } }, allowWrite ? "\u70B9 HEX \u5B57\u8282\u53EF\u76F4\u63A5\u6539\u5199\uFF08\u5185\u6838\u8BB0 before/after \u5BA1\u8BA1\uFF09\u3002" : "\u53EA\u8BFB\uFF1A\u5199\u5185\u5B58\u9700\u8981\u4EBA\u7C7B\u4F1A\u8BDD\u4E14 allow_write=true\u3002")), tab === "disasm" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void api.debugDisasm({ sessionId }).then(setDisasm).catch(() => void 0), style: BTN }, "\u5237\u65B0"), /* @__PURE__ */ react_default.createElement("button", { type: "button", disabled: !stopped || busy, onClick: () => void control("stepi"), style: BTN }, "\u6307\u4EE4\u5355\u6B65")), disasm === null && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u6307\u4EE4\uFF1B\u76EE\u6807\u9700\u6682\u505C\uFF09"), disasm?.instructions.map((ins) => /* @__PURE__ */ react_default.createElement(
+  }), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)", marginLeft: "6px" } }, row.ascii)))), /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", fontSize: "var(--elab-fs-xs)" } }, allowWrite ? "\u70B9 HEX \u5B57\u8282\u53EF\u76F4\u63A5\u6539\u5199\uFF08\u5185\u6838\u8BB0 before/after \u5BA1\u8BA1\uFF09\u3002" : "\u53EA\u8BFB\uFF1A\u5199\u5185\u5B58\u9700\u8981\u4EBA\u7C7B\u4F1A\u8BDD\u4E14 allow_write=true\u3002")), tab === "disasm" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px" } }, /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => void dbg.debugDisasm({ sessionId }).then(setDisasm).catch(() => void 0), style: BTN }, "\u5237\u65B0"), /* @__PURE__ */ react_default.createElement("button", { type: "button", disabled: !stopped || busy, onClick: () => void control("stepi"), style: BTN }, "\u6307\u4EE4\u5355\u6B65")), disasm === null && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u6307\u4EE4\uFF1B\u76EE\u6807\u9700\u6682\u505C\uFF09"), disasm?.instructions.map((ins) => /* @__PURE__ */ react_default.createElement(
     "div",
     {
       key: ins.addr,
@@ -1899,7 +2188,7 @@ function DebugView(props) {
         onClick: () => {
           setMemAddr(ins.addr);
           setTab("mem");
-          void api.debugMemory({ addr: ins.addr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId }).then(setMem).catch(() => void 0);
+          void dbg.debugMemory({ addr: ins.addr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId }).then(setMem).catch(() => void 0);
         },
         style: { ...MONO, flex: "0 0 74px", padding: 0, border: "none", background: "none", color: ins.pc ? "var(--elab-accent)" : "var(--elab-fg-faint)", cursor: "pointer", textAlign: "left" }
       },
@@ -1976,7 +2265,7 @@ function DebugView(props) {
       },
       f.enum !== null ? f.enum.name : `0x${f.value.toString(16)}`
     ));
-  }))), tab === "rtos" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, rtos === null ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u672A\u6682\u505C\uFF0C\u6216 ELF \u91CC\u6CA1\u6709 FreeRTOS \u8C03\u8BD5\u4FE1\u606F\uFF09") : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", ...MONO } }, `${rtos.count} \u4E2A\u4EFB\u52A1 \xB7 pxCurrentTCB ${rtos.current_tcb}${rtos.note !== void 0 ? ` \xB7 ${rtos.note}` : ""}`), rtos.tasks.map((t) => /* @__PURE__ */ react_default.createElement("div", { key: t.tcb, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, flex: "0 0 96px", color: t.current ? "var(--elab-accent)" : "var(--elab-fg-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${t.current ? "*" : ""}${t.name}`), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, t.priority ?? "\u2014"), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, t.state), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", ...MONO, color: healthColor(t.health) } }, t.stack_size_bytes !== null ? `${t.free_bytes}/${t.stack_size_bytes}B` : `\u5269 ${t.free_words} \u5B57`))), /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", fontSize: "var(--elab-fs-xs)" } }, "\u6C34\u4F4D = \u672A\u88AB 0xA5 \u8986\u76D6\u7684\u5B57\u6570\uFF08\u5386\u53F2\u6700\u5C0F\u5269\u4F59\uFF09\u3002\u4F7F\u7528\u7387\u9700\u8981 pxEndOfStack\uFF0C\u7B97\u4E0D\u51FA\u5C31\u4E0D\u731C\uFF08\u663E\u793A \u2014\uFF09\u3002"))), tab === "audit" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", ...MONO } }, `\u6700\u8FD1 ${audit.length} \u6761\uFF08.work/debug-audit.jsonl\uFF09`), audit.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u5BA1\u8BA1\u8BB0\u5F55\uFF09"), audit.slice().reverse().map((rec, i) => /* @__PURE__ */ react_default.createElement("div", { key: `${rec.ts}-${i}`, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-faint)", flex: "0 0 62px" } }, new Date(rec.ts * 1e3).toLocaleTimeString()), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-accent)", flex: "0 0 auto" } }, rec.action), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, [rec.actor, rec.target, rec.addr, rec.value, rec.location, rec.name].filter((x) => x !== void 0 && x !== "").join(" "))))), tab === "out" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px" } }, output.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08MI \u8F93\u51FA\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\uFF09"), output.map((l) => /* @__PURE__ */ react_default.createElement("div", { key: l.id, style: { ...MONO, color: l.tone === "alert" ? "var(--elab-status-fail)" : "var(--elab-fg-secondary)", whiteSpace: "pre-wrap", wordBreak: "break-all" } }, l.text)))), wide && (tab === "stack" || tab === "vars" || tab === "watch") && /* @__PURE__ */ react_default.createElement("aside", { style: { flex: "0 0 42%", minWidth: "170px", borderLeft: "1px solid var(--elab-border)", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", padding: "4px 6px", borderBottom: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, "\u5BC4\u5B58\u5668"), snap?.svd.available === true && /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-faint)" } }, "\xB7 SVD \u5C31\u7EEA"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setTab("regs"), style: { ...BTN, marginLeft: "auto" } }, "\u5168\u5C4F")), regs.map((g) => /* @__PURE__ */ react_default.createElement("div", { key: g.name }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "3px 6px", color: "var(--elab-fg-muted)", ...MONO } }, g.label), g.regs.map((r) => /* @__PURE__ */ react_default.createElement("div", { key: r.name, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { color: r.pc ? "var(--elab-accent)" : "var(--elab-fg-secondary)", flex: "0 0 48px", ...MONO } }, r.name), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-primary)", ...MONO } }, r.hex))))), regs.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "6px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u76EE\u6807\u8FD0\u884C\u4E2D\uFF0C\u5BC4\u5B58\u5668\u4E0D\u53EF\u8BFB\uFF09"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px", borderTop: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, "\u5916\u8BBE"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setTab("periph"), style: { ...BTN, marginLeft: "auto" } }, "\u6253\u5F00"))), wide && (tab === "regs" || tab === "periph") && /* @__PURE__ */ react_default.createElement("aside", { style: { flex: "0 0 40%", minWidth: "160px", order: -1, borderRight: "1px solid var(--elab-border)", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", borderBottom: "1px solid var(--elab-border)", color: "var(--elab-fg-muted)", ...MONO } }, "\u8C03\u7528\u6808"), frames.slice(0, 12).map((f, i) => /* @__PURE__ */ react_default.createElement(
+  }))), tab === "rtos" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, rtos === null ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u672A\u6682\u505C\uFF0C\u6216 ELF \u91CC\u6CA1\u6709 FreeRTOS \u8C03\u8BD5\u4FE1\u606F\uFF09") : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", ...MONO } }, `${rtos.count} \u4E2A\u4EFB\u52A1 \xB7 pxCurrentTCB ${rtos.current_tcb}${rtos.note !== void 0 ? ` \xB7 ${rtos.note}` : ""}`), rtos.tasks.map((t) => /* @__PURE__ */ react_default.createElement("div", { key: t.tcb, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, flex: "0 0 96px", color: t.current ? "var(--elab-accent)" : "var(--elab-fg-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${t.current ? "*" : ""}${t.name}`), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, t.priority ?? "\u2014"), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, t.state), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", ...MONO, color: healthColor(t.health) } }, t.stack_size_bytes !== null ? `${t.free_bytes}/${t.stack_size_bytes}B` : `\u5269 ${t.free_words} \u5B57`))), /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", fontSize: "var(--elab-fs-xs)" } }, "\u6C34\u4F4D = \u672A\u88AB 0xA5 \u8986\u76D6\u7684\u5B57\u6570\uFF08\u5386\u53F2\u6700\u5C0F\u5269\u4F59\uFF09\u3002\u4F7F\u7528\u7387\u9700\u8981 pxEndOfStack\uFF0C\u7B97\u4E0D\u51FA\u5C31\u4E0D\u731C\uFF08\u663E\u793A \u2014\uFF09\u3002"))), tab === "audit" && snap !== null && /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", color: "var(--elab-fg-muted)", ...MONO } }, `\u6700\u8FD1 ${audit.length} \u6761\uFF08.work/debug-audit.jsonl\uFF09`), audit.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "8px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u6682\u65E0\u5BA1\u8BA1\u8BB0\u5F55\uFF09"), audit.slice().reverse().map((rec, i) => /* @__PURE__ */ react_default.createElement("div", { key: `${rec.ts}-${i}`, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-faint)", flex: "0 0 62px" } }, new Date(rec.ts * 1e3).toLocaleTimeString()), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-accent)", flex: "0 0 auto" } }, rec.action), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto", minWidth: 0 } }, [rec.target, rec.addr, rec.value, rec.location, rec.name].filter((x) => x !== void 0 && x !== "").join(" "), rec.items !== void 0 ? ` ${rec.items.length} \u9879` : ""), /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-faint)", flex: "0 0 auto" } }, rec.actor ?? "")))), tab === "out" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px" } }, output.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08MI \u8F93\u51FA\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC\uFF09"), output.map((l) => /* @__PURE__ */ react_default.createElement("div", { key: l.id, style: { ...MONO, color: l.tone === "alert" ? "var(--elab-status-fail)" : "var(--elab-fg-secondary)", whiteSpace: "pre-wrap", wordBreak: "break-all" } }, l.text)))), wide && (tab === "stack" || tab === "vars" || tab === "watch") && /* @__PURE__ */ react_default.createElement("aside", { style: { flex: "0 0 42%", minWidth: "170px", borderLeft: "1px solid var(--elab-border)", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", alignItems: "center", gap: "4px", padding: "4px 6px", borderBottom: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, "\u5BC4\u5B58\u5668"), snap?.svd.available === true && /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-faint)" } }, "\xB7 SVD \u5C31\u7EEA"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setTab("regs"), style: { ...BTN, marginLeft: "auto" } }, "\u5168\u5C4F")), regs.map((g) => /* @__PURE__ */ react_default.createElement("div", { key: g.name }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "3px 6px", color: "var(--elab-fg-muted)", ...MONO } }, g.label), g.regs.map((r) => /* @__PURE__ */ react_default.createElement("div", { key: r.name, style: ROW }, /* @__PURE__ */ react_default.createElement("span", { style: { color: r.pc ? "var(--elab-accent)" : "var(--elab-fg-secondary)", flex: "0 0 48px", ...MONO } }, r.name), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-primary)", ...MONO } }, r.hex))))), regs.length === 0 && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "6px", color: "var(--elab-fg-muted)", ...MONO } }, "\uFF08\u76EE\u6807\u8FD0\u884C\u4E2D\uFF0C\u5BC4\u5B58\u5668\u4E0D\u53EF\u8BFB\uFF09"), /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", gap: "4px", padding: "4px 6px", borderTop: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("span", { style: { ...MONO, color: "var(--elab-fg-muted)" } }, "\u5916\u8BBE"), /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: () => setTab("periph"), style: { ...BTN, marginLeft: "auto" } }, "\u6253\u5F00"))), wide && (tab === "regs" || tab === "periph") && /* @__PURE__ */ react_default.createElement("aside", { style: { flex: "0 0 40%", minWidth: "160px", order: -1, borderRight: "1px solid var(--elab-border)", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("div", { style: { padding: "4px 6px", borderBottom: "1px solid var(--elab-border)", color: "var(--elab-fg-muted)", ...MONO } }, "\u8C03\u7528\u6808"), frames.slice(0, 12).map((f, i) => /* @__PURE__ */ react_default.createElement(
     "button",
     {
       key: `${f.addr}-${i}`,
@@ -2027,6 +2316,186 @@ function VarRow(props) {
     kids === void 0 ? "\u25B8" : "\u25BE"
   ) : /* @__PURE__ */ react_default.createElement("span", { style: { width: "10px" } }), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-secondary)", ...MONO } }, node.name), node.type !== "" && /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)", ...MONO } }, node.type), /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-primary)", ...MONO, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, node.value)), kids !== void 0 && kids.map((c) => /* @__PURE__ */ react_default.createElement(VarRow, { key: `${path}.${c.name}`, node: c, path: `${path}.${c.name}`, depth: depth + 1, open, onToggle })));
 }
+function DebugView(props) {
+  const { sessionId, visible = true, project, available, onBack, api } = props;
+  const [sessions, setSessions] = useState([]);
+  const [activeId, setActiveId] = useState("");
+  const [maxSessions, setMaxSessions] = useState(2);
+  const [split, setSplit] = useState(false);
+  const [err, setErr] = useState("");
+  const [wide, setWide] = useState(false);
+  const rootRef = useRef(null);
+  const refresh = useCallback(async () => {
+    try {
+      const r = await api.debugSession(sessionId);
+      const list = r.sessions ?? (r.session !== null ? [r.session] : []);
+      setSessions(list);
+      setMaxSessions(r.max_sessions ?? 2);
+      setActiveId((prev) => prev !== "" && list.some((x) => x.id === prev) ? prev : list[0]?.id ?? "");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, sessionId]);
+  useEffect(() => {
+    if (!visible || !available) return;
+    void refresh();
+    const timer = setInterval(() => void refresh(), 2e3);
+    const q = new URLSearchParams();
+    if (sessionId !== void 0 && sessionId !== "") q.set("sessionId", sessionId);
+    const es = new EventSource(`/elab/debug/events?${q.toString()}`);
+    const bump = () => {
+      void refresh();
+    };
+    for (const topic of ["debug/opened", "debug/state", "debug/stop", "debug/closed", "debug/error"]) {
+      es.addEventListener(topic, bump);
+    }
+    es.onerror = () => {
+    };
+    return () => {
+      clearInterval(timer);
+      es.close();
+    };
+  }, [visible, available, sessionId, refresh]);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      setWide((entries[0]?.contentRect.width ?? 0) >= 1e3);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [available]);
+  const closeOne = useCallback(async (id) => {
+    try {
+      await api.debugClose({ resume: true, debugSession: id });
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, refresh]);
+  if (!available) return null;
+  const active = sessions.find((x) => x.id === activeId) ?? sessions[0] ?? null;
+  const secondary = sessions.find((x) => x.id !== active?.id) ?? null;
+  const dual = split && wide && sessions.length >= 2 && secondary !== null;
+  const paneStyle = {
+    flex: "1 1 0",
+    minWidth: 0,
+    minHeight: 0,
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    background: "var(--elab-bg-canvas)"
+  };
+  return /* @__PURE__ */ react_default.createElement("div", { ref: rootRef, style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } }, /* @__PURE__ */ react_default.createElement("div", { style: {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+    flexWrap: "wrap",
+    padding: "3px 6px",
+    borderBottom: "1px solid var(--elab-border)",
+    flex: "0 0 auto"
+  } }, onBack !== void 0 && /* @__PURE__ */ react_default.createElement("button", { type: "button", onClick: onBack, style: BTN, title: "\u8FD4\u56DE\u5DE5\u4F5C\u533A", "aria-label": "\u8FD4\u56DE\u5DE5\u4F5C\u533A" }, "\u2190"), sessions.map((x) => /* @__PURE__ */ react_default.createElement(
+    "span",
+    {
+      key: x.id,
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "0px",
+        border: `1px solid ${x.id === active?.id ? "var(--elab-accent)" : "var(--elab-border)"}`,
+        borderRadius: "var(--elab-radius-sm)"
+      }
+    },
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => setActiveId(x.id),
+        title: `${x.id} \xB7 ${x.project} \xB7 ${x.state}`,
+        style: {
+          ...BTN,
+          border: "none",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "3px",
+          color: x.id === active?.id ? "var(--elab-accent)" : "var(--elab-fg-secondary)"
+        }
+      },
+      /* @__PURE__ */ react_default.createElement("span", { style: {
+        width: "6px",
+        height: "6px",
+        borderRadius: "50%",
+        background: x.state === "stopped" ? "var(--elab-status-run)" : x.state === "running" ? "var(--elab-status-ok)" : "var(--elab-fg-faint)"
+      } }),
+      /* @__PURE__ */ react_default.createElement("b", { style: { fontWeight: 600 } }, x.project === "" ? x.id : x.project),
+      /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-muted)" } }, OWNER_TEXT[x.owner] ?? x.owner)
+    ),
+    /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => void closeOne(x.id),
+        title: "\u5173\u95ED\u8FD9\u4E2A\u4F1A\u8BDD\uFF08\u4E0D\u5F71\u54CD\u5176\u5B83\u4F1A\u8BDD\uFF09",
+        style: { ...BTN, border: "none", color: "var(--elab-fg-muted)", padding: "0 3px" }
+      },
+      "\xD7"
+    )
+  )), sessions.length >= 2 && /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: !wide,
+      onClick: () => setSplit((v) => !v),
+      style: BTN,
+      title: wide ? "\u5DE6\u53F3\u5E76\u6392\u4E24\u6761\u4F1A\u8BDD" : "\u680F\u5BBD\u4E0D\u8DB3 1000px\uFF1A\u5E76\u6392\u4E0D\u53EF\u8BFB"
+    },
+    split && wide ? "\u5355\u5217" : "\u5E76\u6392"
+  ), sessions.length > 0 && /* @__PURE__ */ react_default.createElement("span", { style: { marginLeft: "auto", color: "var(--elab-fg-muted)", ...MONO } }, `${sessions.length}/${maxSessions} \u4F1A\u8BDD`)), err !== "" && /* @__PURE__ */ react_default.createElement("div", { style: { padding: "3px 6px", color: "var(--elab-status-fail)", flex: "0 0 auto", ...MONO } }, err), /* @__PURE__ */ react_default.createElement("div", { style: {
+    flex: "1 1 auto",
+    minHeight: 0,
+    display: "flex",
+    gap: dual ? "1px" : "0px",
+    background: dual ? "var(--elab-border)" : "transparent"
+  } }, active === null ? (
+    // 无会话：空壳 pane 自己提供"开始调试"入口（打开后由轮询接续）
+    /* @__PURE__ */ react_default.createElement("div", { style: paneStyle }, /* @__PURE__ */ react_default.createElement(
+      DebugPane,
+      {
+        sessionId,
+        debugSessionId: "",
+        embedded: true,
+        visible,
+        project,
+        available,
+        api
+      }
+    ))
+  ) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("div", { style: paneStyle }, /* @__PURE__ */ react_default.createElement(
+    DebugPane,
+    {
+      key: active.id,
+      sessionId,
+      debugSessionId: active.id,
+      embedded: true,
+      visible,
+      project: active.project !== "" ? active.project : project,
+      available,
+      api
+    }
+  )), dual && secondary !== null && /* @__PURE__ */ react_default.createElement("div", { style: paneStyle }, /* @__PURE__ */ react_default.createElement(
+    DebugPane,
+    {
+      key: secondary.id,
+      sessionId,
+      debugSessionId: secondary.id,
+      embedded: true,
+      visible,
+      project: secondary.project !== "" ? secondary.project : project,
+      available,
+      api
+    }
+  )))));
+}
 
 // src/domain/channels.ts
 var HOST_OPTIONS = { debugChannel: true };
@@ -2039,13 +2508,31 @@ function channelOfEvent2(e) {
 
 // src/adapters/kernel-http/icd-client.ts
 var ElabApiError = class extends Error {
-  constructor(code, message) {
+  constructor(code, message, extra) {
     super(message);
     __publicField(this, "code");
+    /** 内核给的人话建议（可空） */
+    __publicField(this, "hint");
+    /** HTTP 状态码；0 表示没拿到响应（网络层失败） */
+    __publicField(this, "status");
     this.code = code;
+    this.hint = extra?.hint ?? "";
+    this.status = extra?.status ?? 0;
     this.name = "ElabApiError";
   }
 };
+function str(v) {
+  return typeof v === "string" && v !== "" ? v : "";
+}
+function parseApiError(body, status) {
+  const b = body ?? {};
+  const raw = b.error;
+  const nested = raw !== null && typeof raw === "object" ? raw : null;
+  const code = str(nested?.code) || str(b.code) || `http-${status}`;
+  const message = str(nested?.message) || str(raw) || str(b.message) || `HTTP ${status}`;
+  const hint = str(nested?.hint) || str(b.hint);
+  return new ElabApiError(code, message, { hint, status });
+}
 async function request(path, init) {
   const res = await fetch(path, {
     ...init,
@@ -2059,8 +2546,7 @@ async function request(path, init) {
     throw new ElabApiError("bad-json", `${path} \u8FD4\u56DE\u4E86\u975E JSON\uFF08HTTP ${res.status}\uFF09\uFF1A${text.slice(0, 200)}`);
   }
   if (!res.ok) {
-    const err = body?.error;
-    throw new ElabApiError(err?.code ?? `http-${res.status}`, err?.message ?? `HTTP ${res.status}`);
+    throw parseApiError(body, res.status);
   }
   return body;
 }
@@ -2081,6 +2567,10 @@ function del(path, payload, headers) {
 function withSession(path, sessionId) {
   if (sessionId === void 0 || sessionId === "") return path;
   return `${path}${path.includes("?") ? "&" : "?"}sessionId=${encodeURIComponent(sessionId)}`;
+}
+function withDebugSession(path, debugSession) {
+  if (debugSession === void 0 || debugSession === "") return path;
+  return `${path}${path.includes("?") ? "&" : "?"}debug_session=${encodeURIComponent(debugSession)}`;
 }
 var elabApi = {
   host: (sessionId) => request(withSession("/elab/host", sessionId)),
@@ -2280,7 +2770,11 @@ var elabApi = {
     name: opts.name
   }),
   // ── 调试会话（§6 ICD；Agent 与面板同源）──────────────────────────
-  debugSession: (sessionId) => request(withSession("/elab/api/debug/session", sessionId)),
+  //   ★ 每个方法都接受 `debugSession`（选择哪条 gdb 会话）；
+  //     `sessionId` 仍是聊天 session（路由工程目录），两者不可混用。
+  debugSession: (sessionId, debugSession) => request(
+    withDebugSession(withSession("/elab/api/debug/session", sessionId), debugSession)
+  ),
   /**
    * 打开会话。agent=true 时带上内部头（内核据此把 owner 设为 agent，
    * 租约到点自动关闭并恢复运行）。
@@ -2297,10 +2791,11 @@ var elabApi = {
   ),
   /** DELETE：关闭会话；默认 resume=true（monitor reset run）—— C36 延伸。 */
   debugClose: (opts) => del(
-    withSession("/elab/api/debug/session", opts?.sessionId),
+    withDebugSession(withSession("/elab/api/debug/session", opts?.sessionId), opts?.debugSession),
     {
       resume: opts?.resume !== false,
-      ...opts?.reason !== void 0 ? { reason: opts.reason } : {}
+      ...opts?.reason !== void 0 ? { reason: opts.reason } : {},
+      ...opts?.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
     },
     opts?.agent === true ? { "x-elab-actor": "agent" } : void 0
   ),
@@ -2309,13 +2804,19 @@ var elabApi = {
     {
       action: opts.action,
       ...opts.addr !== void 0 ? { addr: opts.addr } : {},
-      ...opts.confirm === true ? { confirm: true } : {}
+      ...opts.file !== void 0 ? { file: opts.file } : {},
+      ...opts.line !== void 0 ? { line: opts.line } : {},
+      ...opts.confirm === true ? { confirm: true } : {},
+      ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
     },
     opts.agent === true ? { "x-elab-actor": "agent" } : void 0
   ),
   debugStack: (opts) => {
     const q = new URLSearchParams();
     if (opts?.thread !== void 0) q.set("thread", String(opts.thread));
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     const qs = q.toString();
     return request(
       withSession(`/elab/api/debug/stack${qs === "" ? "" : `?${qs}`}`, opts?.sessionId)
@@ -2326,6 +2827,9 @@ var elabApi = {
     if (opts?.frame !== void 0) q.set("frame", String(opts.frame));
     if (opts?.scope !== void 0) q.set("scope", opts.scope);
     if (opts?.var !== void 0 && opts.var !== "") q.set("var", opts.var);
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     return request(
       withSession(`/elab/api/debug/variables?${q.toString()}`, opts?.sessionId)
     );
@@ -2334,14 +2838,44 @@ var elabApi = {
     const q = new URLSearchParams();
     if (opts?.group !== void 0) q.set("group", opts.group);
     if (opts?.format !== void 0) q.set("format", opts.format);
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     return request(
       withSession(`/elab/api/debug/registers?${q.toString()}`, opts?.sessionId)
+    );
+  },
+  /** 按组批量写（P3-C）：POST 到同一路径，语义由动词区分（GET=读，POST=写）。 */
+  debugRegistersWrite: (opts) => post(
+    withSession("/elab/api/debug/registers", opts.sessionId),
+    {
+      items: opts.items,
+      confirm: opts.confirm !== false,
+      ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
+    },
+    opts.agent === true ? { "x-elab-actor": "agent" } : void 0
+  ),
+  /** 源码页签（P3-A）：`file` 缺省 = 当前停止帧。 */
+  debugSource: (opts) => {
+    const q = new URLSearchParams();
+    if (opts?.file !== void 0 && opts.file !== "") q.set("file", opts.file);
+    if (opts?.start !== void 0) q.set("start", String(opts.start));
+    if (opts?.count !== void 0) q.set("count", String(opts.count));
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
+    const qs = q.toString();
+    return request(
+      withSession(`/elab/api/debug/source${qs === "" ? "" : `?${qs}`}`, opts?.sessionId)
     );
   },
   debugBreakpoints: (opts) => {
     if (opts?.op === void 0 || opts.op === "list") {
       return request(
-        withSession("/elab/api/debug/breakpoints", opts?.sessionId)
+        withDebugSession(
+          withSession("/elab/api/debug/breakpoints", opts?.sessionId),
+          opts?.debugSession
+        )
       );
     }
     return post(
@@ -2354,7 +2888,8 @@ var elabApi = {
         ...opts.condition !== void 0 ? { condition: opts.condition } : {},
         ...opts.enabled !== void 0 ? { enabled: opts.enabled } : {},
         ...opts.hardware === true ? { hardware: true } : {},
-        ...opts.temporary === true ? { temporary: true } : {}
+        ...opts.temporary === true ? { temporary: true } : {},
+        ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
       },
       opts?.agent === true ? { "x-elab-actor": "agent" } : void 0
     );
@@ -2362,6 +2897,9 @@ var elabApi = {
   debugMemory: (opts) => {
     const q = new URLSearchParams({ addr: opts.addr });
     if (opts.count !== void 0) q.set("count", String(opts.count));
+    if (opts.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     return request(
       withSession(`/elab/api/debug/memory?${q.toString()}`, opts.sessionId)
     );
@@ -2371,6 +2909,9 @@ var elabApi = {
     if (opts?.addr !== void 0) q.set("addr", opts.addr);
     if (opts?.count !== void 0) q.set("count", String(opts.count));
     if (opts?.mode !== void 0) q.set("mode", String(opts.mode));
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     const qs = q.toString();
     return request(
       withSession(`/elab/api/debug/disasm${qs === "" ? "" : `?${qs}`}`, opts?.sessionId)
@@ -2378,7 +2919,11 @@ var elabApi = {
   },
   debugEvaluate: (opts) => post(
     withSession("/elab/api/debug/evaluate", opts.sessionId),
-    { expr: opts.expr, ...opts.frame !== void 0 ? { frame: opts.frame } : {} },
+    {
+      expr: opts.expr,
+      ...opts.frame !== void 0 ? { frame: opts.frame } : {},
+      ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
+    },
     opts.agent === true ? { "x-elab-actor": "agent" } : void 0
   ),
   /** 写内存/寄存器：必须 allow_write=true 的会话 + confirm=true。 */
@@ -2389,7 +2934,8 @@ var elabApi = {
       ...opts.addr !== void 0 ? { addr: opts.addr } : {},
       ...opts.name !== void 0 ? { name: opts.name } : {},
       value: opts.value,
-      confirm: opts.confirm === true
+      confirm: opts.confirm === true,
+      ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
     },
     opts.agent === true ? { "x-elab-actor": "agent" } : void 0
   ),
@@ -2397,7 +2943,10 @@ var elabApi = {
   debugWatch: (opts) => {
     if (opts?.op === void 0 || opts.op === "list") {
       return request(
-        withSession("/elab/api/debug/watch", opts?.sessionId)
+        withDebugSession(
+          withSession("/elab/api/debug/watch", opts?.sessionId),
+          opts?.debugSession
+        )
       );
     }
     return post(
@@ -2407,7 +2956,8 @@ var elabApi = {
         ...opts.id !== void 0 ? { id: opts.id } : {},
         ...opts.expr !== void 0 ? { expr: opts.expr } : {},
         ...opts.format !== void 0 ? { format: opts.format } : {},
-        ...opts.rev !== void 0 ? { rev: opts.rev } : {}
+        ...opts.rev !== void 0 ? { rev: opts.rev } : {},
+        ...opts.debugSession !== void 0 && opts.debugSession !== "" ? { debug_session: opts.debugSession } : {}
       },
       opts.agent === true ? { "x-elab-actor": "agent" } : void 0
     );
@@ -2415,6 +2965,9 @@ var elabApi = {
   debugAudit: (opts) => {
     const q = new URLSearchParams();
     if (opts?.limit !== void 0) q.set("limit", String(opts.limit));
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     const qs = q.toString();
     return request(
       withSession(`/elab/api/debug/audit${qs === "" ? "" : `?${qs}`}`, opts?.sessionId)
@@ -2424,12 +2977,17 @@ var elabApi = {
     const q = new URLSearchParams();
     if (opts?.path !== void 0 && opts.path !== "") q.set("path", opts.path);
     if (opts?.read === true) q.set("read", "1");
+    if (opts?.debugSession !== void 0 && opts.debugSession !== "") {
+      q.set("debug_session", opts.debugSession);
+    }
     const qs = q.toString();
     return request(
       withSession(`/elab/api/debug/peripherals${qs === "" ? "" : `?${qs}`}`, opts?.sessionId)
     );
   },
-  debugRtos: (opts) => request(withSession("/elab/api/debug/rtos", opts?.sessionId))
+  debugRtos: (opts) => request(
+    withDebugSession(withSession("/elab/api/debug/rtos", opts?.sessionId), opts?.debugSession)
+  )
 };
 
 // src/adapters/dsh-web/events/sse.ts

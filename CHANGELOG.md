@@ -5,6 +5,279 @@
 
 ---
 
+## [Unreleased] — 2026-11-05（文档 · Agent 自学按钮实机教程）
+
+### 文档
+
+- **教程 07 新增 §5.7.9「按钮实操：不写一行命令，从陌生字节到直播解码」**：
+  STM32F103C8T6 实机（COM10），纯面板按钮走完 learn 闭环——发 `LEARN`（须带 CRLF）
+  → 粘样本 HEX → 点「学习」（置信度 99% / 回放 100% / 43/46 等长证据链）→
+  人复核字段名 → 保存（同名覆盖确认）→ 解码器下拉选 profile → 直播解码
+  （396 帧 · 9 通道 · 2 种消息）。4 张实拍截图入 `assets/serial-learn/`，
+  附按钮 ↔ API 对照表。与 §5.7.8（API/Agent 视角）互补。
+- `docs/README.md` 教程 07 条目同步登记。
+
+---
+
+## [Unreleased] — 2026-11-05（仓库清理 · 死代码与过期产物清扫）
+
+收尾前的仓库整理，全部为删除性清理（git 历史可恢复），零功能变更。
+
+### 删除
+
+- **一次性截图生成工具**（`docs/tutorials/assets/cli-terminal/`）：
+  3 个 `.mjs` 截图脚本 + 7 个 mock `.html` 终端页面（含 82 KB 的 `build.html`）。
+  教程 06 只引用 7 张成品 PNG（保留）；生成工具无任何文档引用，git 历史可找回。
+- **前端死代码**：`workspaces.ts` 的 `workspaceById`、`layoutStore.ts` 的 `resetLayout`、
+  `icons.tsx` 6 个未使用图标（IconRun/Folder/Wrench/Check/ChevronDown/Search）；
+  插件侧 `pendingAdaptations`、`kernelMeta`、`kernelPlanSteps`、`ALL_CHANNELS`。
+  （`unadaptedCandidates`/`isKernelOld`/`registeredRoutes` 虽无 src 引用但被测试/设计文档
+  消费，保留。）
+- **Python 未使用 import ×8**：`builder.py`（sys/ElabError）、`doctor.py`（shlex）、
+  `monitor.py`（ElabError）、`plan.py`（Path）、`__main__.py`（to_fwd）、
+  `cockpit/server.py`（shutil）、`tests/test_setup.py`（shutil）。
+- **本地缓存**：`.pytest_cache/`、`__pycache__/`、空 `.screenshots/`（均已在 gitignore）。
+
+### 整理
+
+- `docs/README.md` 补登记 `健壮性盘点_2026-11-05`（此前是唯一未入索引的文档）。
+
+### 扫描结论（无问题项，记录避免重复劳动）
+
+- 177 个 docs 文件、全部教程 PNG 均被引用（交叉核对 0 孤儿）；
+- `services/elab` / `cockpit` 全部 Python 模块均被引用（0 死模块）；
+- `TODO` 标记仅 4 处，全部是 `adapt.py` 生成模板的占位文案（有意保留）；
+- `执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙` 为**待实施**的未来计划，非过期文档。
+
+### 门禁
+
+Python 628 passed / 3 skipped；插件 143 pass + build 契约 PASS；
+WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件行尾 0 翻转。
+
+---
+
+## [Unreleased] — 2026-11-05（收尾健壮性批次 · 轮询/超时/SSE/--root）
+
+盘点报告：`docs/reports/健壮性盘点_2026-11-05.md`（11 条已**全部处置**：
+8 条修复 + 3 条以更轻手段收敛，见各条说明）。
+
+### 内核
+
+- **`list_runs` 只读首尾行**（P0）：`run/start` 恒为第一行、`run/end`/`run/cancel` 恒为
+  最后一行，元数据不再 `replay` 整个文件；新增 `run_meta`（一次 open 读首行+尾窗，
+  按 `mtime_ns+size` 缓存，追加自动失效）；目录枚举从 `glob`+逐个 `stat()` 换成
+  `os.scandir`（Windows 上 DirEntry 自带 stat，免 syscall）。实测 800 条历史：
+  轮询路径不再扫盘（新端点，见下），`/api/runs` 二次调用 2086 ms → **31 ms**。
+- **新端点 `GET /api/runs/active`**：只读进程内活动登记簿（不扫历史目录），
+  给 2 s 轮询用；开销与历史条数**解耦**。插件代理白名单已同步（`routes.ts` GET_ALLOW）。
+- **SSE 上限 8 → 16**：3 标签页（run 流 + 串口 + 调试壳层/pane）即可撞满 8，
+  而 503 对 EventSource 是"直接关闭、不自动重连"——满员的代价是静默停更。
+- **run 清理入口**（P3 #11）：`events.prune_runs(keep, days, dry_run)` 双闸清理
+  （mtime 倒序第 N 条之后 + N 天前；**running 的 run 永不删**，孤儿 proc / 无关文件
+  不碰）。三处入口同一份规则：CLI `elab runs prune [--keep 50] [--days 30]
+  [--dry-run]`、`POST /api/runs/prune`（面板后续可接）。
+- **串口四路合并轮询**（P2 #4）：`GET /api/serial/monitor/poll?line&byte&issue&dec`
+  一次带回行 tail + 字节批次 + 结构化 issue + 共享解码帧（后两路按 profile/decoder
+  开关决定是否在响应里，与旧前端"开着才拉"同规则）。轮询连接占用 4 → 1，
+  且四路是同一时刻的快照。
+
+### WebUI
+
+- **全部 fetch 加超时**（P1）：`client.ts` 的 `req()` 统一 `AbortSignal.timeout`，
+  默认 15 s，长任务（debug open 20 s / learn / 串口手写读窗口 / prune）60 s；
+  超时抛 `ApiError("client-timeout")`，文案带 hint。内核挂住时不再永远"加载中"、
+  不再占死浏览器 6 连接池。老浏览器无 `AbortSignal.timeout` 时退回
+  `AbortController+setTimeout`。
+- **跟随轮询改轻量端点 + 防重入**（P0）：App.tsx 的 2 s 轮询从 `/api/runs` 改打
+  `/api/runs/active`，并加 `followBusyRef`（与串口轮询的 `busyRef` 对齐）——
+  上一拍没回就跳过，不再堆请求。
+- **串口轮询切到合并端点**（#4）：`useSerialStream` 每拍 1 个请求带回四路增量；
+  解码器切换时丢弃当拍 `decoded`（按旧游标拉的新协议帧），下一拍从 0 正常追。
+- **SSE 断流可感知**（P1）：`sse.ts` 区分 `CONNECTING`（浏览器自动重连）与
+  `CLOSED`（浏览器已放弃，典型是 503 满员）——后者自建重连（3 s × 5 次，
+  `from=` 用**已收到的最大 seq** 而非初始值，避免整段重放），重试耗尽上报
+  `dead` 状态，头部 Pill 显示"事件流已断开"。
+- **调试壳层 SSE 按需建**（P2）：无会话不再白占 1 个 SSE 名额（每标签页 1 条 ×
+  多标签页会加速撞上限）；pane 流 503 关闭时在输出区明说原因。
+- **LogRing.push 改逐个 push**（P3 #10）：消除 `push(...lines)` 在超大批次下
+  触发 V8 参数上限的理论爆栈点。
+
+### CLI
+
+- **`--root` 提到全局**（P2）：`elab --root X list` 不再报误导性的
+  `invalid choice: 'X'`；子命令级参数保留（SUPPRESS 默认，显式给时优先），
+  两种位置都合法。
+- **兜底异常**（P3 #8）：`main()` 补 `except Exception` —— 漏网的
+  KeyError/OSError 不再吐整屏 traceback，改成人话 + `ELAB_TRACE=1` 看栈；
+  Ctrl-C 干净退出（130）。
+
+### 可维护性
+
+- **topic 镜像一致性守卫**（P3 #9）：新增 `packages/dsh-elab-cockpit/test/
+  icd-topics.test.mjs` 三例——① 前端 KNOWN_TOPICS ⊇ 内核 KNOWN_TOPICS ∪
+  服务端合成帧（`proc/stdout-batch`/`stream/closed`）；② 插件自包含镜像
+  `domain/icd.ts` 与共享层逐项一致；③ topic 命名空间白名单（新前缀 = 契约级
+  变更，测试会拦）。新增 topic 不再可能静默丢事件。
+
+### 明确不做 / 收敛方式
+
+- **#7 长请求无取消**：完整取消需把 debug open / learn 改成作业化轮询，
+  收尾阶段改动风险大于收益。以 ② 的超时（15/60 s 可预期失败）+ 错误 hint
+  （"确认内核仍在运行；若刚强杀过它…"）+ 空态 RECOVERY 表收敛；
+  真要中断用 Ctrl-C 内核后界面会按 `client-timeout` 明确报错，不再挂死。
+
+### 门禁
+
+Python 628 passed / 3 skipped；插件 143 pass（新增 topic 守卫 3 例）+ build 契约
+PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行尾与 HEAD
+比对 0 翻转。端到端：临时内核验证 `/api/serial/monitor/poll`（四路形状 + 参数
+校验人话报错）、`POST /api/runs/prune`（dry_run）、`elab runs prune --dry-run`。
+
+---
+
+## [Unreleased] — 2026-11-05（串口存量优化 · 帧协议补强 / 帧级观测 / Agent 自学协议）
+
+执行计划：`docs/design/执行计划_串口存量优化_帧协议补强与Agent能力.md`（P2.2 + P3 + P4，全实机验收）。
+
+### 内核：帧协议补强 P2.2
+
+- **校验声明化**：`CRC_PRESETS`（crc8 / crc8_maxim / crc8_j1850 / ccitt_false / xmodem /
+  x25 / modbus / ibm / crc32）+ 参数化引擎（Rocksoft 模型），标准检查值 `123456789` 全部对上；
+  `checksum.cover` 支持 `frame / after_head / before_checksum / before_tail / payload` 锚点，
+  `at` 支持 head/tail。老写法 `{"kind":"crc16modbus"}` 行为与输出不变。
+- **转义**：`escape`（`escape_byte` / `xor` / `targets` / `applies`）。**先切帧再反转义**、
+  校验在转义前算；与 `frame.length` / `length_field` 互斥（保存时直接拒绝）。
+- **多帧头**：`frame.heads`（最长匹配优先）；**空闲分包**：`frame.idle_gap_ms`
+  （会话侧按到达间隔切段，静默即一帧结束）。
+- **字段模型**：`array{count,stride}`（展开 `name[i]` 通道）、`str` + `encoding`
+  （utf-8/gbk/ascii/latin-1）、`f16`、`bits{bit:label}`（保留原值 + `flags` 人话列表）、
+  `allow_overlap`；重叠校验改按**位区间**判（同字节内不同位是合法的）。
+- **错误分类**：解码结果新增 `reasons`（`no_head / bad_length / short / tail_mismatch /
+  checksum / unknown_id / bad_id / field`），`skipped` 为其和。
+
+### 内核：观测 P3
+
+- `serialmon.frame_stats(window_s)` + `GET /api/serial/monitor/stats`：帧率、到达间隔
+  mean/p95/max/min、每 variant 计数、错误分类累计、`error_rate`、`pending_bytes`、`rate_bps`；
+  `window_s=0` 表示"最短窗口"（下限 1 s），不是"没给"。
+- **触发式录制**：`capture start` 支持 `trigger`（`pattern` 原始字节 / `field` 解码字段比较 /
+  `frame_index` 第 N 帧）与 `pre_bytes` 预录环形缓冲；命中连"命中之前"一起落盘并写标记行，
+  命中后继续录；`stop` 回报 `armed / triggered / triggered_by / note`。
+  按字段/帧序号触发**至少保留命中前的一批字节**（否则命中的现场会被自己丢掉）。
+- 面板波形页新增一行健康度（fps / Δ均值·p95 / 错误占比 / 消息种类 / 半帧字节），
+  读数来自会话共享解码，离线波形不轮询。
+
+### 内核：Agent 生产力 P4（★ 自学习）
+
+- 新增 `services/elab/framelearn.py`：
+  - `learn`：抓包 → 草稿 profile（帧头/帧长/长度字段/校验/帧尾/id/字段），
+    返回 `draft + confidence + evidence + warnings + decode_rate + preview`，**不写任何文件**；
+  - `verify`：解 → 用无损副本重编 → 与线上字节逐字节比对；
+  - `auto`：在一组 profile 里按字节覆盖率打分挑选，`AUTO_MIN_SCORE=0.55`、
+    `AUTO_MARGIN=1.15`，不达标或前两名接近直接拒绝（不硬猜）；
+  - `codegen`：profile → C 头文件（偏移宏 + 打包结构体 + 小端/大端读函数）。
+- 真实抓包逼出的两个修正：帧头候选**按长度分组**取（否则 ASCII 日志的 4 字节片段挤掉
+  2 字节真帧头）、定长判定允许**多数派等长**（≥80%，日志行穿插不再把定长帧误判成变长）。
+
+### HTTP / 插件 / 前端
+
+- `cockpit/server.py`：新增 `GET /api/serial/monitor/stats`、
+  `POST /api/serial/frames/{learn,verify,auto,codegen}`；`capture start` 支持 `trigger`/`pre_bytes`；
+  `SERIAL_META.frames` 补 `crc_presets / cover_anchors / encodings / escape_applies /
+  max_array / endpoints / learn`，schema 补 `escape / heads / idle_gap_ms / bits / array`，
+  `features` 增 14 项。`capture` 参数可传 JSONL 文本或录制**路径**（限本工程 `.work/.cockpit/*.jsonl`）。
+- `packages/dsh-elab-cockpit`：`elab_frame_profile` 扩展 `learn / verify / auto / codegen`，
+  新增 `elab_serial_stats`，`elab_serial_capture` 支持 `trigger / pre_bytes`；
+  HTTP 白名单同步 5 个端点。
+- WebUI：帧抽屉预览行加「学习」按钮；解码摘要把 `reasons` 翻成人话；波形健康度条。
+
+### 修复：调试面板把内核错误"吞成 HTTP 503"
+实机踩到：探针被别的会话占着时点「开始调试」，内核回 503 `debug-gdb-missing`，
+界面上看不到任何原因，用户只会觉得"点了没反应"。
+
+- **根因在 HTTP 客户端的错误解析**（`kernel-http/icd-client.ts`、`cockpit/web/src/api/client.ts`）：
+  内核把 `code` / `hint` 放在 body **顶层**、`error` 是**字符串**
+  （`{"error":"…","code":"debug-gdb-missing","message":"…","hint":"CMSIS-DAP command mismatch…"}`），
+  旧代码按 `body.error.code` 取，两种形状都取不到 → `code` 退化成 `http-503`、
+  `message` 退化成 `HTTP 503`、`hint` 永久丢失。现改为同时认
+  「`error` 为字符串」和「`error` 为对象」两种形状，`ElabApiError` /
+  `ApiError` 新增 `hint` 与 `status`。
+- 面板（`DebugView.tsx`）不再把内核 `code` 覆盖成 `debug-xxx-failed`；
+  统一走 `toPanelError()`，保留 `code` + `message` + `hint`。
+- **空态不再吞错**：无会话时错误直接渲染在正文（红色块：`打不开调试会话 · <code>` +
+  hint + 针对 `debug-gdb-missing / debug-openocd-dead / debug-target-busy /
+  debug-port-hijacked / debug-elf-missing` 的「怎么办」指引），有会话时仍是顶部细条并带 × 收起。
+- WebUI `DebugWorkspace` 的错误文案追加 `（hint）`。
+- 测试：新增 `test/api-error.test.mjs` 5 例（真内核 409 `debug-elf-missing` /
+  hint `先跑 build` 端到端验证过）。
+
+### 修复：强杀内核后会留下孤儿 openocd（作业对象兜底）
+
+- **现象**：调试探针被占着时点「开始调试」，内核回 `debug-gdb-missing`
+  （`CMSIS-DAP command mismatch`）；清场时强杀内核会留下**父进程已消失**的
+  `openocd.exe` 继续握着 DAP，下次 open 还是同样的错，只能手动 `taskkill`。
+- **根因**：这是**没法用 finally 收**的泄漏——`TerminateProcess` / 关掉驾驶舱窗口时
+  用户态收尾代码一行都不执行，`atexit` 也不跑。
+- **修法**：`services/elab/_winproc.py` 新增 Windows 作业对象能力——内核启动时建
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 作业，子进程派生后立刻
+  `AssignProcessToJobObject`。句柄只由内核持有，内核**无论怎么死**，系统关闭句柄
+  → 作业内所有进程（含子孙）被终止。这条链路由内核对象引用计数驱动，不依赖用户态代码。
+- **接入点**（会占硬件资源的那几个）：`debugsession` 的 openocd、`gdbmi` 的 gdb、
+  `flash` 的一过性 gdb server、驾驶舱「运行」的 `elab` 进程树（固件程序会占串口）。
+- **降级**：非 Windows / 作业建不出来 / 受限环境 assign 失败，一律返回 False 走原行为，
+  **绝不因为兜底能力让调试打不开**。从 Popen 返回到 assign 之间有微秒级窗口（如实说明）。
+- **边界**：本方案只管「以后不再产生孤儿」；升级前**已经跑着**的孤儿仍需手动清一次。
+- 实测：`POST /api/debug/session` 起会话（openocd + gdb 在跑）→ `taskkill /F` 打内核
+  → 2.5 s 后两者都不在进程表里；对照组（裸 `Popen`）子进程存活。正常 `DELETE` 关闭
+  会话的收尾路径不受影响（关闭后进程消失，可立刻重新 open）。
+
+### 健壮性复查：串口学习的规模闸门与"静默失效"
+
+读源码复查时发现并修掉的几处（都有实测/单测支撑）：
+
+- **`learn` 没有规模上限（性能/内存）**：`find_heads` 的 n-gram 扫描 + 校验探测
+  是「预设数 × 帧数」的乘法 —— 实测 58 KB / 6.5k 帧要 **30 s**，1 MB 量级的录制
+  按线性外推是分钟级（内核线程被占住，前端与 agent 都会超时）。现在三道上限：
+  `MAX_ANALYZE_BYTES`（128 KB，超出只分析前段并如实告警）、`MAX_DETECT_FRAMES`
+  （探测取样 400 帧）、`MAX_LEARN_FRAMES`（显式帧列表 4000 帧）。另给校验探测加了
+  **12 帧小样本预筛**：先在小子集上筛掉明显不对的预设，疑似命中的才在完整样本上复核。
+  实测 **58 KB 30 s → 1.0 s**，176 KB（HTTP 全链路）**1.9 s**，1 MB 从"分钟级"→ **1.8 s**，
+  且识别结论不变（真机抓包仍是 `5AA5` / 定长 10 / `crc8_maxim` / 回放 169/169）。
+- **录制文件与请求体没有大小闸**：`capture` 路径读入上限 16 MB（学习只用开头几万字节）；
+  请求体上限 8 MB。拒收大 body 时**先把 body 读掉再回错**（否则客户端还在上传就被 RST，
+  收到的是 `ConnectionAbortedError` 而不是"请求体太大"），实测 20 MB → HTTP 400 耗时 0.47 s。
+- **触发录制参数静默失效**：`pattern` 拼错、`op` 写错、`frame_index=0`、字段名不存在 ——
+  以前一律在匹配阶段静默 `return`，录制永远不命中，用户只会以为"问题没复现"。现在
+  布防时就校验并报错；字段名不在当前解码器里则回 `warnings`（不拦，因为解码器可能后设）。
+- **`codegen` 生成非法 C**：`guard` 原样拼进 `#ifndef`（换行可注入任意行）；
+  字段名允许中文/连字符（schema 只要求非空不重复）→ `char 温度[]` 编不过。
+  现在 `guard` 非合法标识符就退回默认名并告警；字段名统一净化为 C 标识符（含重名去重）。
+- **保存同名 profile 会静默覆盖**：`learn` 默认 id 就是 `learned`，连学两次再保存会把
+  前一个冲掉。内核响应新增 `overwritten`，面板保存前弹出确认。
+- **学习按钮没有忙碌态**：慢的时候可以连点，叠出多个并发学习请求。现在按钮禁用并
+  显示已跑秒数。
+- 清理 `learn()` 里 `if not fixed or True:` 的死条件。
+
+### 实机（STM32F103C8T6 / COM10）
+
+- 固件新增 `LEARN` 命令：发 200 帧 / 20 Hz 私有协议（`5A A5 | id | v1 | v2 | seq | flags |
+  crc8_maxim`，10 字节）供 Agent 自学，期间三帧演示暂停。
+- 端到端结果：`learn` 置信度 0.99 / 回放 168/168、`verify` 177/177、`auto` 命中
+  `profile:f103-private`(0.709)、`codegen` 头文件 `-Wall -Werror` 编译通过、
+  直播解码 59 帧 / 6 通道（ENV temp·hum / VSYS mV·mA + 位标志）。
+- 新增 `projects/STM32F103C8T6.frames.json` 的 `f103-private`；教程新增 5.7 节与附录 D。
+
+### 测试
+
+- 新增 `tests/test_framelearn.py`（22 例：learn / verify / auto / codegen / 真机噪声回归）；
+  `tests/test_serialframes.py` 追加 6 组（`Compat` / `ChecksumDecl` / `Escape` / `MultiHead` /
+  `FieldModel` / `ErrorReasons` / `IdleGap`）；`tests/test_serialmon.py` 追加
+  `FrameStats` / `CaptureTrigger` / `IdleGapSession`（帧级统计、三种触发、预录、空闲分包）；
+  新增 `tests/test_winproc.py`（10 例：作业关句柄杀成员且不误伤、`spawn` 语义、
+  `adopt` 各种降级不抛、以及「`taskkill /F` 父进程 → 子进程被带走」的端到端）
+
+---
+
 ## [Unreleased] — 2026-11-05（帧协议 P0/P1 · 位域 / 变长 / 多 ID / 组帧）
 
 ### 内核：帧协议 P0（位域 / 变长 / 多 ID）

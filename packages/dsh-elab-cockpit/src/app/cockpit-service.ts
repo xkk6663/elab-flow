@@ -794,9 +794,3 @@ export function createCockpitService(deps: {
   }
 }
 
-/** 便捷读取：当前未接入的候选（UI banner 用）。 */
-export function pendingAdaptations(s: CockpitSnapshot): Array<{ path: string; dirname: string }> {
-  return s.adapt.candidates
-    .filter((c) => c.adaptedAs === undefined)
-    .map((c) => ({ path: c.path, dirname: c.dirname }))
-}

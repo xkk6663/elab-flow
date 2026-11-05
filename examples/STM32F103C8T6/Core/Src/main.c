@@ -41,6 +41,10 @@
 #define LED_HALF_PERIOD_MS 500u
 /* 帧协议演示节拍：每 100ms 依次发三帧（位域 / 变长 / 多 ID） */
 #define FRAME_PERIOD_MS 100u
+/* 演示 4｜"未知协议"突发：给 Agent 自学习用。LEARN 命令触发一段
+ * 只发单一私有协议的窗口（其它帧暂停），让抓到的字节里没有第二种协议。 */
+#define LEARN_PERIOD_MS 50u
+#define LEARN_FRAMES 200u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -70,6 +74,11 @@ static volatile int g_cmd_ready = 0;
 /* ── 串口帧协议演示（P0：位域 / 变长 / 多 ID）────────────────── */
 static uint32_t g_frame_seq = 0;
 static uint32_t g_last_frame = 0;
+
+/* ── 演示 4：私有协议突发（Agent 自学习样本源）──────────────── */
+static volatile uint32_t g_learn_left = 0;      /* 剩余待发帧数（0 = 不在突发） */
+static uint32_t g_learn_last = 0;
+static uint32_t g_learn_seq = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -187,6 +196,56 @@ static void send_frame_bundle(uint32_t seq)
   send_frame_multi(seq);
 }
 
+/*
+ * 演示 4｜私有协议（故意"没人认识"）：给 Agent 的 learn 当样本。
+ *
+ *   5A A5 | id | v1(LH) | v2(LH) | seq | flags | crc8
+ *   共 10 字节，crc8 = Dallas/Maxim（poly 0x31 反射），覆盖前 9 字节。
+ *
+ * id=1 → 温度(0.1C) / 湿度(0.1%)；id=2 → 电压(mV) / 电流(mA)。
+ * 与上面三个演示刻意不同：帧头顺序反转、无帧尾、单字节 CRC —— 学的不是
+ * "我们认得的协议"，而是"线上这堆字节自己长什么样"。
+ */
+static uint8_t crc8_maxim(const uint8_t *buf, size_t len)
+{
+  uint8_t crc = 0x00u;
+  for (size_t i = 0; i < len; i++)
+  {
+    crc ^= buf[i];
+    for (int b = 0; b < 8; b++)
+    {
+      crc = (crc & 1u) ? (uint8_t)((crc >> 1) ^ 0x8Cu) : (uint8_t)(crc >> 1);
+    }
+  }
+  return crc;
+}
+
+static void send_frame_private(uint32_t seq)
+{
+  uint8_t f[10];
+  f[0] = 0x5A; f[1] = 0xA5;
+  if ((seq & 1u) == 0u)
+  {
+    uint16_t temp = (uint16_t)(200u + (seq * 3u) % 150u);    /* 20.0 .. 34.9 C */
+    uint16_t hum = (uint16_t)(450u + (seq * 7u) % 200u);     /* 45.0 .. 64.9 % */
+    f[2] = 1;
+    f[3] = (uint8_t)(temp & 0xFFu); f[4] = (uint8_t)(temp >> 8);
+    f[5] = (uint8_t)(hum & 0xFFu);  f[6] = (uint8_t)(hum >> 8);
+  }
+  else
+  {
+    uint16_t mv = (uint16_t)(3300u + (seq % 200u));          /* 3300 .. 3499 mV */
+    uint16_t ma = (uint16_t)(120u + (seq * 5u) % 80u);       /* 120 .. 199 mA */
+    f[2] = 2;
+    f[3] = (uint8_t)(mv & 0xFFu); f[4] = (uint8_t)(mv >> 8);
+    f[5] = (uint8_t)(ma & 0xFFu); f[6] = (uint8_t)(ma >> 8);
+  }
+  f[7] = (uint8_t)(seq & 0xFFu);
+  f[8] = (uint8_t)((seq & 1u) ? 0x02u : 0x01u);   /* flags：bit0=DATA bit1=VSYS */
+  f[9] = crc8_maxim(f, 9);
+  uart_send_raw(f, sizeof(f));
+}
+
 static void handle_line(char *line)
 {
   size_t n = strlen(line);
@@ -221,6 +280,16 @@ static void handle_line(char *line)
   else if (strncmp(line, "ECHO ", 5) == 0)
   {
     printf("[cmd] ECHO -> %s\r\n", line + 5);
+  }
+  else if (strcmp(line, "LEARN") == 0)
+  {
+    /* 单协议突发：期间其它演示帧暂停，抓包窗口里只有这一种协议。 */
+    g_learn_seq = 0;
+    g_learn_last = HAL_GetTick();
+    g_learn_left = LEARN_FRAMES;
+    printf("[cmd] LEARN -> %lu frames of private proto "
+           "(5A A5 id v1 v2 seq flags crc8), others paused\r\n",
+           (unsigned long)LEARN_FRAMES);
   }
   else
   {
@@ -276,6 +345,8 @@ int main(void)
   printf("[log] DMA       : ok (USART1 RX=DMA1_Ch5, TX=DMA1_Ch4)\r\n");
   printf("[log] UART1     : ok (115200 8N1, TX=PA9, RX=PA10, IRQ=on)\r\n");
   printf("[log] frames    : telemetry(bitfield) + mavlink(length) + multi(id) @10Hz\r\n");
+  printf("[log] LEARN cmd : private proto burst (5A A5 + id + payload + crc8) x%u\r\n",
+         (unsigned)LEARN_FRAMES);
 
   /* 逐字节中断接收：配合 HAL_UART_RxCpltCallback 做命令回显 */
   HAL_UART_Receive_IT(&huart1, (uint8_t *)&g_rx_byte, 1);
@@ -326,8 +397,28 @@ int main(void)
       }
     }
 
-    /* 帧协议演示：100ms 一组，三帧各自演示位域 / 变长 / 多 ID。 */
-    if (HAL_GetTick() - g_last_frame >= FRAME_PERIOD_MS)
+    /* 演示 4｜私有协议突发（LEARN 命令触发）：期间让出串口，只发这一种。
+     * 帧率 20Hz、共 200 帧 ≈ 10s，足够 Agent 抓一段干净样本自学。 */
+    if (g_learn_left > 0)
+    {
+      if (HAL_GetTick() - g_learn_last >= LEARN_PERIOD_MS)
+      {
+        g_learn_last += LEARN_PERIOD_MS;
+        if (HAL_GetTick() - g_learn_last >= LEARN_PERIOD_MS)
+        {
+          g_learn_last = HAL_GetTick();
+        }
+        send_frame_private(g_learn_seq++);
+        if (--g_learn_left == 0u)
+        {
+          printf("[cmd] LEARN -> done, %lu frames sent\r\n",
+                 (unsigned long)g_learn_seq);
+        }
+      }
+    }
+    /* 帧协议演示：100ms 一组，三帧各自演示位域 / 变长 / 多 ID。
+     * 私有协议突发期间暂停，保证窗口内只有一种协议。 */
+    else if (HAL_GetTick() - g_last_frame >= FRAME_PERIOD_MS)
     {
       g_last_frame += FRAME_PERIOD_MS;
       if (HAL_GetTick() - g_last_frame >= FRAME_PERIOD_MS)

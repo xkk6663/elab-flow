@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "services"))
 
 from elab import serialmon as sm            # noqa: E402
+from elab import serialcodec as codec       # noqa: E402
+from elab import serialframes as sf         # noqa: E402
 from elab.config import Config              # noqa: E402
 
 
@@ -545,6 +547,333 @@ class SharedDecode(Base):
         r = self.open(decoder="nope")
         self.assertFalse(r["ok"])
         self.assertIn("未知解码器", r["error"])
+
+
+# ── P3：帧级健康度 / 触发录制 / 空闲分包 ────────────────────────────
+#
+# 帧协议用真 profile（走 serialframes 的校验与装配），不手搓 dict：
+# 这里要验的是"监视会话怎么读这份配置"，而不是"配置长什么样"。
+_NODE_PROFILE = {
+    "id": "t-node", "label": "节点帧", "kind": "binary",
+    "frame": {"head_hex": "A5 5A", "tail_hex": "0D 0A", "length": 10,
+              "id_field": {"offset": 2, "type": "u8"}},
+    "checksum": {"kind": "crc16modbus"},
+    "variants": [
+        {"id": 1, "label": "STAT", "fields": [
+            {"name": "rpm", "offset": 3, "type": "u16", "endian": "le"}]},
+        {"id": 2, "label": "TEMP", "fields": [
+            {"name": "temp", "offset": 3, "type": "i16", "endian": "le",
+             "scale": 0.1}]},
+    ],
+}
+
+
+def _node_frame(vid: int = 1, val: int = 1000, *, bad_ck: bool = False) -> bytes:
+    """head(2) + id(1) + value(2) + pad(1) + crc16(2) + tail(2) = 10 字节。"""
+    body = (b"\xA5\x5A" + bytes([vid])
+            + int(val).to_bytes(2, "little", signed=True) + b"\x00")
+    ck = codec.crc16modbus(body) ^ (0xFFFF if bad_ck else 0)
+    return body + ck.to_bytes(2, "little") + b"\x0D\x0A"
+
+
+class ProfileBase(Base):
+    """临时工程根 + 落盘的 profile：解码/录制都走真实的加载路径。"""
+
+    def setUp(self):
+        super().setUp()
+        from elab.config import Config as _Cfg
+        self.tmp = tempfile.TemporaryDirectory()
+        self._write_project()
+        self.cfg = _Cfg(self.tmp.name)
+        r = sf.save(self.cfg, "p1", 0, _NODE_PROFILE)
+        self.assertTrue(r["ok"], r)
+
+    def _write_project(self) -> None:
+        """最小工程：Config 要求 projects/*.yaml 里既有 name 也有 root。"""
+        p = Path(self.tmp.name) / "projects"
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "p1.yaml").write_text("name: p1\nroot: ${ELAB_ROOT}\n",
+                                   encoding="utf-8")
+
+    def tearDown(self):
+        super().tearDown()
+        self.tmp.cleanup()
+
+    def use_profile(self, pid: str = "t-node") -> dict:
+        r = sm.set_decoder(f"profile:{pid}", actor="agent", cfg=self.cfg,
+                           project="p1")
+        self.assertTrue(r["ok"], r)
+        return r
+
+
+class FrameStats(ProfileBase):
+    """P3.1：帧率 / 到达间隔 / 错误分类 / 每 variant 计数都要如实。"""
+
+    def test_fps_interval_and_buffer(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        self.io.rx.append(_node_frame(1, 1000) + _node_frame(1, 1100)
+                          + _node_frame(1, 1200) + _node_frame(1, 1300))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 4, what="四帧")
+        st = sm.frame_stats(10)
+        self.assertTrue(st["active"])
+        self.assertEqual(st["profile"], "t-node")
+        self.assertEqual(st["frames"], 4)
+        self.assertEqual(st["frames_total"], 4)
+        self.assertGreater(st["fps"], 0)
+        self.assertEqual(st["error_rate"], 0.0)
+        self.assertEqual(st["skipped_total"], 0)
+        self.assertEqual(st["pending_bytes"], 0)
+        self.assertIn("frames", st["buffer"])
+        self.assertGreaterEqual(st["interval_ms"]["mean"], 0.0)
+        self.assertGreaterEqual(st["rate_bps"], 0.0)
+
+    def test_checksum_failures_are_classified(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        self.io.rx.append(_node_frame(1, 1000, bad_ck=True) + _node_frame(1, 1000))
+        self.wait_for(lambda: sm.status()["decode"]["reasons"]["checksum"] >= 1,
+                      what="校验失败记账")
+        self.wait_for(lambda: sm.status()["decode"]["total_frames"] >= 1,
+                      what="好帧")
+        d = sm.status()["decode"]
+        self.assertEqual(d["reasons"]["checksum"], 1)
+        self.assertEqual(d["skipped"], 1)
+        st = sm.frame_stats(10)
+        self.assertEqual(st["checksum_fail"], 1)
+        self.assertEqual(st["frames_total"], 1)
+        self.assertGreater(st["error_rate"], 0.0)        # 1 坏 / (1 好 + 1 坏)
+
+    def test_variants_are_counted_per_label(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        self.io.rx.append(_node_frame(1, 800) + _node_frame(2, -100))
+        self.wait_for(lambda: sm.status()["decode"]["total_frames"] >= 2, what="两帧")
+        st = sm.frame_stats(10)
+        self.assertEqual(st["variants"], {"STAT": 1, "TEMP": 1})
+        self.assertEqual(st["variant_totals"], {"STAT": 1, "TEMP": 1})
+        recs = sm.status()["decode"]["records"]
+        self.assertEqual([r.get("variant") for r in recs], ["STAT", "TEMP"])
+        temps = [r["fields"]["temp"] for r in recs if "temp" in r["fields"]]
+        self.assertAlmostEqual(temps[0], -10.0, places=5)   # scale 0.1
+
+    def test_unknown_id_is_not_a_silent_drop(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        self.io.rx.append(_node_frame(7, 123))
+        self.wait_for(lambda: sm.status()["decode"]["reasons"]["unknown_id"] >= 1,
+                      what="未知 id 记账")
+        d = sm.status()["decode"]
+        self.assertEqual(d["total_frames"], 0)
+        self.assertEqual(d["reasons"]["unknown_id"], 1)
+        st = sm.frame_stats(10)
+        self.assertEqual(st["unknown_id"], 1)
+
+    def test_stats_without_session_and_window_clamped(self):
+        r = sm.frame_stats(5)
+        self.assertFalse(r["active"])
+        self.assertEqual(r["frames"], 0)
+        self.assertTrue(self.open()["ok"])
+        self.assertEqual(sm.frame_stats(0)["window_s"], 1.0)     # 下限 1s
+        self.assertEqual(sm.frame_stats(999)["window_s"], 60.0)  # 上限 60s
+
+
+class CaptureTrigger(ProfileBase):
+    """P3.2：布防 —— 命中前不落盘、命中把预录一起交出去、命中后继续录。"""
+
+    def test_pattern_trigger_flushes_pre_roll(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"pattern": "aa55"},
+                             pre_bytes=4096)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["armed"])
+        self.io.rx.append(b"boot-1\n")
+        self.io.rx.append(b"boot-2\n")
+        self.wait_for(lambda: sm.status()["chunk_seq"] >= 2, what="预录批次")
+        cap = sm.status()["capture"]
+        self.assertTrue(cap["armed"])
+        self.assertFalse(cap["triggered"])
+        self.assertEqual(cap["chunks"], 0)        # 未命中 = 一个字节都不落盘
+
+        self.io.rx.append(b"\xAA\x55\x01")
+        self.wait_for(lambda: sm.status()["capture"]["triggered"], what="命中")
+        sm.write_through(b"after\n")              # 命中之后照录，不停
+        self.wait_for(lambda: sm.status()["capture"]["chunks"] >= 5,
+                      what="命中后继续录")
+        stop = sm.capture_stop()
+        self.assertTrue(stop["triggered"])
+        self.assertEqual(stop["triggered_by"], "pattern")
+        lines = [json.loads(x) for x in
+                 Path(stop["path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(base64.b64decode(lines[0]["bytes_b64"]), b"boot-1\n")
+        self.assertEqual(base64.b64decode(lines[1]["bytes_b64"]), b"boot-2\n")
+        self.assertEqual(lines[2]["event"], "trigger")
+        self.assertEqual(lines[2]["why"], "pattern")
+        self.assertEqual(base64.b64decode(lines[3]["bytes_b64"]), b"\xAA\x55\x01")
+        self.assertEqual(base64.b64decode(lines[4]["bytes_b64"]), b"after\n")
+
+    def test_no_pre_roll_keeps_only_the_hit(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"pattern": "0d0a"}, pre_bytes=0)
+        self.assertTrue(r["ok"], r)
+        self.io.rx.append(b"noise\n")
+        self.wait_for(lambda: sm.status()["chunk_seq"] >= 1, what="无关批次")
+        self.assertEqual(sm.status()["capture"]["chunks"], 0)
+        self.io.rx.append(b"tail\r\n")
+        self.wait_for(lambda: sm.status()["capture"]["triggered"], what="命中")
+        stop = sm.capture_stop()
+        lines = [json.loads(x) for x in
+                 Path(stop["path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 2)           # 没要预录：标记 + 命中那一批
+        self.assertEqual(lines[0]["event"], "trigger")
+        self.assertEqual(base64.b64decode(lines[1]["bytes_b64"]), b"tail\r\n")
+
+    def test_frame_index_trigger_keeps_its_own_batch(self):
+        """按第 N 帧触发：命中那一批字节必须留下（现场不能被自己丢掉）。"""
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        r = sm.capture_start(self.cfg, trigger={"frame_index": 3})
+        self.assertTrue(r["ok"], r)
+        batch = _node_frame(1, 1) + _node_frame(1, 2) + _node_frame(1, 3)
+        self.io.rx.append(batch)
+        self.wait_for(lambda: sm.status()["capture"]["triggered"], what="第 3 帧")
+        stop = sm.capture_stop()
+        self.assertEqual(stop["triggered_by"], "frame_index=3")
+        lines = [json.loads(x) for x in
+                 Path(stop["path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(base64.b64decode(lines[0]["bytes_b64"]), batch)
+
+    def test_field_trigger_needs_decoder(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"field": {"name": "rpm",
+                                                         "op": "gt", "value": 500}})
+        self.assertFalse(r["ok"])
+        self.assertIn("解码器", r["error"])
+
+    def test_bad_pattern_rejected_at_arm_time(self):
+        # 布防时就要拦：留到匹配阶段静默 return 的话，录制会永远不命中，
+        # 用户只会以为"问题没复现"，而不是"我把 pattern 拼错了"。
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"pattern": "aa5g"})
+        self.assertFalse(r["ok"])
+        self.assertIn("HEX", r["error"])
+
+    def test_bad_op_rejected_at_arm_time(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        r = sm.capture_start(self.cfg, trigger={"field": {"name": "rpm",
+                                                          "op": "between", "value": 5}})
+        self.assertFalse(r["ok"])
+        self.assertIn("eq", r["error"])
+
+    def test_unknown_field_name_warns_instead_of_silent(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        r = sm.capture_start(self.cfg, trigger={"field": {"name": "nope",
+                                                          "op": "gt", "value": 1}})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["warnings"], r)
+        self.assertIn("nope", r["warnings"][0])
+        sm.capture_stop()
+
+    def test_frame_index_must_be_positive(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"frame_index": 0})
+        self.assertFalse(r["ok"])
+        self.assertIn("frame_index", r["error"])
+
+    def test_field_trigger_compares_decoded_value(self):
+        self.assertTrue(self.open()["ok"])
+        self.use_profile()
+        r = sm.capture_start(self.cfg, trigger={"field": {"name": "rpm",
+                                                          "op": "gt",
+                                                          "value": 500}},
+                             pre_bytes=4096)
+        self.assertTrue(r["ok"], r)
+        self.io.rx.append(_node_frame(1, 100))     # 不满足：进预录
+        self.wait_for(lambda: sm.status()["chunk_seq"] >= 1, what="低值帧")
+        self.assertFalse(sm.status()["capture"]["triggered"])
+        self.io.rx.append(_node_frame(1, 900))     # rpm>500 → 命中
+        self.wait_for(lambda: sm.status()["capture"]["triggered"], what="命中")
+        stop = sm.capture_stop()
+        self.assertEqual(stop["triggered_by"], "field rpm>500")
+        lines = [json.loads(x) for x in
+                 Path(stop["path"]).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 3)            # 低值帧 + 标记 + 命中帧
+        self.assertEqual(base64.b64decode(lines[0]["bytes_b64"]), _node_frame(1, 100))
+
+    def test_armed_but_never_hit_is_reported(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger={"pattern": "deadbeef"})
+        self.assertTrue(r["ok"], r)
+        self.io.rx.append(b"nothing to see\n")
+        self.wait_for(lambda: sm.status()["chunk_seq"] >= 1, what="无关批次")
+        stop = sm.capture_stop()
+        self.assertTrue(stop["armed"])
+        self.assertFalse(stop["triggered"])
+        self.assertEqual(stop["triggered_by"], "")
+        self.assertIn("未命中", stop["note"])
+
+    def test_trigger_must_be_object(self):
+        self.assertTrue(self.open()["ok"])
+        r = sm.capture_start(self.cfg, trigger=["aa55"])
+        self.assertFalse(r["ok"])
+        self.assertIn("trigger", r["error"])
+
+
+class IdleGapSession(Base):
+    """P3.3：只靠空闲分包定界的协议 —— 静默超过 idle_gap_ms 才算一帧结束。"""
+
+    PROFILE = {
+        "id": "idle-demo", "label": "无帧头遥测", "kind": "binary",
+        "frame": {"idle_gap_ms": 30, "max_bytes": 256},
+        "fields": [{"name": "a", "offset": 0, "type": "f32"},
+                   {"name": "b", "offset": 4, "type": "f32"}],
+    }
+
+    def setUp(self):
+        super().setUp()
+        from elab.config import Config as _Cfg
+        self.tmp = tempfile.TemporaryDirectory()
+        p = Path(self.tmp.name) / "projects"
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "p1.yaml").write_text("name: p1\nroot: ${ELAB_ROOT}\n",
+                                   encoding="utf-8")
+        self.cfg = _Cfg(self.tmp.name)
+        self.assertTrue(sf.save(self.cfg, "p1", 0, self.PROFILE)["ok"])
+        self.assertTrue(self.open()["ok"])
+        r = sm.set_decoder("profile:idle-demo", actor="agent", cfg=self.cfg,
+                           project="p1")
+        self.assertTrue(r["ok"], r)
+
+    def tearDown(self):
+        super().tearDown()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _pair(a: float, b: float) -> bytes:
+        return struct.pack("<ff", a, b)
+
+    def test_silence_splits_frames(self):
+        self.assertEqual(sm.frame_stats(10)["idle_gap_ms"], 30)
+        self.io.rx.append(self._pair(1.0, 2.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="静默出一帧")
+        self.io.rx.append(self._pair(3.0, 4.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 2, what="第二帧")
+        frames = sm.tail_decoded(0)["frames"]
+        self.assertAlmostEqual(frames[0]["values"][0], 1.0, places=5)
+        self.assertAlmostEqual(frames[1]["values"][1], 4.0, places=5)
+        self.assertEqual(sm.tail_decoded(0)["pending_bytes"], 0)
+
+    def test_back_to_back_bytes_stay_one_frame(self):
+        """连着的两批在空闲阈值内 = 同一帧（这就是"空闲分包"与"定长"的区别）。"""
+        self.io.rx.append(self._pair(5.0, 6.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["pending_bytes"] > 0, what="攒字节")
+        self.io.rx.append(self._pair(7.0, 8.0))
+        self.wait_for(lambda: sm.tail_decoded(0)["next_after"] >= 1, what="合成一帧")
+        self.assertEqual(sm.tail_decoded(0)["next_after"], 1)
 
 
 if __name__ == "__main__":

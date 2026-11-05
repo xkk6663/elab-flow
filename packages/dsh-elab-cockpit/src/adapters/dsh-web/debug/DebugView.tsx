@@ -23,13 +23,14 @@ import type {
   DebugRegGroup,
   DebugRtosResponse,
   DebugSessionSnapshot,
+  DebugSourceResponse,
   DebugStackFrame,
   DebugSvdField,
   DebugVarNode,
   DebugWatchItem,
 } from '../../../domain/debug.ts'
 
-type Tab = 'stack' | 'vars' | 'regs' | 'bps' | 'watch' | 'mem'
+type Tab = 'stack' | 'vars' | 'regs' | 'bps' | 'watch' | 'src' | 'mem'
   | 'disasm' | 'periph' | 'rtos' | 'audit' | 'out'
 
 const MONO: CSSProperties = { fontFamily: 'var(--elab-font-mono)', fontSize: 'var(--elab-fs-xs)' }
@@ -59,8 +60,59 @@ interface OutputLine {
   tone: 'normal' | 'alert'
 }
 
-export interface DebugViewProps {
+/** 面板错误条的形状（与内核 `debug-error` 的 `{code,message,hint}` 对齐） */
+interface PanelError {
+  code: string
+  message: string
+  hint?: string
+}
+
+/**
+ * 把任意异常收敛成面板错误条的形状。
+ *
+ * **不要在这里糊一层 "xxx-failed"**：内核给的 `code`（`debug-gdb-missing`）
+ * 和 `hint`（`CMSIS-DAP command mismatch…`）是现场唯一的线索，吞掉之后
+ * 用户只会看到 "HTTP 503 / 点了没反应"。
+ */
+function toPanelError(e: unknown, fallbackCode: string): PanelError {
+  const any = e as { code?: unknown; hint?: unknown; message?: unknown } | null
+  const code = typeof any?.code === 'string' && any.code !== '' ? any.code : fallbackCode
+  const message =
+    typeof any?.message === 'string' && any.message !== ''
+      ? any.message
+      : e instanceof Error
+        ? e.message
+        : String(e)
+  const hint = typeof any?.hint === 'string' && any.hint !== '' ? any.hint : undefined
+  return hint === undefined ? { code, message } : { code, message, hint }
+}
+
+/**
+ * 失败后的"下一步该干什么"。只覆盖探针/端口被占用这一类 —— 它们的
+ * 根因在面板外面（别的会话、残留 openocd），光给错误码用户没法自救。
+ */
+const RECOVERY: Record<string, string> = {
+  'debug-gdb-missing':
+    '多半是探针被别的进程占着：① 先在会话条关掉其它调试会话（× 会恢复目标运行）；' +
+    '② 若之前强杀过内核，残留的 openocd 仍在占 DAP——在任务管理器结束该 openocd 进程后重试。',
+  'debug-openocd-dead':
+    'openocd 已退出：看"输出"页的 stderr 尾部；常见是探针被占用或供电/接线松动。清场后重试。',
+  'debug-target-busy':
+    '这个目标已有调试会话：关掉那个会话（或等它的租约到期）再来；同一目标不支持并发调试。',
+  'debug-port-hijacked':
+    'gdb 端口被非本工程的进程占了：换端口或结束占用进程后重试。',
+  'debug-elf-missing':
+    '先编译出 ELF（工程页跑一次构建），再开始调试。',
+}
+
+export interface DebugPaneProps {
+  /** React 列表 key（多 pane 装配用；TS 的 JSX 检查要求显式声明） */
+  key?: string
   sessionId?: string
+  /** 调试会话 id（P3）：不传 = 内核唯一会话（旧行为） */
+  debugSessionId?: string
+  /** 作为 pane 渲染（不画会话条/开-关按钮；由 DebugView 壳层托管） */
+  embedded?: boolean
   visible?: boolean
   /** 当前工程（无会话时用于"开始调试"）。 */
   project: string
@@ -74,8 +126,34 @@ export interface DebugViewProps {
   api: DebugApi
 }
 
-export function DebugView(props: DebugViewProps): React.ReactElement | null {
-  const { sessionId, visible = true, project, available, disabled = false, onBack, api } = props
+function DebugPane(props: DebugPaneProps): React.ReactElement | null {
+  const { sessionId, debugSessionId, embedded = false, visible = true, project,
+    available, disabled = false, onBack, api } = props
+  const dsid = debugSessionId ?? ''
+  /** 所有调试调用统一注入 `debugSession`（P3）：一处收口，避免 35 个调用点各写一遍。 */
+  const dbg = useMemo<DebugApi>(() => {
+    const src = api
+    return {
+      ...src,
+      debugSession: (sid?: string) => src.debugSession(sid, dsid),
+      debugClose: (o) => src.debugClose({ ...o, debugSession: o?.debugSession ?? dsid }),
+      debugControl: (o) => src.debugControl({ ...o, debugSession: dsid }),
+      debugStack: (o) => src.debugStack({ ...o, debugSession: dsid }),
+      debugVariables: (o) => src.debugVariables({ ...o, debugSession: dsid }),
+      debugRegisters: (o) => src.debugRegisters({ ...o, debugSession: dsid }),
+      debugRegistersWrite: (o) => src.debugRegistersWrite({ ...o, debugSession: dsid }),
+      debugSource: (o) => src.debugSource({ ...o, debugSession: dsid }),
+      debugBreakpoints: (o) => src.debugBreakpoints({ ...o, debugSession: dsid }),
+      debugMemory: (o) => src.debugMemory({ ...o, debugSession: dsid }),
+      debugDisasm: (o) => src.debugDisasm({ ...o, debugSession: dsid }),
+      debugEvaluate: (o) => src.debugEvaluate({ ...o, debugSession: dsid }),
+      debugWrite: (o) => src.debugWrite({ ...o, debugSession: dsid }),
+      debugWatch: (o) => src.debugWatch({ ...o, debugSession: dsid }),
+      debugAudit: (o) => src.debugAudit({ ...o, debugSession: dsid }),
+      debugPeripherals: (o) => src.debugPeripherals({ ...o, debugSession: dsid }),
+      debugRtos: (o) => src.debugRtos({ ...o, debugSession: dsid }),
+    }
+  }, [api, dsid])
 
   const [snap, setSnap] = useState<DebugSessionSnapshot | null>(null)
   const [error, setError] = useState<{ code: string; message: string; hint?: string } | null>(null)
@@ -88,6 +166,16 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
   const [vars, setVars] = useState<DebugVarNode[]>([])
   const [children, setChildren] = useState<Record<string, DebugVarNode[]>>({})
   const [regs, setRegs] = useState<DebugRegGroup[]>([])
+  /** 寄存器组选择（P3-C）：默认 all，M3 只会有一组 core */
+  const [regGroup, setRegGroup] = useState<string>('all')
+  /** 草稿：改了但没应用的寄存器（名 → HEX）；一次提交只落一条审计 */
+  const [regDraft, setRegDraft] = useState<Record<string, string>>({})
+  /** 源码页（P3-A）：一页行 + 选中行 + 错误（降级到反汇编的理由） */
+  const [src, setSrc] = useState<DebugSourceResponse | null>(null)
+  const [srcStart, setSrcStart] = useState(1)
+  const [srcPick, setSrcPick] = useState(0)
+  const [srcErr, setSrcErr] = useState('')
+  const srcStopRef = useRef<HTMLDivElement | null>(null)
   const [bps, setBps] = useState<DebugBreakpoint[]>([])
   const [allowWrite, setAllowWrite] = useState(false)
   const [output, setOutput] = useState<OutputLine[]>([])
@@ -134,7 +222,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
 
   const reloadSession = useCallback(async () => {
     try {
-      const r = await api.debugSession(sessionId)
+      const r = await dbg.debugSession(sessionId)
       applySnap(r.session)
     } catch {
       /* 内核暂时读不到：保持旧快照，不阻塞面板 */
@@ -147,7 +235,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     let cancelled = false
     const tick = async (): Promise<void> => {
       try {
-        const r = await api.debugSession(sessionId)
+        const r = await dbg.debugSession(sessionId)
         if (!cancelled) applySnap(r.session)
       } catch {
         /* ignore */
@@ -167,10 +255,10 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     setChildren({})
     try {
       const [st, vs, rg, bp] = await Promise.all([
-        api.debugStack({ sessionId }),
-        api.debugVariables({ frame, scope: varsMode, sessionId }),
-        api.debugRegisters({ group: 'core', sessionId }),
-        api.debugBreakpoints({ sessionId }),
+        dbg.debugStack({ sessionId }),
+        dbg.debugVariables({ frame, scope: varsMode, sessionId }),
+        dbg.debugRegisters({ group: 'all', sessionId }),
+        dbg.debugBreakpoints({ sessionId }),
       ])
       setFrames(st.frames)
       setVars(vs.nodes)
@@ -194,21 +282,21 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     if (snap === null || snap.state !== 'stopped') return
     try {
       if (tab === 'watch') {
-        const w = await api.debugWatch({ sessionId })
+        const w = await dbg.debugWatch({ sessionId })
         setWatches(w.watches)
         setWatchRev(w.rev)
       } else if (tab === 'mem') {
-        setMem(await api.debugMemory({
+        setMem(await dbg.debugMemory({
           addr: memAddr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId,
         }))
       } else if (tab === 'disasm') {
-        setDisasm(await api.debugDisasm({ sessionId }))
+        setDisasm(await dbg.debugDisasm({ sessionId }))
       } else if (tab === 'periph') {
-        setPeriph(await api.debugPeripherals({ sessionId }))
+        setPeriph(await dbg.debugPeripherals({ sessionId }))
       } else if (tab === 'rtos') {
-        setRtos(await api.debugRtos({ sessionId }))
+        setRtos(await dbg.debugRtos({ sessionId }))
       } else if (tab === 'audit') {
-        const a = await api.debugAudit({ limit: 100, sessionId })
+        const a = await dbg.debugAudit({ limit: 100, sessionId })
         setAudit(a.records)
       }
     } catch (e) {
@@ -226,34 +314,34 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     const expr = watchExpr.trim()
     if (expr === '') return
     try {
-      const r = await api.debugWatch({ op: 'add', expr, format: 'natural', rev: watchRev, sessionId })
+      const r = await dbg.debugWatch({ op: 'add', expr, format: 'natural', rev: watchRev, sessionId })
       setWatches(r.watches)
       setWatchRev(r.rev)
       setWatchExpr('')
     } catch (e) {
-      setError({ code: 'debug-watch-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-watch-failed'))
     }
   }, [watchExpr, watchRev, sessionId])
 
   const removeWatch = useCallback(async (id: string): Promise<void> => {
     try {
-      const r = await api.debugWatch({ op: 'remove', id, rev: watchRev, sessionId })
+      const r = await dbg.debugWatch({ op: 'remove', id, rev: watchRev, sessionId })
       setWatches(r.watches)
       setWatchRev(r.rev)
     } catch (e) {
-      setError({ code: 'debug-watch-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-watch-failed'))
     }
   }, [watchRev, sessionId])
 
   const readMem = useCallback(async (): Promise<void> => {
     try {
-      setMem(await api.debugMemory({
+      setMem(await dbg.debugMemory({
         addr: memAddr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId,
       }))
     } catch (e) {
-      setError({ code: 'debug-memory-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-memory-failed'))
     }
-  }, [memAddr, memCount, sessionId])
+  }, [memAddr, memCount, sessionId, dbg])
 
   /** 行内写 1 字节（需人类会话 allow_write；内核记 before/after 审计）。 */
   const commitByte = useCallback(async (addr: string, raw: string, orig: string): Promise<void> => {
@@ -266,35 +354,108 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     setEditCell(null)
     if (value === orig.toLowerCase()) return
     try {
-      await api.debugWrite({ target: 'memory', addr, value, confirm: true, sessionId })
+      await dbg.debugWrite({ target: 'memory', addr, value, confirm: true, sessionId })
       pushOut(`写内存 ${addr} <- 0x${value}`)
       await readMem()
     } catch (e) {
-      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-write-failed'))
     }
-  }, [api, sessionId, pushOut, readMem])
+  }, [dbg, sessionId, pushOut, readMem])
 
-  /** 行内写寄存器（32 位 HEX，只允许内核白名单里的 core 寄存器）。 */
-  const commitReg = useCallback(async (name: string, raw: string, orig: string): Promise<void> => {
+  /**
+   * 行内改寄存器 → **只进草稿**，不立即写（P3-C §7.3）。
+   * 真正落盘在「应用本组」：一次 POST 一批 set + 一条审计，
+   * 而不是点一下写一次、留下 N 条互相独立的审计。
+   */
+  const stageReg = useCallback((name: string, raw: string, orig: string, width = 32): void => {
     let v = raw.trim()
     if (v.toLowerCase().startsWith('0x')) v = v.slice(2)
-    if (!/^[0-9a-fA-F]{1,8}$/.test(v)) {
-      setError({ code: 'debug-write-invalid', message: '寄存器值需 1–8 位 HEX（32 位）' })
+    const digits = Math.max(1, Math.round(width / 4))
+    if (!new RegExp(`^[0-9a-fA-F]{1,${digits}}$`).test(v)) {
+      setError({ code: 'debug-write-invalid', message: `寄存器值需 1–${digits} 位 HEX（${width} 位宽）` })
       return
     }
-    const value = v.padStart(8, '0').toLowerCase()
+    const value = v.padStart(digits, '0').toLowerCase()
     setEditReg(null)
-    const normOrig = orig.trim().toLowerCase().replace(/^0x/, '').padStart(8, '0')
-    if (value === normOrig) return
+    const normOrig = orig.trim().toLowerCase().replace(/^0x/, '').padStart(digits, '0')
+    setRegDraft((prev) => {
+      const next = { ...prev }
+      if (value === normOrig) delete next[name]
+      else next[name] = value
+      return next
+    })
+  }, [])
+
+  /** 应用本组：整批校验 → 逐项 set → 一条审计；失败项如实提示，不假装原子。 */
+  const applyRegDraft = useCallback(async (): Promise<void> => {
+    const items = Object.entries(regDraft).map(([name, value]) => ({ name, value }))
+    if (items.length === 0) return
     try {
-      await api.debugWrite({ target: 'register', name, value, confirm: true, sessionId })
-      pushOut(`写寄存器 ${name} <- 0x${value}`)
-      const r = await api.debugRegisters({ group: 'core', sessionId })
-      setRegs(r.groups)
+      const r = await dbg.debugRegistersWrite({ items, confirm: true, sessionId })
+      pushOut(`应用 ${r.applied.length} 个寄存器：${r.applied.map((a) => `${a.name}=${a.after}`).join(' ')}`)
+      if (!r.ok && r.failed !== undefined) {
+        setError({ code: r.failed.code, message: `批量写未完成：${r.failed.name}（已写入 ${r.applied.length} 项）` })
+      }
+      setRegDraft({})
+      const g = await dbg.debugRegisters({ group: 'all', sessionId })
+      setRegs(g.groups)
     } catch (e) {
-      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-write-failed'))
     }
-  }, [api, sessionId, pushOut])
+  }, [dbg, regDraft, sessionId, pushOut])
+
+  /** 源码页：读一页行（file 缺省 = 当前停止帧）。 */
+  const loadSource = useCallback(async (file?: string, start?: number): Promise<void> => {
+    setSrcErr('')
+    try {
+      const r = await dbg.debugSource({ file, start: start ?? srcStart, count: 160, sessionId })
+      setSrc(r)
+      setSrcStart(r.start)
+      if (r.stop_line !== undefined && r.stop_line !== null) setSrcPick(r.stop_line)
+    } catch (e) {
+      setSrc(null)
+      setSrcErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [dbg, sessionId, srcStart])
+
+  /** gutter 点击：切换 `rel:line` 源码断点（A3）。 */
+  const toggleSourceBp = useCallback(async (rel: string, line: number): Promise<void> => {
+    const loc = `${rel}:${line}`
+    const cur = bps.find((b) => b.kind === 'source' && b.location === loc)
+    try {
+      if (cur !== undefined) await dbg.debugBreakpoints({ op: 'remove', id: cur.id, sessionId })
+      else await dbg.debugBreakpoints({ op: 'add', kind: 'source', location: loc, sessionId })
+      const r = await dbg.debugBreakpoints({ sessionId })
+      setBps(r.breakpoints)
+      setAllowWrite(r.allow_write === true)
+      pushOut(`${cur !== undefined ? '删除' : '新增'}源码断点 ${loc}`)
+    } catch (e) {
+      setError(toPanelError(e, 'debug-breakpoint-failed'))
+    }
+  }, [dbg, bps, sessionId, pushOut])
+
+  /**
+   * 源码页载入：切到 src / 新 stop_seq / 换帧时重读。
+   * 初始窗口以停止行为中心（-60 行），否则长文件里 stop_line 落在窗口外，
+   * 高亮会"看不见"（内核只回报行号，不替 UI 转窗口）。
+   */
+  useEffect(() => {
+    if (tab !== 'src' || !available) return
+    const st = snap
+    if (st === null || st.state !== 'stopped') return
+    const ln = st.stop?.frame.line ?? null
+    const start = ln !== null && ln > 0 ? Math.max(1, ln - 60) : 1
+    void loadSource(undefined, start)
+  }, [tab, available, snap?.state, snap?.stop?.seq, frameIdx]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 源码页：停止行自动滚到视野中央
+  useEffect(() => {
+    if (tab !== 'src') return
+    const el = srcStopRef.current
+    if (el !== null && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'center', behavior: 'auto' })
+    }
+  }, [tab, src])
 
   /** SVD 字段写：读-改-写，保留同寄存器其它位，按寄存器宽度写回。 */
   const commitField = useCallback(async (): Promise<void> => {
@@ -318,32 +479,32 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
       (_, i) => ((next >>> (i * 8)) & 0xff).toString(16).padStart(2, '0')).join('')
     setEditField(null)
     try {
-      await api.debugWrite({ target: 'memory', addr: ef.addr, value, confirm: true, sessionId })
+      await dbg.debugWrite({ target: 'memory', addr: ef.addr, value, confirm: true, sessionId })
       pushOut(`写字段 ${ef.reg} <- ${raw}（寄存器 0x${value}）`)
-      setPeriph(await api.debugPeripherals({ path: ef.reg, read: true, sessionId }))
+      setPeriph(await dbg.debugPeripherals({ path: ef.reg, read: true, sessionId }))
     } catch (e) {
-      setError({ code: 'debug-write-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-write-failed'))
     }
-  }, [api, editField, sessionId, pushOut])
+  }, [dbg, editField, sessionId, pushOut])
 
   /** 反汇编行内「设地址断点」，并回列表刷新。 */
   const addAddrBp = useCallback(async (addr: string): Promise<void> => {
     try {
-      await api.debugBreakpoints({ op: 'add', kind: 'addr', location: addr, sessionId })
-      const r = await api.debugBreakpoints({ sessionId })
+      await dbg.debugBreakpoints({ op: 'add', kind: 'addr', location: addr, sessionId })
+      const r = await dbg.debugBreakpoints({ sessionId })
       setBps(r.breakpoints)
       setAllowWrite(r.allow_write === true)
       pushOut(`地址断点 + ${addr}`)
     } catch (e) {
-      setError({ code: 'debug-breakpoint-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-breakpoint-failed'))
     }
-  }, [api, sessionId, pushOut])
+  }, [dbg, sessionId, pushOut])
 
   const loadPeriph = useCallback(async (path: string, read: boolean): Promise<void> => {
     try {
-      setPeriph(await api.debugPeripherals({ path, read, sessionId }))
+      setPeriph(await dbg.debugPeripherals({ path, read, sessionId }))
     } catch (e) {
-      setError({ code: 'debug-svd-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-svd-failed'))
     }
   }, [sessionId])
 
@@ -352,7 +513,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     setFrameIdx(idx)
     const s = snap
     if (s === null || s.state !== 'stopped') return
-    void api.debugVariables({ frame: idx, scope: varsMode, sessionId })
+    void dbg.debugVariables({ frame: idx, scope: varsMode, sessionId })
       .then((r) => { setVars(r.nodes); setChildren({}) })
       .catch(() => { /* 帧切失败：保留旧列表 */ })
   }, [snap, varsMode, sessionId])
@@ -360,7 +521,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
   // 变量作用域切换
   useEffect(() => {
     if (snap?.state !== 'stopped') return
-    void api.debugVariables({ frame: frameIdx, scope: varsMode, sessionId })
+    void dbg.debugVariables({ frame: frameIdx, scope: varsMode, sessionId })
       .then((r) => { setVars(r.nodes); setChildren({}) })
       .catch(() => { /* ignore */ })
   }, [varsMode]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -370,6 +531,8 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     if (!visible || !available || snap === null) return
     const q = new URLSearchParams()
     if (sessionId !== undefined && sessionId !== '') q.set('sessionId', sessionId)
+    // P3-B：每个 pane 只订自己的会话事件（壳层另有一条不过滤的流用于同步清单）
+    if (dsid !== '') q.set('debug_session', dsid)
     const es = new EventSource(`/elab/debug/events?${q.toString()}`)
     const onMsg = (ev: MessageEvent<string>): void => {
       let env: { topic?: string; data?: Record<string, unknown> } | undefined
@@ -472,7 +635,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     setBusy(true)
     setError(null)
     try {
-      const r = await api.debugOpen({
+      const r = await dbg.debugOpen({
         project,
         options: { stop_at: 'main' },
         lease_s: 600,
@@ -483,38 +646,43 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
       pushOut(`调试会话已打开（${r.session?.id ?? ''}）`)
       setTab('stack')
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setError({ code: 'debug-open-failed', message: msg })
+      // 打开失败最常见的是探针被占（503 debug-gdb-missing）：保留内核 code + hint，别糊成 "HTTP 503"
+      setError(toPanelError(e, 'debug-open-failed'))
     } finally {
       setBusy(false)
     }
   }, [applySnap, project, pushOut, sessionId])
 
-  const control = useCallback(async (action: string): Promise<void> => {
+  /**
+   * @param line 仅 `run_to_line` 用：走到源码页当前选中的行（P3-A）。
+   *   临时断点由内核建/删，面板不自己管生命周期。
+   */
+  const control = useCallback(async (action: string, line = 0): Promise<void> => {
     setBusy(true)
     try {
-      await api.debugControl({
+      await dbg.debugControl({
         action,
         sessionId,
         ...(action === 'reset' ? { confirm: true } : {}),
+        ...(action === 'run_to_line' && src !== null && line > 0 ? { file: src.rel, line } : {}),
       })
       await reloadSession()
     } catch (e) {
-      setError({ code: 'debug-control-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-control-failed'))
     } finally {
       setBusy(false)
     }
-  }, [reloadSession, sessionId])
+  }, [reloadSession, sessionId, src])
 
   const closeSession = useCallback(async (): Promise<void> => {
     setBusy(true)
     try {
-      const r = await api.debugClose({ resume: true, sessionId })
+      const r = await dbg.debugClose({ resume: true, sessionId })
       pushOut(`会话已关闭（resumed=${String(r.resumed)}）`)
       applySnap(null)
       setFrames([]); setVars([]); setRegs([]); setBps([]); setChildren({})
     } catch (e) {
-      setError({ code: 'debug-close-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-close-failed'))
     } finally {
       setBusy(false)
     }
@@ -524,25 +692,25 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     const loc = bpLocation.trim()
     if (loc === '') return
     try {
-      await api.debugBreakpoints({
+      await dbg.debugBreakpoints({
         op: 'add', kind: bpKind, location: loc, condition: bpCond.trim(), sessionId,
       })
       setBpLocation('')
       setBpCond('')
-      const r = await api.debugBreakpoints({ sessionId })
+      const r = await dbg.debugBreakpoints({ sessionId })
       setBps(r.breakpoints)
     } catch (e) {
-      setError({ code: 'debug-breakpoint-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-breakpoint-failed'))
     }
   }, [bpCond, bpKind, bpLocation, sessionId])
 
   const bpOp = useCallback(async (op: 'toggle' | 'remove', id: string): Promise<void> => {
     try {
-      await api.debugBreakpoints({ op, id, sessionId })
-      const r = await api.debugBreakpoints({ sessionId })
+      await dbg.debugBreakpoints({ op, id, sessionId })
+      const r = await dbg.debugBreakpoints({ sessionId })
       setBps(r.breakpoints)
     } catch (e) {
-      setError({ code: 'debug-breakpoint-failed', message: e instanceof Error ? e.message : String(e) })
+      setError(toPanelError(e, 'debug-breakpoint-failed'))
     }
   }, [sessionId])
 
@@ -556,7 +724,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
       return
     }
     try {
-      const r = await api.debugVariables({ frame: frameIdx, scope: 'children', var: node.name, sessionId })
+      const r = await dbg.debugVariables({ frame: frameIdx, scope: 'children', var: node.name, sessionId })
       setChildren((prev) => ({ ...prev, [path]: r.nodes }))
     } catch (e) {
       pushOut(`展开 ${node.name} 失败：${e instanceof Error ? e.message : String(e)}`, 'alert')
@@ -575,6 +743,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     ['regs', '寄存器'],
     ['bps', `断点 ${bps.length}`],
     ...(features.includes('watch') ? [['watch', '监视'] as [Tab, string]] : []),
+    ...(features.includes('source') ? [['src', '源码'] as [Tab, string]] : []),
     ['mem', '内存'],
     ['disasm', '反汇编'],
     ...(features.includes('svd') ? [['periph', '外设'] as [Tab, string]] : []),
@@ -588,6 +757,17 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
     : snap.stop.frame.func === '' && frames.length > 0
       ? { ...snap.stop, frame: frames[0], pc: snap.stop.pc !== '' ? snap.stop.pc : frames[0].addr }
       : snap.stop
+
+  // 寄存器页（P3-C）：组过滤 + 草稿计数（草稿是"改了但没提交"的行）
+  const regGroups = regGroup === 'all' ? regs : regs.filter((g) => g.name === regGroup)
+  const draftCount = Object.keys(regDraft).length
+  /** 源码页断点索引：`rel:line` → 断点（gutter 圆点用） */
+  const srcBpMap = new Map<string, DebugBreakpoint>()
+  if (src !== null) {
+    for (const b of bps) {
+      if (b.kind === 'source') srcBpMap.set(b.location, b)
+    }
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -625,7 +805,9 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
               disabled={busy}
               onClick={() => void closeSession()}
               style={{ ...BTN, borderColor: 'var(--elab-status-fail)', color: 'var(--elab-status-fail)' }}
-              title="关闭会话并恢复目标运行（C36）"
+              title={embedded
+                ? '关闭本会话（与会话条里的 × 同效，不影响其它会话）'
+                : '关闭会话并恢复目标运行（C36）'}
             >
               关闭
             </button>
@@ -656,10 +838,19 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         </div>
       )}
 
-      {error !== null && (
+      {/* 有会话时的轻量报错条；空态（snap === null）由正文的错误块承载，避免同一句显示两遍 */}
+      {error !== null && snap !== null && (
         <div style={{ flex: '0 0 auto', padding: '3px 6px', borderBottom: '1px solid var(--elab-border)', color: 'var(--elab-status-fail)', fontSize: 'var(--elab-fs-xs)' }}>
           {`${error.code}：${error.message}`}
           {error.hint !== undefined && <span style={{ color: 'var(--elab-fg-muted)' }}>{`（${error.hint}）`}</span>}
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            style={{ ...BTN, marginLeft: '6px', padding: '0 4px' }}
+            title="收起这条错误"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -694,9 +885,43 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
       <div style={{ flex: '1 1 auto', minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         {snap === null && (
           <div style={{ padding: 'var(--elab-space-3)', color: 'var(--elab-fg-secondary)', fontSize: 'var(--elab-fs-sm)', lineHeight: 1.6 }}>
-            {project === ''
-              ? '先在工作区选中/接入一个工程。'
-              : `工程「${project}」：点「开始调试」会复位、下载 ELF 并停在 main。注册器和调用栈与 Agent 共用同一份会话数据。`}
+            {error === null ? (
+              project === ''
+                ? '先在工作区选中/接入一个工程。'
+                : `工程「${project}」：点「开始调试」会复位、下载 ELF 并停在 main。注册器和调用栈与 Agent 共用同一份会话数据。`
+            ) : (
+              // 空态是用户视线的落点：失败时正文必须给出"为什么 + 怎么办"，
+              // 只在顶部挂一条细字报错，用户会以为"点了没反应"。
+              <div
+                role="alert"
+                style={{
+                  border: '1px solid var(--elab-status-fail)',
+                  borderLeft: '3px solid var(--elab-status-fail)',
+                  borderRadius: 'var(--elab-radius-sm)',
+                  background: 'var(--elab-bg-raised)',
+                  padding: '8px 10px',
+                  color: 'var(--elab-fg-primary)',
+                }}
+              >
+                <div style={{ color: 'var(--elab-status-fail)', fontWeight: 600 }}>
+                  {`打不开调试会话 · ${error.code}`}
+                </div>
+                <div style={{ marginTop: '3px' }}>{error.message}</div>
+                {error.hint !== undefined && (
+                  <div style={{ ...MONO, marginTop: '4px', color: 'var(--elab-fg-muted)', whiteSpace: 'pre-wrap' }}>
+                    {error.hint}
+                  </div>
+                )}
+                {RECOVERY[error.code] !== undefined && (
+                  <div style={{ marginTop: '6px', color: 'var(--elab-fg-secondary)' }}>
+                    {`怎么办：${RECOVERY[error.code]}`}
+                  </div>
+                )}
+                <div style={{ marginTop: '6px', color: 'var(--elab-fg-muted)', fontSize: 'var(--elab-fs-xs)' }}>
+                  改好之后点左上角「开始调试」重试。
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -754,24 +979,68 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
 
         {tab === 'regs' && snap !== null && (
           <div>
-            {regs.map((g) => (
+            {/* 组切换 + 一次提交（一条审计）：整批校验在前，逐项 set 在后 */}
+            <div style={{ display: 'flex', gap: '4px', alignItems: 'center', padding: '4px 6px', flexWrap: 'wrap' }}>
+              <select
+                value={regGroup}
+                aria-label="寄存器组"
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+                  setRegGroup(e.currentTarget.value)
+                  setRegDraft({})
+                }}
+                style={{ ...INPUT, flex: '0 0 auto' }}
+              >
+                <option value="all">全部组</option>
+                {regs.map((g) => <option key={g.name} value={g.name}>{g.label}</option>)}
+              </select>
+              <button
+                type="button"
+                disabled={busy || draftCount === 0 || !allowWrite}
+                onClick={() => void applyRegDraft()}
+                style={{
+                  ...BTN,
+                  borderColor: draftCount > 0 ? 'var(--elab-accent)' : 'var(--elab-border)',
+                  color: draftCount > 0 ? 'var(--elab-accent)' : 'var(--elab-fg-muted)',
+                }}
+                title="把本组草稿一次写入（内核建一条 target=register-group 审计）"
+              >
+                {`应用本组（${draftCount}）`}
+              </button>
+              {draftCount > 0 && (
+                <button type="button" onClick={() => setRegDraft({})} style={BTN}>放弃草稿</button>
+              )}
+              <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>
+                {allowWrite ? '改值→应用本组（一条审计）' : '只读'}
+              </span>
+            </div>
+            {regGroups.map((g) => (
               <div key={g.name}>
                 <div style={{ padding: '3px 6px', color: 'var(--elab-fg-muted)', ...MONO }}>{g.label}</div>
                 {g.regs.map((r) => {
                   const editable = r.editable === true && allowWrite
                   const editing = editReg?.name === r.name
+                  const draft = regDraft[r.name]
+                  const dirty = draft !== undefined && draft !== r.hex.replace(/^0x/i, '').padStart(2, '0')
+                  const width = r.width ?? 32
                   return (
-                    <div key={r.name} style={ROW}>
+                    <div
+                      key={r.name}
+                      style={{
+                        ...ROW,
+                        background: dirty ? 'var(--elab-bg-raised)' : 'transparent',
+                        borderLeft: dirty ? '2px solid var(--elab-accent)' : '2px solid transparent',
+                      }}
+                    >
                       <span style={{ color: r.pc ? 'var(--elab-accent)' : 'var(--elab-fg-secondary)', flex: '0 0 52px' }}>{r.name}</span>
                       {editing ? (
                         <input
                           autoFocus
-                          maxLength={10}
+                          maxLength={18}
                           value={editReg.value}
                           aria-label={`编辑寄存器 ${r.name}`}
                           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditReg({ ...editReg, value: e.currentTarget.value })}
                           onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-                            if (e.key === 'Enter') void commitReg(r.name, editReg.value, editReg.orig)
+                            if (e.key === 'Enter') stageReg(r.name, editReg.value, editReg.orig, width)
                             if (e.key === 'Escape') setEditReg(null)
                           }}
                           onBlur={() => setEditReg(null)}
@@ -780,14 +1049,21 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
                       ) : (
                         <button
                           type="button"
-                          title={editable ? `点击改写 ${r.name}` : '不可写'}
-                          onClick={() => editable ? setEditReg({ name: r.name, value: r.hex, orig: r.hex }) : undefined}
-                          style={{ padding: '0 2px', border: '1px dashed transparent', borderRadius: '2px', background: 'transparent', color: 'var(--elab-fg-primary)', cursor: editable ? 'pointer' : 'default', ...MONO }}
+                          title={editable
+                            ? `改 ${r.name}（只进草稿，不立即写）`
+                            : (r.readonly === 'wide' ? `${width} 位只读` : '只读（pc/lr/xpsr）')}
+                          onClick={() => editable
+                            ? setEditReg({ name: r.name, value: draft ?? r.hex, orig: r.hex })
+                            : undefined}
+                          style={{ padding: '0 2px', border: '1px dashed transparent', borderRadius: '2px', background: 'transparent', color: dirty ? 'var(--elab-accent)' : 'var(--elab-fg-primary)', cursor: editable ? 'pointer' : 'default', ...MONO }}
                         >
-                          {r.hex}
+                          {draft !== undefined ? `0x${draft}` : r.hex}
                         </button>
                       )}
-                      <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>{r.natural}</span>
+                      {dirty
+                        ? <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-faint)', ...MONO }}>草稿</span>
+                        : <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>{r.natural}</span>}
+                      {width > 32 && <span style={{ color: 'var(--elab-fg-faint)', ...MONO }}>{`${width}b`}</span>}
                       {r.flags !== undefined && (
                         <span style={{ color: 'var(--elab-status-run)', ...MONO }}>
                           {Object.entries(r.flags).filter(([, v]) => v === 1).map(([k]) => k).join('')}
@@ -862,6 +1138,110 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
           </div>
         )}
 
+        {/* 源码（P3-A）：窄栏 gutter + 行断点 + 运行到本行（不引入编辑器） */}
+        {tab === 'src' && snap !== null && (
+          /**
+           * 自带滚动区：停止行 scrollIntoView 若落在**祖先**滚动容器上，会把
+           * 「上一页/下一页/运行到本行」一起顶出视野（实测）。列表独立滚动即可。
+           */
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', gap: '4px', alignItems: 'center', padding: '4px 6px', flexWrap: 'wrap', flex: '0 0 auto' }}>
+              <button
+                type="button"
+                disabled={src === null || busy}
+                onClick={() => void loadSource(src?.file, Math.max(1, srcStart - 60))}
+                style={BTN}
+              >
+                ↑ 上一页
+              </button>
+              <button
+                type="button"
+                disabled={src === null || busy || src.has_more !== true}
+                onClick={() => void loadSource(src?.file, srcStart + 160)}
+                style={BTN}
+              >
+                ↓ 下一页
+              </button>
+              <button
+                type="button"
+                disabled={busy || !stopped || src === null || srcPick <= 0}
+                onClick={() => void control('run_to_line', srcPick)}
+                style={{ ...BTN, borderColor: 'var(--elab-accent)', color: 'var(--elab-accent)' }}
+                title="在当前文件的目标行建临时断点并继续（命中后自动删除）"
+              >
+                {`运行到本行${srcPick > 0 ? `（${srcPick}）` : ''}`}
+              </button>
+              <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>
+                {src === null ? '—' : `${src.rel} · 共 ${src.total} 行`}
+              </span>
+            </div>
+            {srcErr !== '' && (
+              <div style={{ padding: '4px 6px', color: 'var(--elab-status-fail)', ...MONO }}>{srcErr}</div>
+            )}
+            {src !== null && (
+              <div style={{ ...MONO, paddingBottom: '6px', flex: '1 1 auto', minHeight: 0, overflow: 'auto' }}>
+                {src.lines.map((ln) => {
+                  const loc = `${src.rel}:${ln.no}`
+                  const bp = srcBpMap.get(loc)
+                  const isStop = src.stop_line !== null && src.stop_line !== undefined && src.stop_line === ln.no
+                  const isPick = srcPick === ln.no
+                  return (
+                    <div
+                      key={ln.no}
+                      ref={isStop ? srcStopRef : undefined}
+                      style={{
+                        display: 'flex', alignItems: 'baseline', gap: '4px',
+                        background: isStop ? 'var(--elab-bg-raised)' : 'transparent',
+                        borderLeft: isStop ? '2px solid var(--elab-status-run)'
+                          : isPick ? '2px solid var(--elab-accent)' : '2px solid transparent',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => void toggleSourceBp(src.rel, ln.no)}
+                        title={bp === undefined ? `在 ${loc} 设断点` : `删除断点 ${loc}`}
+                        style={{
+                          flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '3px',
+                          border: 'none', background: 'transparent', cursor: 'pointer',
+                          padding: '0 2px', font: 'inherit',
+                        }}
+                      >
+                        <span style={{
+                          color: bp === undefined ? 'transparent'
+                            : bp.enabled ? 'var(--elab-status-fail)' : 'var(--elab-fg-faint)',
+                        }}>
+                          {bp === undefined ? '·' : bp.enabled ? '●' : '○'}
+                        </span>
+                        <span style={{
+                          minWidth: '26px', textAlign: 'right',
+                          color: isStop ? 'var(--elab-status-run)' : 'var(--elab-fg-faint)',
+                        }}>
+                          {ln.no}
+                        </span>
+                      </button>
+                      <code
+                        onClick={() => setSrcPick(ln.no)}
+                        style={{
+                          flex: '1 1 auto', minWidth: 0, overflowX: 'auto', whiteSpace: 'pre',
+                          cursor: 'pointer',
+                          color: isStop ? 'var(--elab-fg-primary)' : 'var(--elab-fg-secondary)',
+                        }}
+                      >
+                        {ln.text === '' ? ' ' : ln.text}
+                      </code>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            {src === null && srcErr === '' && (
+              <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>
+                {stopped ? '正在读取源码…' : '暂停后显示源码'}
+              </div>
+            )}
+          </div>
+        )}
+
         {tab === 'mem' && snap !== null && (
           <div>
             <div style={{ display: 'flex', gap: '4px', padding: '4px 6px', flexWrap: 'wrap' }}>
@@ -923,7 +1303,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
         {tab === 'disasm' && snap !== null && (
           <div>
             <div style={{ display: 'flex', gap: '4px', padding: '4px 6px' }}>
-              <button type="button" onClick={() => void api.debugDisasm({ sessionId }).then(setDisasm).catch(() => undefined)} style={BTN}>刷新</button>
+              <button type="button" onClick={() => void dbg.debugDisasm({ sessionId }).then(setDisasm).catch(() => undefined)} style={BTN}>刷新</button>
               <button type="button" disabled={!stopped || busy} onClick={() => void control('stepi')} style={BTN}>指令单步</button>
             </div>
             {disasm === null && <div style={{ padding: '8px', color: 'var(--elab-fg-muted)', ...MONO }}>（暂无指令；目标需暂停）</div>}
@@ -939,7 +1319,7 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
                   onClick={() => {
                     setMemAddr(ins.addr)
                     setTab('mem')
-                    void api.debugMemory({ addr: ins.addr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId })
+                    void dbg.debugMemory({ addr: ins.addr, count: Math.max(1, Math.min(1024, Number(memCount) || 64)), sessionId })
                       .then(setMem).catch(() => undefined)
                   }}
                   style={{ ...MONO, flex: '0 0 74px', padding: 0, border: 'none', background: 'none', color: ins.pc ? 'var(--elab-accent)' : 'var(--elab-fg-faint)', cursor: 'pointer', textAlign: 'left' }}
@@ -1111,9 +1491,13 @@ export function DebugView(props: DebugViewProps): React.ReactElement | null {
               <div key={`${rec.ts}-${i}`} style={ROW}>
                 <span style={{ ...MONO, color: 'var(--elab-fg-faint)', flex: '0 0 62px' }}>{new Date(rec.ts * 1000).toLocaleTimeString()}</span>
                 <span style={{ ...MONO, color: 'var(--elab-accent)', flex: '0 0 auto' }}>{rec.action}</span>
-                <span style={{ ...MONO, color: 'var(--elab-fg-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {[rec.actor, rec.target, rec.addr, rec.value, rec.location, rec.name].filter((x) => x !== undefined && x !== '').join(' ')}
+                <span style={{ ...MONO, color: 'var(--elab-fg-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '1 1 auto', minWidth: 0 }}>
+                  {/* 先说是"动了什么"，actor 放行尾（组写没有单值，改用条数） */}
+                  {[rec.target, rec.addr, rec.value, rec.location, rec.name]
+                    .filter((x) => x !== undefined && x !== '').join(' ')}
+                  {rec.items !== undefined ? ` ${rec.items.length} 项` : ''}
                 </span>
+                <span style={{ ...MONO, color: 'var(--elab-fg-faint)', flex: '0 0 auto' }}>{rec.actor ?? ''}</span>
               </div>
             ))}
           </div>
@@ -1246,6 +1630,216 @@ function VarRow(props: {
       {kids !== undefined && kids.map((c) => (
         <VarRow key={`${path}.${c.name}`} node={c} path={`${path}.${c.name}`} depth={depth + 1} open={open} onToggle={onToggle} />
       ))}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+//  会话壳（P3-B）：会话条 + 并排
+//
+//  并排只在「跨工程 / 跨探针」时有意义：同一目标开第二条会话会被内核
+//  以 `debug-target-busy`(409) 拒掉，所以这里不提供"复制一份"的入口，
+//  只把已有会话列出来 —— 第二条会话通常来自另一个工程或另一个探针。
+// ══════════════════════════════════════════════════════════════
+export interface DebugViewProps {
+  /** 聊天/宿主会话 id（不是调试会话；调试会话由会话条里的 chip 决定） */
+  sessionId?: string
+  visible?: boolean
+  /** 当前工程（无会话时用于"开始调试"） */
+  project: string
+  available: boolean
+  onBack?: () => void
+  api: DebugApi
+}
+
+export function DebugView(props: DebugViewProps): React.ReactElement | null {
+  const { sessionId, visible = true, project, available, onBack, api } = props
+  const [sessions, setSessions] = useState<DebugSessionSnapshot[]>([])
+  const [activeId, setActiveId] = useState('')
+  const [maxSessions, setMaxSessions] = useState(2)
+  const [split, setSplit] = useState(false)
+  const [err, setErr] = useState('')
+  const [wide, setWide] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  const refresh = useCallback(async (): Promise<void> => {
+    try {
+      const r = await api.debugSession(sessionId)
+      const list = r.sessions ?? (r.session !== null ? [r.session] : [])
+      setSessions(list)
+      setMaxSessions(r.max_sessions ?? 2)
+      setActiveId((prev) => (prev !== '' && list.some((x) => x.id === prev) ? prev : list[0]?.id ?? ''))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [api, sessionId])
+
+  // 壳层只同步"会话清单"：每个 pane 自己订过滤后的 SSE（P3-B）
+  useEffect(() => {
+    if (!visible || !available) return
+    void refresh()
+    const timer = setInterval(() => void refresh(), 2000)
+    const q = new URLSearchParams()
+    if (sessionId !== undefined && sessionId !== '') q.set('sessionId', sessionId)
+    const es = new EventSource(`/elab/debug/events?${q.toString()}`)
+    const bump = (): void => { void refresh() }
+    for (const topic of ['debug/opened', 'debug/state', 'debug/stop', 'debug/closed', 'debug/error']) {
+      es.addEventListener(topic, bump as EventListener)
+    }
+    es.onerror = () => { /* 浏览器自动重连；轮询仍在跑 */ }
+    return () => {
+      clearInterval(timer)
+      es.close()
+    }
+  }, [visible, available, sessionId, refresh])
+
+  // 并排阈值 1000px：窄栏两列都不可读（D5）
+  useEffect(() => {
+    const el = rootRef.current
+    if (el === null || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      setWide((entries[0]?.contentRect.width ?? 0) >= 1000)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [available])
+
+  const closeOne = useCallback(async (id: string): Promise<void> => {
+    try {
+      await api.debugClose({ resume: true, debugSession: id })
+      await refresh()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [api, refresh])
+
+  if (!available) return null
+  const active = sessions.find((x) => x.id === activeId) ?? sessions[0] ?? null
+  const secondary = sessions.find((x) => x.id !== active?.id) ?? null
+  const dual = split && wide && sessions.length >= 2 && secondary !== null
+  const paneStyle: CSSProperties = {
+    flex: '1 1 0', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column',
+    overflow: 'hidden', background: 'var(--elab-bg-canvas)',
+  }
+
+  return (
+    <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* 会话条：工程 · 状态 · owner · × */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap',
+        padding: '3px 6px', borderBottom: '1px solid var(--elab-border)', flex: '0 0 auto',
+      }}>
+        {onBack !== undefined && (
+          <button type="button" onClick={onBack} style={BTN} title="返回工作区" aria-label="返回工作区">
+            {'\u2190'}
+          </button>
+        )}
+        {sessions.map((x) => (
+          <span
+            key={x.id}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: '0px',
+              border: `1px solid ${x.id === active?.id ? 'var(--elab-accent)' : 'var(--elab-border)'}`,
+              borderRadius: 'var(--elab-radius-sm)',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setActiveId(x.id)}
+              title={`${x.id} · ${x.project} · ${x.state}`}
+              style={{
+                ...BTN, border: 'none', display: 'inline-flex', alignItems: 'center', gap: '3px',
+                color: x.id === active?.id ? 'var(--elab-accent)' : 'var(--elab-fg-secondary)',
+              }}
+            >
+              <span style={{
+                width: '6px', height: '6px', borderRadius: '50%',
+                background: x.state === 'stopped' ? 'var(--elab-status-run)'
+                  : x.state === 'running' ? 'var(--elab-status-ok)' : 'var(--elab-fg-faint)',
+              }} />
+              <b style={{ fontWeight: 600 }}>{x.project === '' ? x.id : x.project}</b>
+              <span style={{ color: 'var(--elab-fg-muted)' }}>{OWNER_TEXT[x.owner] ?? x.owner}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void closeOne(x.id)}
+              title="关闭这个会话（不影响其它会话）"
+              style={{ ...BTN, border: 'none', color: 'var(--elab-fg-muted)', padding: '0 3px' }}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        {sessions.length >= 2 && (
+          <button
+            type="button"
+            disabled={!wide}
+            onClick={() => setSplit((v) => !v)}
+            style={BTN}
+            title={wide ? '左右并排两条会话' : '栏宽不足 1000px：并排不可读'}
+          >
+            {split && wide ? '单列' : '并排'}
+          </button>
+        )}
+        {sessions.length > 0 && (
+          <span style={{ marginLeft: 'auto', color: 'var(--elab-fg-muted)', ...MONO }}>
+            {`${sessions.length}/${maxSessions} 会话`}
+          </span>
+        )}
+      </div>
+
+      {err !== '' && (
+        <div style={{ padding: '3px 6px', color: 'var(--elab-status-fail)', flex: '0 0 auto', ...MONO }}>{err}</div>
+      )}
+
+      <div style={{
+        flex: '1 1 auto', minHeight: 0, display: 'flex',
+        gap: dual ? '1px' : '0px', background: dual ? 'var(--elab-border)' : 'transparent',
+      }}>
+        {active === null ? (
+          // 无会话：空壳 pane 自己提供"开始调试"入口（打开后由轮询接续）
+          <div style={paneStyle}>
+            <DebugPane
+              sessionId={sessionId}
+              debugSessionId=""
+              embedded
+              visible={visible}
+              project={project}
+              available={available}
+              api={api}
+            />
+          </div>
+        ) : (
+          <>
+            <div style={paneStyle}>
+              <DebugPane
+                key={active.id}
+                sessionId={sessionId}
+                debugSessionId={active.id}
+                embedded
+                visible={visible}
+                project={active.project !== '' ? active.project : project}
+                available={available}
+                api={api}
+              />
+            </div>
+            {dual && secondary !== null && (
+              <div style={paneStyle}>
+                <DebugPane
+                  key={secondary.id}
+                  sessionId={sessionId}
+                  debugSessionId={secondary.id}
+                  embedded
+                  visible={visible}
+                  project={secondary.project !== '' ? secondary.project : project}
+                  available={available}
+                  api={api}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   )
 }

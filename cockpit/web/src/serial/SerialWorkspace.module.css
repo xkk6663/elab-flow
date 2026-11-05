@@ -467,6 +467,19 @@
   color: var(--elab-fg-faint);
 }
 
+/* 帧级健康度（P3.1）：常态极淡，出错才显眼 —— 面板不该为"一切正常"抢眼 */
+.waveHealth {
+  display: inline-flex;
+  gap: var(--elab-space-2);
+  margin-left: var(--elab-space-2);
+  padding-left: var(--elab-space-2);
+  border-left: 1px solid var(--elab-border);
+}
+
+.waveHealthBad {
+  color: var(--elab-warn, #d98b00);
+}
+
 /* ── WaveChart V2 工具栏按钮 ── */
 .waveToolBtn {
   padding: 2px 8px;

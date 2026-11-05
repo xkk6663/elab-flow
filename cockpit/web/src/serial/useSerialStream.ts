@@ -170,10 +170,17 @@ export function useSerialStream({
       busyRef.current = true;
       const gen = genRef.current;
       try {
-        const [lt, bt] = await Promise.all([
-          api.serialMonitor(lineCursor.current),
-          api.serialMonitorBytes(chunkCursor.current),
-        ]);
+        // ★ 盘点 #4：四路增量**一次请求**带回（旧实现每拍 2~4 个并发请求，
+        //   HTTP/1.1 同域只有 6 连接，稳态就占掉大半）。四路是同一时刻的
+        //   快照，`lt` 先落地后 issue/decoded 的时序也不再有"两拍错位"。
+        const r = await api.serialPoll({
+          line: lineCursor.current,
+          byte: chunkCursor.current,
+          issue: issueCursor.current,
+          dec: decCursor.current,
+        });
+        const lt = r.line;
+        const bt = r.bytes;
         if (disposed || gen !== genRef.current) return;
 
         // ① 纪元变化 = 有人重开了会话 → 两个游标必须一起重置。
@@ -229,10 +236,9 @@ export function useSerialStream({
           setGaps((g) => ({ ...g, chunks: g.chunks + lost }));
         }
 
-        // ④ 结构化异常（M6）：profile 开着才拉，增量按 issue_total 走
-        if (lt.issues?.profile) {
-          const it = await api.serialIssues(issueCursor.current);
-          if (disposed || gen !== genRef.current) return;
+        // ④ 结构化异常（M6）：profile 开着才处理（服务端同规则，没开就不在响应里）
+        if (lt.issues?.profile && r.issues) {
+          const it = r.issues;
           if (it.issues?.length) {
             setIssues((prev) => prev.concat(it.issues).slice(-200));
           }
@@ -248,19 +254,21 @@ export function useSerialStream({
             decDecoder.current = laneDecoder;
             decCursor.current = 0;
             setDecoded([]);
+            // r.decoded 是按**旧游标**拉的新解码器帧 —— 直接丢弃，
+            // 下一拍从 0 正常追（丢一拍 500ms，换取不会混入旧协议帧）。
+          } else if (r.decoded) {
+            const dt = r.decoded;
+            if (dt.frames?.length) {
+              setDecoded((prev) => {
+                const next = prev.concat(dt.frames);
+                return next.length > MAX_LOCAL_DECODED
+                  ? next.slice(next.length - MAX_LOCAL_DECODED)
+                  : next;
+              });
+            }
+            decCursor.current = dt.next_after ?? decCursor.current;
+            setDecodedSnap(dt);
           }
-          const dt = await api.serialDecoded(decCursor.current);
-          if (disposed || gen !== genRef.current) return;
-          if (dt.frames?.length) {
-            setDecoded((prev) => {
-              const next = prev.concat(dt.frames);
-              return next.length > MAX_LOCAL_DECODED
-                ? next.slice(next.length - MAX_LOCAL_DECODED)
-                : next;
-            });
-          }
-          decCursor.current = dt.next_after ?? decCursor.current;
-          setDecodedSnap(dt);
         } else if (decDecoder.current) {
           decDecoder.current = "";
           decCursor.current = 0;

@@ -176,15 +176,6 @@ export function workspacesFor(
   return ordered.length > 0 ? ordered : defs;
 }
 
-/** 按 id 找工作区；找不到返回 null（调用方决定回退） */
-export function workspaceById(
-  card: ProjectCard | null,
-  caps: Capabilities | null,
-  id: WorkspaceId,
-): WorkspaceDef | null {
-  return workspacesFor(card, caps).find((w) => w.id === id) ?? null;
-}
-
 /* ── 事件 → 通道归类（唯一规则在共享层，本宿主用默认口径）───────── */
 
 /**

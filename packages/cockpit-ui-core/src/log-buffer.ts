@@ -101,7 +101,11 @@ export class LogRing {
   push(lines: LogLine[]): void {
     if (!lines.length) return;
     for (const l of lines) if (l.tone === "alert") this.alertCount++;
-    this.buf.push(...lines);
+    // ★ 逐个 push（盘点 #10）：`push(...lines)` 在单批超过 V8 参数上限
+    //   （约 6.5 万）时会爆 `Maximum call stack size exceeded`。当前服务端
+    //   100ms 合并帧远达不到该量级，但这是把"理论风险"换成一行业务无关的
+    //   防御，成本为零。
+    for (let i = 0; i < lines.length; i++) this.buf.push(lines[i]);
     if (this.buf.length > this.capacity) {
       const over = this.buf.length - this.capacity;
       for (let i = 0; i < over; i++) {

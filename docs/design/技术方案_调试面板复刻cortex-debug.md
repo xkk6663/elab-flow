@@ -421,6 +421,84 @@ Agent                插件(host)           内核 DebugManager          gdb    
                         "fields":[{"name":"ODR0","bits":"0-0","value":0}]}]}]}
 ```
 
+### 6.6 P3 增量：源码面 / 寄存器组 / 多会话（2026-11-05 落地）
+
+P1/P2 的契约是**单会话 + 单值写**。P3 动了两处地基：会话变成**字典**（`debug_session` 贯穿全部端点），
+寄存器写从"一行一次"变成"**一组一次**"。以下都是**已实现并由 `tests/test_debugp3.py` 覆盖**的行为。
+
+#### 6.6.1 新增端点
+
+| 方法 | 路径 | 用途 | 参数 |
+|---|---|---|---|
+| GET | `/api/debug/source` | 读一页源码行（沙箱内） | `file`（省略=当前停止帧）、`start`(1 起)、`count`(≤400)、`debug_session` |
+| POST | `/api/debug/registers` | 按组批量写寄存器 | `items:[{name,value}…]`(≤16)、`confirm=true`、`debug_session` |
+
+其余端点的出入参**形状不变**，只多接受一个 `debug_session`（`GET` 走查询串、`POST/DELETE` 走 body，二选一即可）。
+`GET /api/debug/session` 的返回扩成：
+
+```jsonc
+{"ok":true,"sessions":[/* DebugSessionSnapshot[] */],"session":{/* 同 sessions[0]，兼容旧客户端 */},
+ "session_id":"dbg-ab83916a","max_sessions":2,"allow_write":true}
+```
+
+#### 6.6.2 源码面
+
+```jsonc
+{"ok":true,"file":"C:/…/Core/Src/main.c","rel":"Core/Src/main.c",
+ "start":60,"end":219,"total":218,
+ "lines":[{"no":60,"text":"/* Private user code … */"}],
+ "mtime":1762312345.1,
+ "truncated":false,          // 文件尾部被 512 KB 字节上限截断（≠ 本页之后还有行）
+ "has_more":false,           // 本窗口之后还有行（翻页看这个）
+ "stop_seq":12,"stop_line":79,"stop_file":"C:/…/Core/Src/main.c"}
+```
+
+- **沙箱**：`Path.resolve()` 后必须 `relative_to(plan.source_dir)`；`..`、越界符号链接一律 `400 debug-bad-request`。
+- 上限：`MAX_LINES=400`、`MAX_BYTES=512*1024`。
+- 断点定位串 `kind=source` + `location=<rel>:<line>`：持久化用**相对路径**（`_source_rel()`），插桩时再换绝对路径并**整体加引号**（Windows 路径含空格，实测必须引）。
+- `run_to_line` 是 `POST /api/debug/control` 的一个 `action`（附 `file`/`line`）：内核建**临时断点** → `continue` → 命中后 `-break-delete`，不在断点表里留痕。
+
+#### 6.6.3 寄存器组
+
+- 宽度模型：`register_width(name)` → 32 / 64 / 128；`register_writable(name)` 白名单 = `r0–r12|sp|s0–s31`；
+  `pc|lr|xpsr|r13|r14|r15` 与 `d*/q*` **只读**（`403 debug-write-denied`）；读不到源码 / 无调试信息 → `404 debug-source-unavailable`。
+- `GET /api/debug/registers?group=all` 的每个寄存器带 `width` 与 `readonly`（`core-fixed` / `wide`），
+  面板据此决定"能不能点"和"要几位 HEX"。
+- `POST /api/debug/registers`：**整批先校验**（名字/宽度/HEX）→ 逐项 `set $rN = 0x…` → **整批读回** → 落**一条**审计
+  （`target=register-group`，`items:[{name,before,after}]`）。
+
+```jsonc
+{"ok":false,"applied":[{"name":"r0","before":"0x00000000","after":"0xc0ffee00"}],
+ "failed":{"name":"pc","code":"debug-write-denied","message":"pc 只读"},
+ "stop_seq":12}
+```
+
+**没有事务回滚**：`ok=false` 时 `applied` 是**已经写进去**的部分，调用方必须按它展示，不能当作整体失败。
+
+#### 6.6.4 多会话
+
+- `DebugManager` 从"一个会话"改成 `_sessions: dict[id, DebugSession]`，外加每会话 `_allow_write`。
+- `require(debug_session="")`：只有一条会话时缺省可用；**有多条且没带 id** → `409 debug-session-required`（有歧义，拒绝猜）。
+- 开新会话时三条硬规则：
+  1. 同一 `project` 已有会话 → `409 debug-target-busy`；
+  2. `len(sessions) >= max_sessions` → `409 debug-session-limit`（`max_sessions` 读 `elab.host.yaml: debug.max_sessions`，钳制 1–4，默认 2）；
+  3. openocd 起不来且**别的会话还活着** → `409 debug-port-hijacked`（而不是让人以为端口被外部占了）。
+- SSE：`GET /api/debug/events?debug_session=<id>` 只推该会话的事件；信封里同时带 `session`，
+  客户端再做一次比对（双保险）。插件侧 `routes.ts` 必须**转发**这个查询参数，否则两个 pane 会收到对方的事件。
+
+#### 6.6.5 `meta.debug` 增量
+
+```jsonc
+{"available":true,
+ "features":["watch","svd","rtos","source"],           // 新面板按它决定页签
+ "actions":[…,"run_to_line"],
+ "breakpoint_kinds":["func","addr","source"],
+ "max_sessions":2,
+ "limits":{"source_lines":400,"source_bytes":524288,"register_batch":16},
+ "error_codes":{"debug-target-busy":409,"debug-session-limit":409,
+                "debug-session-required":409,"debug-source-unavailable":404}}
+```
+
 ---
 
 ## 7. 内核实现设计
@@ -1052,7 +1130,7 @@ Live Watch（P3） | 对 1Hz 心跳间隔 p95 偏差 ≤50ms | 串口日志 + `t
 2 | GDB 非异步导致 `continue` 阻塞 HTTP | 请求 30s 不返回 | `mi-async on` + `continue` 不等结果 + 看门狗 |
 3 | 关闭后板子停在 halt | 串口无心跳、用户报“板子死了” | `resume_on_close` 默认 true；租约到期也恢复 |
 4 | 面板重挂载丢会话 | 一键刷新后状态清空 | 会话在内核；面板以 `GET session` 重水化 |
-5 | Windows 进程树孤儿 | 关会话后仍有 openocd | 内核 `finally` 逐级 terminate；插件 job object 兜底 |
+5 | Windows 进程树孤儿 | 关闭会话后仍有 openocd；**强杀内核**后它继续占 DAP | 正常路径：内核 `finally` 逐级 terminate。**强杀路径**（2026-11-05 落地）：内核侧 Windows 作业对象 `KILL_ON_JOB_CLOSE`（`services/elab/_winproc.py` 的 `spawn/adopt`），父进程无论怎么死，`openocd`/`gdb`/运行进程树都由系统带走。注意实现位置在**内核**而非插件——插件被关掉时内核不一定死，反过来才成立 |
 6 | 探针争用（run/串口/调试） | 烧录失败、`CMD_INFO failed` | 单飞 + 409 矩阵 + 可执行 hint |
 7 | SVD 过大拖垮首屏 | 面板卡死 | 分层懒加载 + 缓存 + 单页 50 条 |
 8 | Agent 任意 GDB 命令 / `call` 改目标 | 不可预期副作用 | 命令白名单 + 写闸门 + 审计；禁 console 透传 |
@@ -1120,4 +1198,3 @@ Live Watch（P3） | 对 1Hz 心跳间隔 p95 偏差 ≤50ms | 串口日志 + `t
 - [ICD_cockpit_events](ICD_cockpit_events.md)
 - [设计约束](设计约束.md)（C14/C15/C28/C34/C36）
 - [01-芯片开发上手_独立WebUI](../tutorials/01-芯片开发上手_独立WebUI.md)（第一关：心跳 + LED）
-</content>

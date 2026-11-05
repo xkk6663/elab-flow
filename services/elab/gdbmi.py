@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 
-from ._winproc import proc_kwargs
+from ._winproc import spawn
 
 _ESC = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "e": "\x1b",
         "a": "\a", "f": "\f", "v": "\v", "0": "\0"}
@@ -208,11 +208,13 @@ class MiSession:
 
     # ── 生命周期 ────────────────────────────────────────────────
     def start(self, timeout: float = 10.0) -> None:
-        self._proc = subprocess.Popen(
+        # spawn = Popen + 进作业：内核被强杀时 gdb 一起被带走，否则它会继续握着
+        # RSP 连接，让下一轮 openocd 的端口分配跟着遭殃。
+        self._proc = spawn(
             self._argv, cwd=self._cwd, env=self._env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", bufsize=1, **proc_kwargs(),
+            errors="replace", bufsize=1,
         )
         self._read_thread = threading.Thread(target=self._read_loop, daemon=True,
                                              name="elab-gdb-mi")

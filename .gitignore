@@ -40,3 +40,6 @@ __pycache__/
 # 插件的第三方依赖（@deepseek-ai/dsh-tools 等），入库的只有 lib/ 产物
 node_modules/
 
+
+# frame codegen 产物（由 profile 生成，`POST /api/serial/frames/codegen write=true` 可重建）
+generated/

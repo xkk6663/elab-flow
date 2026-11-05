@@ -33,13 +33,6 @@ export const IconStop = (p: P) => (
   </svg>
 );
 
-export const IconRun = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M8 2.2a5.8 5.8 0 1 0 5.8 5.8" />
-    <path d="M8 5.2V8l2.2 1.4" />
-  </svg>
-);
-
 export const IconRefresh = (p: P) => (
   <svg {...base(p)}>
     <path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8" />
@@ -51,12 +44,6 @@ export const IconChip = (p: P) => (
   <svg {...base(p)}>
     <rect x="3.4" y="3.4" width="9.2" height="9.2" rx="1.4" />
     <path d="M6.4 1.6v1.8M9.6 1.6v1.8M6.4 12.6v1.8M9.6 12.6v1.8M1.6 6.4h1.8M1.6 9.6h1.8M12.6 6.4h1.8M12.6 9.6h1.8" />
-  </svg>
-);
-
-export const IconFolder = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M1.8 4.4c0-.7.6-1.2 1.2-1.2h2.6l1.4 1.6h5.8c.7 0 1.2.6 1.2 1.2v5.6c0 .7-.6 1.2-1.2 1.2H3c-.7 0-1.2-.6-1.2-1.2z" />
   </svg>
 );
 
@@ -95,12 +82,6 @@ export const IconPlug = (p: P) => (
   </svg>
 );
 
-export const IconWrench = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M10.6 2.2a3.4 3.4 0 0 0-3 5.4L2.6 12.6l.9.9 5-5a3.4 3.4 0 0 0 4.4-4.2l-1.9 1.9-1.6-.4-.4-1.6z" />
-  </svg>
-);
-
 export const IconDownload = (p: P) => (
   <svg {...base(p)}>
     <path d="M8 2.4v7.2M5 6.8L8 9.8l3-3" />
@@ -115,12 +96,6 @@ export const IconTrash = (p: P) => (
   </svg>
 );
 
-export const IconCheck = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M3.2 8.4l3.2 3.2 6.4-7.2" />
-  </svg>
-);
-
 export const IconAlert = (p: P) => (
   <svg {...base(p)}>
     <path d="M8 2.4l5.8 10.4H2.2z" />
@@ -132,19 +107,6 @@ export const IconShield = (p: P) => (
   <svg {...base(p)}>
     <path d="M8 1.8l4.8 1.8v4c0 3-2 5.2-4.8 6.4C5.2 12.8 3.2 10.6 3.2 7.6v-4z" />
     <path d="M5.8 7.8l1.6 1.6 3-3.2" />
-  </svg>
-);
-
-export const IconChevronDown = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M4 6.2L8 10.2l4-4" />
-  </svg>
-);
-
-export const IconSearch = (p: P) => (
-  <svg {...base(p)}>
-    <circle cx="7" cy="7" r="4.2" />
-    <path d="M10.2 10.2l3.2 3.2" />
   </svg>
 );
 

@@ -11,6 +11,8 @@ export type DebugActor = 'agent' | 'human'
 export interface DebugFrame {
   func: string
   file: string
+  /** MI 的绝对路径（源码页签据此定位）；老 gdb 可能为空 */
+  fullname?: string
   line: number | null
   addr: string
 }
@@ -54,7 +56,13 @@ export interface DebugSessionSnapshot {
 }
 
 export interface DebugSessionResponse {
+  /** 默认/当前会话（单会话时与 sessions[0] 相同；无会话为 null） */
   session: DebugSessionSnapshot | null
+  /** 多会话清单（P3）：每项与 session 同构 */
+  sessions?: DebugSessionSnapshot[]
+  session_id?: string
+  max_sessions?: number
+  allow_write?: boolean
 }
 
 export interface DebugStackFrame {
@@ -62,6 +70,8 @@ export interface DebugStackFrame {
   addr: string
   func: string
   file: string
+  /** 绝对路径（缺省时内核按 basename 唯一匹配兜底；多解不猜） */
+  fullname?: string
   line: number | null
   arch: string
   pc: boolean
@@ -79,6 +89,10 @@ export interface DebugReg {
   hex: string
   natural: string
   editable: boolean
+  /** 位宽：32 / 64 / 128（P3 只开 32 位写，d/q 只读） */
+  width?: number
+  /** 只读原因：core-fixed = pc/lr/xpsr；wide = 64/128 位待 P3b */
+  readonly?: 'core-fixed' | 'wide'
   pc?: boolean
   flags?: Record<string, number>
 }
@@ -119,7 +133,7 @@ export interface DebugVariablesResponse {
 export interface DebugBreakpoint {
   id: string
   gdb_id: string
-  kind: 'func' | 'addr' | 'loc'
+  kind: 'func' | 'addr' | 'loc' | 'source'
   location: string
   enabled: boolean
   condition: string
@@ -134,6 +148,37 @@ export interface DebugBreakpointsResponse {
   /** 工程级配置版本（乐观锁：写回时带上，冲突回 409 debug-rev-conflict） */
   rev?: number
   allow_write?: boolean
+}
+
+/** GET /api/debug/source —— 源码页签的一页行（P3-A）。 */
+export interface DebugSourceResponse {
+  ok: boolean
+  /** 绝对路径（POSIX 分隔符） */
+  file: string
+  /** 相对工程源码根的路径（POSIX），断点定位串用它 */
+  rel: string
+  start: number
+  end: number
+  total: number
+  lines: Array<{ no: number; text: string }>
+  mtime: number
+  /** 因 512KB 上限丢掉了文件尾部 */
+  truncated: boolean
+  /** 本窗口之后还有行（翻页用，≠ truncated） */
+  has_more?: boolean
+  stop_seq?: number
+  /** 当前停止帧的行号（高亮用） */
+  stop_line?: number | null
+  /** 当前停止帧的文件绝对路径 */
+  stop_file?: string
+}
+
+/** POST /api/debug/registers —— 按组批量写（P3-C）。无事务回滚，如实返回。 */
+export interface DebugRegistersWriteResponse {
+  ok: boolean
+  applied: Array<{ name: string; before: string; after: string }>
+  failed?: { name: string; code: string; message: string }
+  stop_seq?: number
 }
 
 export interface DebugWatchItem {
@@ -169,6 +214,8 @@ export interface DebugAuditRecord {
   id?: string
   code?: string
   message?: string
+  /** 组写审计：一次提交的全部项（name/before/after，§7.2） */
+  items?: Array<{ name: string; before: string; after: string }>
 }
 
 export interface DebugAuditResponse {
@@ -320,7 +367,7 @@ export interface DebugEventEnvelope {
  * ★ 放在 domain 里而不是让视图直接 import `kernel-http` —— 适配器隔离门禁。
  */
 export interface DebugApi {
-  debugSession(sessionId?: string): Promise<DebugSessionResponse>
+  debugSession(sessionId?: string, debugSession?: string): Promise<DebugSessionResponse>
   debugOpen(opts: {
     project: string
     options?: DebugOpenOptions
@@ -329,28 +376,60 @@ export interface DebugApi {
     agent?: boolean
     sessionId?: string
   }): Promise<DebugSessionResponse>
-  debugClose(opts?: { resume?: boolean; reason?: string; agent?: boolean; sessionId?: string }):
-  Promise<{ closed: boolean; resumed?: boolean; session?: string }>
+  debugClose(opts?: {
+    resume?: boolean
+    reason?: string
+    agent?: boolean
+    sessionId?: string
+    /** 目标调试会话（P3-B 多会话） */
+    debugSession?: string
+  }): Promise<{ closed: boolean; resumed?: boolean; session?: string }>
   debugControl(opts: {
     action: string
     addr?: string
+    /** run_to_line 用：源码文件 + 行号 */
+    file?: string
+    line?: number
     confirm?: boolean
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }): Promise<DebugControlResponse>
-  debugStack(opts?: { thread?: number; sessionId?: string }): Promise<DebugStackResponse>
+  debugStack(opts?: { thread?: number; sessionId?: string; debugSession?: string }):
+  Promise<DebugStackResponse>
   debugVariables(opts?: {
     frame?: number
     scope?: 'locals' | 'args' | 'children'
     var?: string
     sessionId?: string
+    debugSession?: string
   }): Promise<DebugVariablesResponse>
-  debugRegisters(opts?: { group?: string; format?: 'natural' | 'hex'; sessionId?: string }):
-  Promise<DebugRegistersResponse>
+  debugRegisters(opts?: {
+    group?: string
+    format?: 'natural' | 'hex'
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugRegistersResponse>
+  /** 按组批量写（P3-C）：整批校验，返回 applied/failed，不假装原子。 */
+  debugRegistersWrite(opts: {
+    items: Array<{ name: string; value: string }>
+    confirm?: boolean
+    agent?: boolean
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugRegistersWriteResponse>
+  /** 源码页签（P3-A）：路径受工程源码根沙箱约束。 */
+  debugSource(opts?: {
+    file?: string
+    start?: number
+    count?: number
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugSourceResponse>
   debugBreakpoints(opts?: {
     op?: 'list' | 'add' | 'update' | 'toggle' | 'remove'
     id?: string
-    kind?: 'func' | 'addr'
+    kind?: 'func' | 'addr' | 'source'
     location?: string
     condition?: string
     enabled?: boolean
@@ -358,10 +437,21 @@ export interface DebugApi {
     temporary?: boolean
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }): Promise<DebugBreakpointsResponse>
-  debugMemory(opts: { addr: string; count?: number; sessionId?: string }): Promise<DebugMemoryResponse>
-  debugDisasm(opts?: { addr?: string; count?: number; mode?: number; sessionId?: string }):
-  Promise<DebugDisasmResponse>
+  debugMemory(opts: {
+    addr: string
+    count?: number
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugMemoryResponse>
+  debugDisasm(opts?: {
+    addr?: string
+    count?: number
+    mode?: number
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugDisasmResponse>
   /** 写内存/寄存器：需 allow_write 会话 + confirm=true（内核二次闸门）。 */
   debugWrite(opts: {
     target: 'memory' | 'register'
@@ -371,9 +461,15 @@ export interface DebugApi {
     confirm?: boolean
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }): Promise<DebugWriteResponse>
-  debugEvaluate(opts: { expr: string; frame?: number; agent?: boolean; sessionId?: string }):
-  Promise<DebugEvaluateResponse>
+  debugEvaluate(opts: {
+    expr: string
+    frame?: number
+    agent?: boolean
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugEvaluateResponse>
   debugWatch(opts?: {
     op?: 'list' | 'add' | 'update' | 'remove'
     id?: string
@@ -382,9 +478,15 @@ export interface DebugApi {
     rev?: number
     agent?: boolean
     sessionId?: string
+    debugSession?: string
   }): Promise<DebugWatchResponse>
-  debugAudit(opts?: { limit?: number; sessionId?: string }): Promise<DebugAuditResponse>
-  debugPeripherals(opts?: { path?: string; read?: boolean; sessionId?: string }):
-  Promise<DebugPeripheralsResponse>
-  debugRtos(opts?: { sessionId?: string }): Promise<DebugRtosResponse>
+  debugAudit(opts?: { limit?: number; sessionId?: string; debugSession?: string }):
+  Promise<DebugAuditResponse>
+  debugPeripherals(opts?: {
+    path?: string
+    read?: boolean
+    sessionId?: string
+    debugSession?: string
+  }): Promise<DebugPeripheralsResponse>
+  debugRtos(opts?: { sessionId?: string; debugSession?: string }): Promise<DebugRtosResponse>
 }

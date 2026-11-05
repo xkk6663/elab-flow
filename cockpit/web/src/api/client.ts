@@ -10,8 +10,10 @@ import type {
   DebugOpenOptions,
   DebugPeripheralsResponse,
   DebugRegistersResponse,
+  DebugRegistersWriteResponse,
   DebugRtosResponse,
   DebugSessionResponse,
+  DebugSourceResponse,
   DebugStackResponse,
   DebugVariablesResponse,
   DebugWatchResponse,
@@ -20,6 +22,7 @@ import type {
   ProjectsResponse,
   RunsResponse,
   SerialBytesTail,
+  SerialPollResponse,
   SerialConsoleResponse,
   SerialControlResult,
   SerialControlStateResponse,
@@ -49,11 +52,89 @@ import type {
 /** 后端契约版本；与 ICD 的 EVENT_SCHEMA_VERSION 比对，不一致就显式报错而不是渲染错位界面 */
 import { EVENT_SCHEMA_VERSION } from "./types";
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { Accept: "application/json", ...(init?.headers || {}) },
-  });
+/**
+ * 后端错误：保留内核的 `code` / `hint`。
+ *
+ * 内核两种错误体都要认（早期只认 `{"error": "..."}`，把 hint 丢了）：
+ * - 通用：`{"error": "人话"}`
+ * - 调试：`{"error": "人话", "code": "debug-xxx", "message": "人话", "hint": "…"}`
+ *   → `code` / `hint` 是**同级**字段，不在 `error` 里面
+ */
+export class ApiError extends Error {
+  readonly code: string;
+  readonly hint: string;
+  readonly status: number;
+  constructor(code: string, message: string, extra?: { hint?: string; status?: number }) {
+    super(message);
+    this.code = code;
+    this.hint = extra?.hint ?? "";
+    this.status = extra?.status ?? 0;
+    this.name = "ApiError";
+  }
+}
+
+function str(v: unknown): string {
+  return typeof v === "string" && v !== "" ? v : "";
+}
+
+/**
+ * 默认请求超时 / 长任务超时（毫秒）。
+ *
+ * ★ 为什么**必须**有超时（实测过的故障形态，不是理论）：
+ *   `fetch` 默认**永不超时**（只在 TCP 层可能挂几分钟）。内核被强杀、
+ *   探针被别的进程占着（`POST /api/debug/session` 的 openocd 等待上限 20 s）、
+ *   或某条同步端点卡死时，请求会一直挂着 → 界面永远是「加载中」，且没有取消入口。
+ *   更糟的是 HTTP/1.1 同域只有 6 个并发连接：挂住的请求会占住名额，
+ *   **其它所有 API 跟着排队**，用户看到的是「整个界面点了没反应」。
+ *
+ * 15 s 覆盖全部秒级端点（含 monitor/decoded 这类增量读）；
+ * 明确会等硬件的端点（openocd 20 s、learn 大样本、串口手写读窗口）
+ * 单独用 {@link TIMEOUT_LONG_MS}。
+ */
+const TIMEOUT_DEFAULT_MS = 15_000;
+const TIMEOUT_LONG_MS = 60_000;
+
+/** `AbortSignal.timeout` 的兜底（Safari < 16 / 老 Chromium 没有它）。 */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === "undefined") return undefined;
+  const ac = new AbortController();
+  window.setTimeout(() => ac.abort(), ms);
+  return ac.signal;
+}
+
+/** 这一次失败是不是"我们主动掐掉的"（超时）。 */
+function isTimeout(e: unknown): boolean {
+  const name = (e as { name?: string } | null)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
+async function req<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs: number = TIMEOUT_DEFAULT_MS,
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...init,
+      // 调用方显式给了 signal 就用它的（目前无调用方传，留给将来的"取消"按钮）
+      signal: init?.signal ?? timeoutSignal(timeoutMs),
+      headers: { Accept: "application/json", ...(init?.headers || {}) },
+    });
+  } catch (e) {
+    if (isTimeout(e)) {
+      // ★ 文案要能直接指导下一步：只说"超时"用户不知道是网络还是内核死了。
+      throw new ApiError(
+        "client-timeout",
+        `请求超时（${Math.round(timeoutMs / 1000)} s 未响应）：内核可能正忙或已停止响应`,
+        { hint: "确认 elab 内核仍在运行；若刚强杀过它，请等面板自动重连后再试" },
+      );
+    }
+    throw e;
+  }
   const text = await res.text();
   let body: unknown = null;
   try {
@@ -62,24 +143,41 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${path} 返回了非 JSON（HTTP ${res.status}）：${text.slice(0, 200)}`);
   }
   if (!res.ok) {
-    const msg = (body as { error?: string })?.error || `HTTP ${res.status}`;
-    throw new Error(msg);
+    const b = (body ?? {}) as Record<string, unknown>;
+    const raw = b.error;
+    const nested = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    const code = str(nested?.code) || str(b.code) || `http-${res.status}`;
+    const message = str(nested?.message) || str(raw) || str(b.message) || `HTTP ${res.status}`;
+    const hint = str(nested?.hint) || str(b.hint);
+    throw new ApiError(code, message, { hint, status: res.status });
   }
   return body as T;
 }
 
-function post<T>(path: string, body: unknown): Promise<T> {
-  return req<T>(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+function post<T>(path: string, body: unknown, timeoutMs: number = TIMEOUT_DEFAULT_MS): Promise<T> {
+  return req<T>(
+    path,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    timeoutMs,
+  );
 }
 
 export const api = {
   capabilities: () => req<Capabilities>("/api/capabilities"),
   projects: () => req<ProjectsResponse>("/api/projects"),
   runs: () => req<RunsResponse>("/api/runs"),
+  /**
+   * 只读「当前在跑的 run」——**不扫历史目录**。
+   *
+   * ★ 为什么不复用 `runs()`：`/api/runs` 要为每条历史 run 读首尾行（哪怕已优化过），
+   *   开销随历史条数增长；而 App 的 2 s 轮询只关心 `active`
+   *   （"agent 是不是在别的工程起跑了"）。用轻量端点让轮询与历史规模**解耦**。
+   */
+  runsActive: () => req<Pick<RunsResponse, "active">>("/api/runs/active"),
   runEvents: (run: string, from = 0) =>
     req<{ events: ElabEvent[] }>(
       `/api/run-events?run=${encodeURIComponent(run)}&from=${from}`,
@@ -167,7 +265,7 @@ export const api = {
         eol: opts.eol,
         encoding: opts.encoding,
       }),
-    }),
+    }, TIMEOUT_LONG_MS),
 
   /** 发送框定时发送：瞬态任务（不落盘），与组件共用内核任务引擎。 */
   serialLoop: (opts: {
@@ -250,6 +348,48 @@ export const api = {
     if (opts?.limit) q.set("limit", String(opts.limit));
     return req<SerialBytesTail>(`/api/serial/monitor/bytes?${q.toString()}`);
   },
+
+  /**
+   * 四路增量合并轮询（盘点 #4）：行 + 字节批次 + 结构化 issue + 共享解码帧，
+   * **一次请求**带回（issues/decoded 由服务端按 profile/decoder 开关决定）。
+   * 轮询连接占用 4 → 1；四路是同一时刻的快照，前端不必再自己拼时序。
+   */
+  serialPoll: (cursors: {
+    line: number;
+    byte: number;
+    issue: number;
+    dec: number;
+    dir?: "all" | "rx" | "tx";
+  }) => {
+    const q = new URLSearchParams({
+      line: String(cursors.line),
+      byte: String(cursors.byte),
+      issue: String(cursors.issue),
+      dec: String(cursors.dec),
+    });
+    q.set("dir", cursors.dir ?? "all");
+    return req<SerialPollResponse>(`/api/serial/monitor/poll?${q.toString()}`);
+  },
+
+  /**
+   * 历史 run 清理（盘点 #11；CLI `elab runs prune` 同一份规则）。
+   * keep/days 缺省与 CLI 一致（50 / 30）；days=0 关时间闸；先 dry_run 预览。
+   */
+  runsPrune: (opts?: { keep?: number; days?: number; dryRun?: boolean }) =>
+    req<{
+      removed: Array<{ run: string; files: string[]; bytes: number }>;
+      kept: number;
+      freed_bytes: number;
+      dry_run: boolean;
+    }>("/api/runs/prune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...(opts?.keep !== undefined ? { keep: opts.keep } : {}),
+        ...(opts?.days !== undefined ? { days: opts.days } : {}),
+        dry_run: opts?.dryRun !== false,
+      }),
+    }, TIMEOUT_LONG_MS),
 
   /** 打开/关闭/清空/暂停/继续监视会话。POST = 明确的副作用（占住/释放独占资源）。 */
   serialMonitorToggle: (
@@ -531,6 +671,53 @@ export const api = {
   serialFrameTemplates: () =>
     req<SerialFrameTemplatesResponse>("/api/serial/frames/templates"),
 
+  /**
+   * 抓包学习（P4.1）：给一段样本字节，**产草稿不落盘**。
+   * 返回 confidence / evidence / warnings，草稿放进 `draft`（可直接当 profile 用）。
+   */
+  serialFramesLearn: (opts: {
+    hex?: string;
+    dataB64?: string;
+    capture?: string;
+    name?: string;
+    fieldCount?: number;
+  }) =>
+    req<{
+      ok: boolean;
+      draft?: unknown;
+      confidence?: number;
+      evidence?: string[];
+      warnings?: string[];
+      decode_rate?: number;
+      error?: string;
+      preview?: { total_frames?: number; channels?: number };
+    }>("/api/serial/frames/learn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hex: opts.hex,
+        b64: opts.dataB64,
+        capture: opts.capture,
+        name: opts.name,
+        field_count: opts.fieldCount,
+      }),
+    }, TIMEOUT_LONG_MS),
+
+  /** 帧级健康度（P3.1）：帧率 / 到达间隔 / 错误分类 / 每 variant 计数。 */
+  serialFrameStats: (windowS = 10) =>
+    req<{
+      ok?: boolean;
+      active?: boolean;
+      frames: number;
+      fps: number;
+      decoder?: string;
+      interval_ms?: { mean: number; p95: number; max: number; min: number };
+      reasons?: Record<string, number>;
+      variants?: Record<string, number>;
+      error_rate?: number;
+      pending_bytes?: number;
+    }>(`/api/serial/monitor/stats?window_s=${windowS}`),
+
   /** 模板 → 工程 profile（走 rev 乐观锁，不覆盖冲突）。 */
   serialFrameTemplateImport: (opts: {
     project: string;
@@ -665,8 +852,12 @@ export const api = {
     post<Record<string, unknown>>("/api/pkg/activate", { name: opts.name }),
 
   // ── 调试会话（GET 只读 / POST 副作用 / DELETE 释放，ICD §6）──────────
-  /** GET /api/debug/session —— 当前会话快照（无会话为 null）。 */
-  debugSession: () => req<DebugSessionResponse>("/api/debug/session"),
+  //   ★ `debugSession` = 调试会话 id（选择哪条 gdb 会话）；
+  //     与 `sessionId`（聊天会话，路由工程目录）**不是**同一个东西。
+  /** GET /api/debug/session —— 会话清单 + 默认会话快照（无会话为 null）。 */
+  debugSession: (debugSession?: string) =>
+    req<DebugSessionResponse>(
+      `/api/debug/session${debugSession ? `?debug_session=${encodeURIComponent(debugSession)}` : ""}`),
 
   /**
    * POST /api/debug/session —— 建立会话。
@@ -689,53 +880,97 @@ export const api = {
         allow_write: opts.allow_write,
         actor: opts.actor ?? "human",
       }),
-    }),
+    }, TIMEOUT_LONG_MS),
 
   /**
    * DELETE /api/debug/session —— 关闭会话并（默认）恢复目标运行。
-   * ★ 释放独占资源走 DELETE；`resume=1` 同时写在 query 与 body，兼容两种读法。
+   * ★ 多会话下必须带 `debug_session`；缺省只在恰有一条会话时生效。
    */
-  debugClose: (resume = true) =>
+  debugClose: (resume = true, debugSession?: string) =>
     req<{ closed: boolean; resumed?: boolean; session?: string }>(
       `/api/debug/session?resume=${resume ? 1 : 0}`,
       {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resume, reason: "user-closed", actor: "human" }),
+        body: JSON.stringify({ resume, reason: "user-closed", actor: "human",
+                               debug_session: debugSession ?? "" }),
       },
     ),
 
-  /** POST /api/debug/control —— 执行/暂停/单步/复位；reset 必须带 confirm。 */
-  debugControl: (opts: { action: string; addr?: string; confirm?: boolean }) =>
-    post<DebugControlResponse>("/api/debug/control", opts),
+  /** POST /api/debug/control —— 执行/暂停/单步/复位/运行到行；reset 必须带 confirm。 */
+  debugControl: (opts: {
+    action: string; addr?: string; file?: string; line?: number;
+    confirm?: boolean; debugSession?: string;
+  }) =>
+    post<DebugControlResponse>("/api/debug/control", {
+      action: opts.action,
+      ...(opts.addr !== undefined ? { addr: opts.addr } : {}),
+      ...(opts.file !== undefined ? { file: opts.file } : {}),
+      ...(opts.line !== undefined ? { line: opts.line } : {}),
+      ...(opts.confirm !== undefined ? { confirm: opts.confirm } : {}),
+      debug_session: opts.debugSession ?? "",
+    }),
 
   /** GET /api/debug/stack —— 调用栈（thread 缺省 = 当前线程）。 */
-  debugStack: (thread?: number) =>
-    req<DebugStackResponse>(
-      `/api/debug/stack${thread === undefined ? "" : `?thread=${encodeURIComponent(thread)}`}`,
-    ),
+  debugStack: (opts: { thread?: number; debugSession?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.thread !== undefined) q.set("thread", String(opts.thread));
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
+    const qs = q.toString();
+    return req<DebugStackResponse>(`/api/debug/stack${qs ? `?${qs}` : ""}`);
+  },
 
   /** GET /api/debug/variables —— 局部/参数/子节点。 */
   debugVariables: (opts: {
     frame?: number;
     scope?: "locals" | "args" | "children";
     var?: string;
+    debugSession?: string;
   } = {}) => {
     const q = new URLSearchParams({
       frame: String(opts.frame ?? 0),
       scope: opts.scope ?? "locals",
     });
     if (opts.var !== undefined) q.set("var", opts.var);
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
     return req<DebugVariablesResponse>(`/api/debug/variables?${q.toString()}`);
   },
 
   /** GET /api/debug/registers —— 寄存器分组（core/fpu/all）。 */
-  debugRegisters: (opts: { group?: string; format?: "natural" | "hex" } = {}) => {
+  debugRegisters: (opts: {
+    group?: string; format?: "natural" | "hex"; debugSession?: string;
+  } = {}) => {
     const q = new URLSearchParams({
       group: opts.group ?? "core",
       format: opts.format ?? "natural",
     });
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
     return req<DebugRegistersResponse>(`/api/debug/registers?${q.toString()}`);
+  },
+
+  /** POST /api/debug/registers —— 按组批量写（整批校验，applied/failed 如实返回）。 */
+  debugRegistersWrite: (opts: {
+    items: Array<{ name: string; value: string }>;
+    confirm?: boolean;
+    debugSession?: string;
+  }) =>
+    post<DebugRegistersWriteResponse>("/api/debug/registers", {
+      items: opts.items,
+      confirm: opts.confirm !== false,
+      debug_session: opts.debugSession ?? "",
+    }),
+
+  /** GET /api/debug/source —— 源码页签（file 缺省 = 当前停止帧）。 */
+  debugSource: (opts: {
+    file?: string; start?: number; count?: number; debugSession?: string;
+  } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.file) q.set("file", opts.file);
+    if (opts.start !== undefined) q.set("start", String(opts.start));
+    if (opts.count !== undefined) q.set("count", String(opts.count));
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
+    const qs = q.toString();
+    return req<DebugSourceResponse>(`/api/debug/source${qs ? `?${qs}` : ""}`);
   },
 
   /**
@@ -745,7 +980,7 @@ export const api = {
   debugBreakpoints: (opts: {
     op?: "list" | "add" | "update" | "toggle" | "remove";
     id?: string;
-    kind?: "func" | "addr";
+    kind?: "func" | "addr" | "source";
     location?: string;
     condition?: string;
     enabled?: boolean;
@@ -753,33 +988,44 @@ export const api = {
     temporary?: boolean;
     /** 工程配置 rev（乐观锁；GET 返回的值原样带回） */
     rev?: number;
+    debugSession?: string;
   } = {}) => {
     const op = opts.op ?? "list";
-    if (op === "list") return req<DebugBreakpointsResponse>("/api/debug/breakpoints");
-    return post<DebugBreakpointsResponse>("/api/debug/breakpoints", { ...opts, op });
+    if (op === "list") {
+      const ds = opts.debugSession ?? "";
+      return req<DebugBreakpointsResponse>(
+        `/api/debug/breakpoints${ds ? `?debug_session=${encodeURIComponent(ds)}` : ""}`);
+    }
+    return post<DebugBreakpointsResponse>("/api/debug/breakpoints",
+      { ...opts, op, debug_session: opts.debugSession ?? "" });
   },
 
   /** GET /api/debug/memory —— 读目标内存（count 上限 4096）。 */
-  debugMemory: (opts: { addr: string; count?: number }) => {
+  debugMemory: (opts: { addr: string; count?: number; debugSession?: string }) => {
     const q = new URLSearchParams({ addr: opts.addr });
     if (opts.count !== undefined) q.set("count", String(opts.count));
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
     return req<DebugMemoryResponse>(`/api/debug/memory?${q.toString()}`);
   },
 
   /** GET /api/debug/disasm —— 反汇编（addr 空 = 当前 PC，mode=2 为 Thumb）。 */
-  debugDisasm: (opts: { addr?: string; count?: number; mode?: number } = {}) => {
+  debugDisasm: (opts: {
+    addr?: string; count?: number; mode?: number; debugSession?: string;
+  } = {}) => {
     const q = new URLSearchParams();
     if (opts.addr !== undefined && opts.addr !== "") q.set("addr", opts.addr);
     q.set("count", String(opts.count ?? 32));
     q.set("mode", String(opts.mode ?? 2));
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
     return req<DebugDisasmResponse>(`/api/debug/disasm?${q.toString()}`);
   },
 
   /** POST /api/debug/evaluate —— 表达式求值（`&line`、`buf[16]`、`pxCurrentTCB`）。 */
-  debugEvaluate: (opts: { expr: string; frame?: number }) =>
+  debugEvaluate: (opts: { expr: string; frame?: number; debugSession?: string }) =>
     post<DebugEvaluateResponse>("/api/debug/evaluate", {
       expr: opts.expr,
       ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+      debug_session: opts.debugSession ?? "",
     }),
 
   /**
@@ -793,8 +1039,9 @@ export const api = {
     value: string;
     /** 内核要求写操作显式确认（require_write 的第二道闸门） */
     confirm?: boolean;
+    debugSession?: string;
   }) => post<{ ok: boolean; written?: number; name?: string; addr?: string }>(
-    "/api/debug/write", opts),
+    "/api/debug/write", { ...opts, debug_session: opts.debugSession ?? "" }),
 
   /** GET/POST /api/debug/watch —— 监视列表（持久化，写操作带 rev 乐观锁）。 */
   debugWatch: (opts: {
@@ -803,10 +1050,16 @@ export const api = {
     expr?: string;
     format?: string;
     rev?: number;
+    debugSession?: string;
   } = {}) => {
     const op = opts.op ?? "list";
-    if (op === "list") return req<DebugWatchResponse>("/api/debug/watch");
-    return post<DebugWatchResponse>("/api/debug/watch", { ...opts, op });
+    if (op === "list") {
+      const ds = opts.debugSession ?? "";
+      return req<DebugWatchResponse>(
+        `/api/debug/watch${ds ? `?debug_session=${encodeURIComponent(ds)}` : ""}`);
+    }
+    return post<DebugWatchResponse>("/api/debug/watch",
+      { ...opts, op, debug_session: opts.debugSession ?? "" });
   },
 
   /** GET /api/debug/audit —— 最近写操作/断点审计。 */
@@ -814,16 +1067,21 @@ export const api = {
     req<DebugAuditResponse>(`/api/debug/audit?limit=${limit}`),
 
   /** GET /api/debug/peripherals —— SVD 三级懒加载（path 空 = 外设清单）。 */
-  debugPeripherals: (opts: { path?: string; read?: boolean } = {}) => {
+  debugPeripherals: (opts: {
+    path?: string; read?: boolean; debugSession?: string;
+  } = {}) => {
     const q = new URLSearchParams();
     if (opts.path) q.set("path", opts.path);
     if (opts.read) q.set("read", "1");
+    if (opts.debugSession) q.set("debug_session", opts.debugSession);
     const suffix = q.toString() ? `?${q.toString()}` : "";
     return req<DebugPeripheralsResponse>(`/api/debug/peripherals${suffix}`);
   },
 
   /** GET /api/debug/rtos —— FreeRTOS 任务与栈水位。 */
-  debugRtos: () => req<DebugRtosResponse>("/api/debug/rtos"),
+  debugRtos: (opts: { debugSession?: string } = {}) =>
+    req<DebugRtosResponse>(
+      `/api/debug/rtos${opts.debugSession ? `?debug_session=${encodeURIComponent(opts.debugSession)}` : ""}`),
 };
 
 /**

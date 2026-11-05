@@ -450,7 +450,8 @@ export function agentGuidePayload() {
             { name: 'elab_serial_capture', use: '录制 start / stop / status（写盘需 allowAgentWrite）' },
             { name: 'elab_serial_decode', use: '无状态解码 justfloat / firewater / profile（profile 可传草稿）' },
             { name: 'elab_serial_decoded', use: '增量读会话级共享解码帧（与面板波形同源）' },
-            { name: 'elab_frame_profile', use: '帧协议 profile：list/get/preview/save/delete/encode/templates/import（支持位域/变长/多 ID）' },
+            { name: 'elab_frame_profile', use: '帧协议 profile：list/get/preview/save/delete/encode/templates/import + learn（抓包学协议）/verify/auto/codegen' },
+            { name: 'elab_serial_stats', use: '帧级健康度：帧率 / 到达间隔 p95 / 错误分类 / 每 variant 计数' },
             { name: 'elab_debug_open', use: '起 openocd + gdb，停在 main（需内核 meta.debug）' },
             { name: 'elab_debug_control', use: 'continue / pause / step / reset / run_to' },
             { name: 'elab_debug_inspect', use: '栈 / 变量 / 寄存器 / 断点 / 内存等只读视图' },
@@ -1024,24 +1025,39 @@ export function registerElabTools(register, deps) {
         description: '帧协议 profile 一等能力（Agent 只写**声明式 JSON**，不生成可执行解码器）：' +
             'list/get 读工程配置；preview 无硬件试解字节（支持未保存草稿）；encode 字段值→字节；' +
             'templates 列只读模板库；save/delete/import 改配置（需要 allowAgentWrite，rev 乐观锁）。' +
-            'profile 支持位域（bit_offset/bit_length/bit_order=lsb0|msb0）、变长（frame.length_field）、' +
-            '多 ID（frame.id_field + variants）。实时解码用 elab_serial_decode / elab_serial_monitor。' +
+            'P4 新增：**learn** 从抓包学草稿（不落盘，返回 confidence/evidence 供复核）；' +
+            'verify 做 解→编→再解 的 round-trip；auto 在一组 profile 里挑最像的；' +
+            'codegen 生成 C 头文件。遇到不认识的二进制协议时先 learn，再用 verify 证伪，' +
+            '最后 preview 看字段，确认后才 save。' +
+            'profile 支持位域（bit_offset/bit_length/bit_order）、变长（frame.length_field）、' +
+            '多 ID（frame.id_field + variants）、校验预设（crc8/crc16/crc32 + cover/offset）、' +
+            '转义（escape）、多帧头（frame.heads）、空闲分包（idle_gap_ms）、' +
+            '数组/字符串/f16/位标志（array/str/bits）。' +
             'schema 的权威定义在 GET /api/serial/meta 的 SERIAL_META.frames.schema。',
         parameters: {
             action: {
                 type: 'string',
                 required: true,
-                description: 'list / get / preview / save / delete / encode / templates / import',
+                description: 'list / get / preview / save / delete / encode / templates / import / learn / verify / auto / codegen',
             },
             project: { type: 'string', description: '工程名（templates 外基本都必填）' },
-            id: { type: 'string', description: 'profile id（get/preview/delete/encode 用）' },
+            id: { type: 'string', description: 'profile id（get/preview/delete/encode 用，auto/codegen 也可指定）' },
             rev: { type: 'number', description: 'save/delete/import 的乐观锁版本（来自 list 的 rev）' },
-            profile: { type: 'string', description: 'profile JSON（字符串；preview/save/encode 可传未保存草稿）' },
+            profile: { type: 'string', description: 'profile JSON（字符串；preview/save/encode/verify/codegen 可传未保存草稿）' },
             values: { type: 'string', description: 'encode 的字段值 JSON（字符串），如 {"rpm":100,"mode":"RUN"}' },
             variant: { type: 'string', description: 'encode 的 variant id（"1" 或 "0x03"；多 variant 必填）' },
             length_value: { type: 'number', description: 'encode 时显式覆盖 length_field 原始值（须与帧长一致）' },
-            hex: { type: 'string', description: 'preview 的十六进制字节串（与 b64 二选一）' },
-            b64: { type: 'string', description: 'preview 的 base64 字节串（与 hex 二选一）' },
+            hex: { type: 'string', description: '样本字节（十六进制串，可含空格/0x；preview/verify/auto/learn 用）' },
+            b64: { type: 'string', description: '样本字节（base64；与 hex 二选一）' },
+            capture: { type: 'string', description: '抓包样本：录制的 .jsonl 文件路径（限本工程 .work/.cockpit/）或 JSONL 文本；'
+                    + '只取 dir=rx。抓包 → learn → save → decoder=profile:<id> 是完整闭环' },
+            frames: { type: 'string', description: 'learn 的帧数组 JSON（["aa55..","aa55.."]）；已知帧边界时用它' },
+            hints: { type: 'string', description: 'learn 提示 JSON，如 {"heads":["aa55"]}' },
+            field_count: { type: 'number', description: 'learn 时预期字段数（均分 payload；不知道就省略）' },
+            name: { type: 'string', description: 'learn 出的草稿 id 前缀（默认 learned）' },
+            apply: { type: 'boolean', description: 'auto 命中后直接设为会话解码器' },
+            write: { type: 'boolean', description: 'codegen 是否落盘到 generated/<id>.h' },
+            overwrite: { type: 'boolean', description: 'codegen 覆盖已存在的头文件' },
             template: { type: 'string', description: 'templates 时可筛选模板 id；import 时必填' },
             new_id: { type: 'string', description: 'import 时新 profile id（缺省沿用模板 id）' },
         },
@@ -1131,6 +1147,78 @@ export function registerElabTools(register, deps) {
                         body: JSON.stringify(body),
                     });
                 }
+                if (action === 'learn') {
+                    // 只产草稿：这里**不写盘**，所以不需要 allowAgentWrite。
+                    if (args.capture === undefined && args.hex === undefined &&
+                        args.b64 === undefined && args.frames === undefined) {
+                        throw new Error('learn 需要 capture / frames / hex / b64 之一');
+                    }
+                    const parsedFrames = parse(args.frames, 'frames');
+                    if (!parsedFrames.ok)
+                        return { ok: false, code: 'bad-json', note: parsedFrames.error };
+                    const parsedHints = parse(args.hints, 'hints');
+                    if (!parsedHints.ok)
+                        return { ok: false, code: 'bad-json', note: parsedHints.error };
+                    return await cockpit(deps, '/api/serial/frames/learn', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(args.capture !== undefined ? { capture: args.capture } : {}),
+                            ...(args.frames !== undefined ? { frames: parsedFrames.value } : {}),
+                            ...(args.hex !== undefined ? { hex: args.hex } : {}),
+                            ...(args.b64 !== undefined ? { b64: args.b64 } : {}),
+                            ...(args.hints !== undefined ? { hints: parsedHints.value ?? {} } : {}),
+                            ...(args.field_count !== undefined ? { field_count: args.field_count } : {}),
+                            ...(args.name !== undefined ? { name: args.name } : {}),
+                        }),
+                    });
+                }
+                if (action === 'verify') {
+                    if (!draft.value && (!project || !args.id)) {
+                        throw new Error('verify 需要 project+id，或 profile 草稿');
+                    }
+                    return await cockpit(deps, '/api/serial/frames/verify', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(draft.value ? { profile: draft.value } : { project, id: args.id }),
+                            ...(args.hex !== undefined ? { hex: args.hex } : {}),
+                            ...(args.b64 !== undefined ? { b64: args.b64 } : {}),
+                            ...(args.capture !== undefined ? { capture: args.capture } : {}),
+                        }),
+                    });
+                }
+                if (action === 'auto') {
+                    if (args.hex === undefined && args.b64 === undefined &&
+                        args.capture === undefined) {
+                        throw new Error('auto 需要 hex / b64 / capture 之一');
+                    }
+                    return await cockpit(deps, '/api/serial/frames/auto', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(project ? { project } : {}),
+                            ...(args.hex !== undefined ? { hex: args.hex } : {}),
+                            ...(args.b64 !== undefined ? { b64: args.b64 } : {}),
+                            ...(args.capture !== undefined ? { capture: args.capture } : {}),
+                            ...(args.apply !== undefined ? { apply: args.apply } : {}),
+                        }),
+                    });
+                }
+                if (action === 'codegen') {
+                    if (!draft.value && (!project || !args.id)) {
+                        throw new Error('codegen 需要 project+id，或 profile 草稿');
+                    }
+                    return await cockpit(deps, '/api/serial/frames/codegen', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(draft.value ? { profile: draft.value } : { project, id: args.id }),
+                            ...(args.write !== undefined ? { write: args.write } : {}),
+                            ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
+                        }),
+                    });
+                }
                 if (action === 'save' || action === 'delete' || action === 'import') {
                     if (!deps.allowAgentWrite()) {
                         return {
@@ -1188,14 +1276,37 @@ export function registerElabTools(register, deps) {
         },
     }));
     add(makeTool({
+        name: 'elab_serial_stats',
+        description: '帧级健康度（P3）：最近窗口内的帧率、到达间隔（均值/p95/max）、' +
+            '错误分类（no_head/bad_length/checksum/unknown_id/tail_mismatch…）、' +
+            '每 variant 计数、待解半帧字节数、缓冲占用。判断"协议配错了吗 / 帧在丢吗"先看它。' +
+            '只读，不需要硬件在位也能查（没有会话时返回空表）。',
+        parameters: {
+            window_s: { type: 'number', description: '统计窗口秒数（默认 10，1..60）' },
+        },
+        output: jsonOutput,
+        presentCall: () => ({ card: 'generic', kind: 'read', title: 'elab 帧级统计' }),
+        async execute(args) {
+            const w = args.window_s === undefined ? 10 : args.window_s;
+            return await cockpit(deps, `/api/serial/monitor/stats?window_s=${w}`);
+        },
+    }));
+    add(makeTool({
         name: 'elab_serial_capture',
         description: '显式录制串口字节（证据，可回放）：start 开始录、stop 收尾返回文件路径与统计、' +
             'status 查当前录制。文件是有界 JSONL（默认上限 5 MiB），到顶自动停录并标 truncated。' +
-            '只存原始字节（bytes_b64），不存文本投影。',
+            '只存原始字节（bytes_b64），不存文本投影。' +
+            'P3 起可**布防**：给 trigger 就只在命中时落盘（含 pre_bytes 预录），' +
+            '适合"等故障发生再录"——不用人盯着屏幕。',
         parameters: {
             action: { type: 'string', required: true, description: 'start / stop / status' },
             project: { type: 'string', description: '工程名（可省略；用于文件命名与留档关联）' },
             max_bytes: { type: 'number', description: '录制文件上限（字节；缺省 5 MiB）' },
+            trigger: {
+                type: 'string',
+                description: '触发条件 JSON：{"pattern":"aa55"} 或 {"field":{"name":"v","op":"gt","value":40}} 或 {"frame_index":10}',
+            },
+            pre_bytes: { type: 'number', description: '命中前预录多少字节（默认 0；建议 4096）' },
         },
         output: jsonOutput,
         presentCall: () => ({ card: 'generic', kind: 'edit', title: 'elab 串口录制' }),
@@ -1207,6 +1318,15 @@ export function registerElabTools(register, deps) {
                     nextAction: '录制会写盘，需要用户在设置里开启 allowAgentWrite；只用 status 可查看当前是否在录',
                 };
             }
+            let trigger;
+            if (args.trigger !== undefined && args.trigger !== '') {
+                try {
+                    trigger = JSON.parse(args.trigger);
+                }
+                catch {
+                    return { ok: false, code: 'bad-json', note: 'trigger 必须是合法 JSON 字符串' };
+                }
+            }
             return cockpit(deps, '/api/serial/capture', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1214,6 +1334,8 @@ export function registerElabTools(register, deps) {
                     action: args.action,
                     ...(args.project !== undefined ? { project: args.project } : {}),
                     ...(args.max_bytes !== undefined ? { max_bytes: args.max_bytes } : {}),
+                    ...(trigger !== undefined ? { trigger } : {}),
+                    ...(args.pre_bytes !== undefined ? { pre_bytes: args.pre_bytes } : {}),
                 }),
             });
         },

@@ -154,10 +154,6 @@ export function setFontScale(n: number): void {
   commit({ ...state, fontScale: v });
 }
 
-export function resetLayout(): void {
-  commit({ ...DEFAULT, fontScale: state.fontScale });
-}
-
 export function subscribeLayout(l: () => void): () => void {
   listeners.add(l);
   return () => listeners.delete(l);
