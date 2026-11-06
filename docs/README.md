@@ -29,9 +29,10 @@
 | [技术方案_Provider工具链架构](design/技术方案_Provider工具链架构.md) | 默认链/外带链同构的 Provider 架构契约：manifest、绑定优先级、缺步骤不回退、市场分发、`ctx.provide()` 边界（P1/P2 已实现，ESP32 实机闭环通过；P3 外带 GDB 搁置） |
 | [技术方案_调试面板复刻cortex-debug](design/技术方案_调试面板复刻cortex-debug.md) | 调试工作区 P0–P3：断点/单步、调用栈、变量、寄存器、内存、外设、RTOS 栈水位与审计 |
 | [执行计划_调试P3_源码单步与多会话与寄存器组](design/执行计划_调试P3_源码单步与多会话与寄存器组.md) | 调试 P3 落地：源码单步、多会话、寄存器组编辑、反汇编（已实现，F103 实机） |
-| [执行计划_帧协议P0P1与Agent编辑](design/执行计划_帧协议P0P1与Agent编辑.md) | 串口帧协议 P0/P1：位域、变长、多 ID、反向组帧、模板库与 `elab_frame_profile`（已实现，F103 实机） |
+| [执行计划_帧协议P0P1与Agent编辑](design/执行计划_帧协议P0P1与Agent编辑.md) | 串口帧协议 P0/P1：位域、变长、多 ID、反向组帧、模板库与 `elab_frame` / `elab_frame_learn`（已实现，F103 实机） |
 | [执行计划_串口存量优化_帧协议补强与Agent能力](design/执行计划_串口存量优化_帧协议补强与Agent能力.md) | 串口存量打磨：通用帧协议补强（校验声明化 / 转义 / 空闲分包 / 字段模型）、Agent 生产力（learn / verify / auto / codegen）、观测与性能（帧级统计 / 触发录制 / 基准）；旧 profile 逐字兼容（**已实现，F103 实机，见教程 5.7 与附录 D**） |
-| [执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙](design/执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙.md) | 增量协议改造：Modbus RTU 主站、蓝牙 Classic SPP（叠加 `ESP32S31_Wave`，BLE 备选）、CAN 轨道（C0 虚拟总线→C1 硬件→C2 CANopen）；含 F103 Modbus/CAN 教学固件与实机截图教程 |
+| [执行计划_Modbus学习计划_RTU主站_F103从站_实机教程](design/执行计划_Modbus学习计划_RTU主站_F103从站_实机教程.md) | Modbus 学习计划：RTU 主站（PDU/事务/轮询/寄存器映射）、F103 教学从站（FC03/06/10 + 异常 + 3.5 字符 + 双 UART 心跳）、实机教程与截图 |
+| [执行计划_拓展协议学习计划_CAN基础与蓝牙SPP](design/执行计划_拓展协议学习计划_CAN基础与蓝牙SPP.md) | 拓展协议：CAN 2.0A/B 基础（C1，SLCAN 500 kbit/s + 虚拟总线前置 + F103 教学工程）、蓝牙 Classic SPP（叠加 `ESP32S31_Wave`，默认不参与 auto）；CANopen/BLE/CAN FD 不做 |
 
 ## reports/ —— 验证报告与可行性研究
 

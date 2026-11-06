@@ -118,7 +118,7 @@ packages/dsh-elab-cockpit/src/
     ├─ kernel-http/              ICD HTTP 客户端 + SSE + 白名单路由（自 routes.ts + client/api）
     ├─ kernel-process/           spawn/health/job-object（自 host-process.ts + job-object.ts）
     ├─ dsh-web/                  slots UI（现 client/*：CockpitPane/StageLadder/…）
-    ├─ dsh-tools/                tools.ts（8 工具）
+    ├─ dsh-tools/                门面工具（domain/tools.ts 定契约 + adapters/*-ops.ts 实现）
     └─ fs-store/                 run-retention + runs_dir 约定
 ```
 
@@ -126,7 +126,7 @@ packages/dsh-elab-cockpit/src/
 
 内核已经达标 90%：YAML 驱动 + L 级适配器 + 生成式 skill。仅两处收敛：
 - `cockpit/server.py` 的 capabilities / _plan_preview 等业务段下沉到 `services/elab/`（server.py 收敛为纯 HTTP 面，目标 ≤ 400 行）；
-- flow manifest 正式化：STEP_META / KERNEL_PLANS 从 server.py 挪到 `services/elab/flow.py`（或 YAML），server 引用之。
+- ~~flow manifest 正式化~~ ✅ **已落地（2026-11-06）**：STEP_META / KERNEL_PLANS 已挪到 `services/elab/flow.py`，server.py 引用之（回归测试 `tests/test_flow_manifest.py`）。
 
 ### 4.3 总图
 

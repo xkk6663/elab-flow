@@ -42,9 +42,9 @@
 | [server.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/server.py#L2274-L2302) | `/api/serial/decode` 支持 `profile:<id>` |
 | [serialmon.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/services/elab/serialmon.py#L489-L528) | 会话级共享解码，profile 快照缓存在 `frame_profile` |
 | [serialmon.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/services/elab/serialmon.py#L543-L572) | `set_decoder`：换解码器清帧环，`profile` 必填 |
-| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/dsh-tools/tools.ts#L894-L915) | `elab_serial_monitor` 的 `decoder` 描述只写了 justfloat / firewater |
-| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/dsh-tools/tools.ts#L1071-L1105) | `elab_serial_decode` 未带 `project/profile`，无法真正解 profile |
-| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/dsh-tools/tools.ts#L1126-L1137) | `elab_serial_decoded` 只读共享帧环 |
+| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/domain/tools.ts) | `elab_serial_monitor` 的 `decoder` 描述只写了 justfloat / firewater |
+| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/domain/tools.ts) | `elab_serial_decode` 未带 `project/profile`，无法真正解 profile |
+| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/domain/tools.ts) | `elab_serial_decoded` 只读共享帧环 |
 | [routes.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/kernel-http/routes.ts#L83-L112) | 插件 HTTP 白名单；新增端点必须登记 |
 | [client.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/web/src/api/client.ts#L464-L506) | 帧协议前端 API：load / save / preview |
 | [SerialWorkspace.tsx](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/web/src/serial/SerialWorkspace.tsx#L266-L400) | cockpit 帧协议抽屉：JSON 编辑 / 保存 / 删除 / 预览 |
@@ -433,7 +433,7 @@ templates/frames/
 
 | 文件 | 改动 |
 |---|---|
-| `src/adapters/dsh-tools/tools.ts` | 新增 `elab_frame_profile`；扩展 `elab_serial_decode` / `elab_serial_monitor` 描述与参数；更新工具索引 |
+| `src/domain/tools.ts` + `src/adapters/dsh-tools/frame-ops.ts` | 新增 `elab_frame_profile`（v4.0.0 起契约在 domain、实现分文件）；扩展 `elab_serial_decode` / `elab_serial_monitor` 描述与参数；更新工具索引 |
 | `src/adapters/kernel-http/routes.ts` | 新端点白名单 |
 | `src/adapters/kernel-http/icd-client.ts` | 模板/encode 类型（如插件需要展示） |
 | `src/adapters/dsh-web/SerialPane.tsx` | profile 列表只读展示 + decoder 选 `profile:<id>`；不新增第二套编辑器 |

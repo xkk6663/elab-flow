@@ -378,7 +378,7 @@ def _frame_bytes_of(body: dict, cfg: Config) -> bytes:
     return b""
 
 
-COCKPIT_VERSION = "3.1.0"
+COCKPIT_VERSION = "4.0.0"
 
 
 def _sync_serial_decoder(cfg, project: str, pid: str, deleted: bool) -> None:

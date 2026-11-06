@@ -114,7 +114,7 @@
 | 工程级共享存储 + rev 乐观锁 | `services/elab/serialwidgets.py`（`projects/<name>.widgets.json`） | 新增 `projects/<name>.debug.json` |
 | 插件路由白名单 / SSE 字节级透传 | `packages/dsh-elab-cockpit/src/adapters/kernel-http/routes.ts` | 增 debug GET/POST 白名单 + 一条 debug SSE 路由 |
 | 面板视图切换 | `CockpitPane.tsx` 的 `view: 'work' / 'settings'` | 增 `'debug'` |
-| Agent 工具注册 | `packages/dsh-elab-cockpit/src/adapters/dsh-tools/tools.ts` | 增 `elab_debug_*` 工具 |
+| Agent 工具注册 | `packages/dsh-elab-cockpit/src/domain/tools.ts` | 增 `elab_debug_*` 工具（v4.0.0 起契约在 domain 层，实现见 `src/adapters/dsh-tools/debug-ops.ts`） |
 | 样式硬规则 | `test/style-rules.test.mjs`（禁止字面色值/直读宿主令牌） | 新组件只用 `--elab-*`，缺的变量补进 `theme/dsw-map.ts` |
 
 ### 3.2 缺口（本方案要补的）
@@ -941,7 +941,7 @@ DebugView
 
 ## 9. Agent 工具设计
 
-### 9.1 工具表（`src/adapters/dsh-tools/tools.ts`）
+### 9.1 工具表（`src/domain/tools.ts` 契约 + `src/adapters/dsh-tools/debug-ops.ts` 实现）
 
 | 工具 | 参数 | 返回 | 写权限 |
 |---|---|---|---|
@@ -1021,7 +1021,7 @@ DebugView
 - `adapters/kernel-http/routes.ts`：白名单 + `/elab/debug/events`
 - `adapters/dsh-web/DebugView.tsx`、`DebugToolbar.tsx`、`DebugStackPanel.tsx`、`DebugVariablesPanel.tsx`、`DebugRegistersPanel.tsx`、`DebugConsole.tsx`
 - `CockpitPane.tsx`：`view` 联合类型加 `'debug'`，加入口按钮
-- `dsh-tools/tools.ts`：`open/control/inspect/close/wait`
+- `domain/tools.ts` + `dsh-tools/debug-ops.ts`：`open/control/inspect/close/wait`
 - `app/debug-view-store.ts`：自动聚焦
 
 **DoD**

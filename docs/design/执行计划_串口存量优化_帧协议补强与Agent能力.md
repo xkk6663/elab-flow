@@ -5,11 +5,14 @@
 > Agent 能学/能验/能自动选、帧级健康度可见、解码性能有基准。
 >
 > 本文是源码调研后的可执行方案，只做计划，不写实现。
-> 姊妹文档 [执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙](执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙.md)
-> 只负责新增真实协议（Modbus RTU / CANopen / Classic SPP）与教学固件；两份文档可独立实施。
+> 姊妹文档：
+> [执行计划_Modbus学习计划_RTU主站_F103从站_实机教程](执行计划_Modbus学习计划_RTU主站_F103从站_实机教程.md)
+> 负责 Modbus RTU 主站、F103 教学从站与实机教程；
+> [执行计划_拓展协议学习计划_CAN基础与蓝牙SPP](执行计划_拓展协议学习计划_CAN基础与蓝牙SPP.md)
+> 负责 CAN 2.0A/B 基础（C1）与 Classic SPP。三份文档可独立实施。
 >
 > 编号沿用原“串口 P2/P4/P3”阶段计划：本文件保留 **P2.2 / P4 / P3**；
-> P2.1（Modbus 主站）与 P2.3（蓝牙传输）已移入姊妹文档。
+> P2.1（Modbus 主站）与 P2.3（蓝牙传输）已移入上述两份文档。
 >
 > **状态（2026-11-05）**：源码调研完成，决策已对齐，待实施。
 
@@ -68,7 +71,7 @@
 | [server.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/server.py#L95-L255) | `SERIAL_META`：视图、格式、解码器、frames schema、features、transports |
 | [server.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/server.py#L1727-L1819) | GET：console/widgets/monitor bytes/decoded/control/log-profiles/frames/templates/issues |
 | [server.py](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/server.py#L2010-L2451) | POST：widgets/serial/control/monitor/frames/preview/encode/capture/decode |
-| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/dsh-tools/tools.ts#L839-L1536) | `elab_serial*` 与 `elab_frame_profile` 全部工具 |
+| [tools.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/domain/tools.ts) | `elab_serial*` 与 `elab_frame_profile` 全部工具的**契约**（v4.0.0 起已上移到 domain 层）；实现见 `src/adapters/dsh-tools/serial-ops.ts` / `frame-ops.ts` |
 | [routes.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/dsh-elab-cockpit/src/adapters/kernel-http/routes.ts#L76-L125) | 插件 HTTP 白名单；新增端点必须登记 |
 | [SerialWorkspace.tsx](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/cockpit/web/src/serial/SerialWorkspace.tsx#L67-L74) | 四视图：lines / bytes / terminal / wave |
 | [icd.ts](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/packages/cockpit-ui-core/src/icd.ts#L242-L270) | `SerialMeta`、`SerialChunk`、`SerialDecodeResult` 等共享类型 |

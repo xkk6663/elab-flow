@@ -5,9 +5,24 @@
 
 ---
 
-## [Unreleased] — 2026-11-05（文档 · Agent 自学按钮实机教程）
+## [V4.0.0] — 2026-11-06（Provider 工具链 · 帧协议补强 · Agent 自学习协议 · 工具门面化 · 流程清单归位）
 
-### 文档
+主仓大版本：内核 `COCKPIT_VERSION` 与 `services.elab.__version__` 升到 `4.0.0`，
+插件默认下载内核版本同步为 `v4.0.0`；插件同步发 **1.0.0**（见下一条）。
+
+本条目合并了 2026-11-04 ~ 11-06 的全部未发布批次（Provider 工具链架构、帧协议 P0/P1、
+串口存量优化与 Agent 自学习协议、收尾健壮性批次、仓库清理与文档）。
+
+### 内核：流程清单归位（`services/elab/flow.py`）
+
+
+- `STEP_META` / `KERNEL_PLANS` 从 `cockpit/server.py` 挪到 **`services/elab/flow.py`**
+  （流程清单 = 芯片无关的步骤词汇与三档定义，唯一事实源）；驾驶舱只引用不复制。
+  新增 `step_label` / `step_channel` / `plan_steps` / `plan_requires_hardware` helper
+  与回归测试 `tests/test_flow_manifest.py`（展示侧清单与 `run.ALL_STEPS` 双向一致）。
+  `AGENTS.md` 的层归属表与规则 1 同步改。
+
+### 文档：Agent 自学按钮实机教程
 
 - **教程 07 新增 §5.7.9「按钮实操：不写一行命令，从陌生字节到直播解码」**：
   STM32F103C8T6 实机（COM10），纯面板按钮走完 learn 闭环——发 `LEARN`（须带 CRLF）
@@ -17,13 +32,12 @@
   附按钮 ↔ API 对照表。与 §5.7.8（API/Agent 视角）互补。
 - `docs/README.md` 教程 07 条目同步登记。
 
----
-
-## [Unreleased] — 2026-11-05（仓库清理 · 死代码与过期产物清扫）
+### 仓库清理：死代码与过期产物清扫
 
 收尾前的仓库整理，全部为删除性清理（git 历史可恢复），零功能变更。
 
-### 删除
+#### 删除
+
 
 - **一次性截图生成工具**（`docs/tutorials/assets/cli-terminal/`）：
   3 个 `.mjs` 截图脚本 + 7 个 mock `.html` 终端页面（含 82 KB 的 `build.html`）。
@@ -38,30 +52,31 @@
   `cockpit/server.py`（shutil）、`tests/test_setup.py`（shutil）。
 - **本地缓存**：`.pytest_cache/`、`__pycache__/`、空 `.screenshots/`（均已在 gitignore）。
 
-### 整理
+#### 整理
+
 
 - `docs/README.md` 补登记 `健壮性盘点_2026-11-05`（此前是唯一未入索引的文档）。
 
-### 扫描结论（无问题项，记录避免重复劳动）
+#### 扫描结论（无问题项，记录避免重复劳动）
 
 - 177 个 docs 文件、全部教程 PNG 均被引用（交叉核对 0 孤儿）；
 - `services/elab` / `cockpit` 全部 Python 模块均被引用（0 死模块）；
 - `TODO` 标记仅 4 处，全部是 `adapt.py` 生成模板的占位文案（有意保留）；
-- `执行计划_增量真实协议_Modbus_RTU_CANopen_蓝牙` 为**待实施**的未来计划，非过期文档。
+- 协议计划（Modbus / CAN / 蓝牙）为**待实施**的未来计划，非过期文档；当前已按价值拆分为 Modbus 与拓展协议两份（2026-11-06）。
 
-### 门禁
+#### 门禁
+
 
 Python 628 passed / 3 skipped；插件 143 pass + build 契约 PASS；
 WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件行尾 0 翻转。
 
----
-
-## [Unreleased] — 2026-11-05（收尾健壮性批次 · 轮询/超时/SSE/--root）
+### 收尾健壮性批次：轮询 / 超时 / SSE / --root
 
 盘点报告：`docs/reports/健壮性盘点_2026-11-05.md`（11 条已**全部处置**：
 8 条修复 + 3 条以更轻手段收敛，见各条说明）。
 
-### 内核
+#### 内核
+
 
 - **`list_runs` 只读首尾行**（P0）：`run/start` 恒为第一行、`run/end`/`run/cancel` 恒为
   最后一行，元数据不再 `replay` 整个文件；新增 `run_meta`（一次 open 读首行+尾窗，
@@ -81,7 +96,8 @@ WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件�
   开关决定是否在响应里，与旧前端"开着才拉"同规则）。轮询连接占用 4 → 1，
   且四路是同一时刻的快照。
 
-### WebUI
+#### WebUI
+
 
 - **全部 fetch 加超时**（P1）：`client.ts` 的 `req()` 统一 `AbortSignal.timeout`，
   默认 15 s，长任务（debug open 20 s / learn / 串口手写读窗口 / prune）60 s；
@@ -102,7 +118,8 @@ WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件�
 - **LogRing.push 改逐个 push**（P3 #10）：消除 `push(...lines)` 在超大批次下
   触发 V8 参数上限的理论爆栈点。
 
-### CLI
+#### CLI
+
 
 - **`--root` 提到全局**（P2）：`elab --root X list` 不再报误导性的
   `invalid choice: 'X'`；子命令级参数保留（SUPPRESS 默认，显式给时优先），
@@ -111,7 +128,8 @@ WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件�
   KeyError/OSError 不再吐整屏 traceback，改成人话 + `ELAB_TRACE=1` 看栈；
   Ctrl-C 干净退出（130）。
 
-### 可维护性
+#### 可维护性
+
 
 - **topic 镜像一致性守卫**（P3 #9）：新增 `packages/dsh-elab-cockpit/test/
   icd-topics.test.mjs` 三例——① 前端 KNOWN_TOPICS ⊇ 内核 KNOWN_TOPICS ∪
@@ -119,27 +137,28 @@ WebUI tsc + vite build（332.44 kB，与清理前一致）；14 个改动文件�
   `domain/icd.ts` 与共享层逐项一致；③ topic 命名空间白名单（新前缀 = 契约级
   变更，测试会拦）。新增 topic 不再可能静默丢事件。
 
-### 明确不做 / 收敛方式
+#### 明确不做 / 收敛方式
+
 
 - **#7 长请求无取消**：完整取消需把 debug open / learn 改成作业化轮询，
   收尾阶段改动风险大于收益。以 ② 的超时（15/60 s 可预期失败）+ 错误 hint
   （"确认内核仍在运行；若刚强杀过它…"）+ 空态 RECOVERY 表收敛；
   真要中断用 Ctrl-C 内核后界面会按 `client-timeout` 明确报错，不再挂死。
 
-### 门禁
+#### 门禁
+
 
 Python 628 passed / 3 skipped；插件 143 pass（新增 topic 守卫 3 例）+ build 契约
 PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行尾与 HEAD
 比对 0 翻转。端到端：临时内核验证 `/api/serial/monitor/poll`（四路形状 + 参数
 校验人话报错）、`POST /api/runs/prune`（dry_run）、`elab runs prune --dry-run`。
 
----
-
-## [Unreleased] — 2026-11-05（串口存量优化 · 帧协议补强 / 帧级观测 / Agent 自学协议）
+### 串口存量优化：帧协议补强 / 帧级观测 / Agent 自学习协议
 
 执行计划：`docs/design/执行计划_串口存量优化_帧协议补强与Agent能力.md`（P2.2 + P3 + P4，全实机验收）。
 
-### 内核：帧协议补强 P2.2
+#### 内核：帧协议补强 P2.2
+
 
 - **校验声明化**：`CRC_PRESETS`（crc8 / crc8_maxim / crc8_j1850 / ccitt_false / xmodem /
   x25 / modbus / ibm / crc32）+ 参数化引擎（Rocksoft 模型），标准检查值 `123456789` 全部对上；
@@ -155,7 +174,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - **错误分类**：解码结果新增 `reasons`（`no_head / bad_length / short / tail_mismatch /
   checksum / unknown_id / bad_id / field`），`skipped` 为其和。
 
-### 内核：观测 P3
+#### 内核：观测 P3
+
 
 - `serialmon.frame_stats(window_s)` + `GET /api/serial/monitor/stats`：帧率、到达间隔
   mean/p95/max/min、每 variant 计数、错误分类累计、`error_rate`、`pending_bytes`、`rate_bps`；
@@ -167,7 +187,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - 面板波形页新增一行健康度（fps / Δ均值·p95 / 错误占比 / 消息种类 / 半帧字节），
   读数来自会话共享解码，离线波形不轮询。
 
-### 内核：Agent 生产力 P4（★ 自学习）
+#### 内核：Agent 生产力 P4（★ 自学习）
+
 
 - 新增 `services/elab/framelearn.py`：
   - `learn`：抓包 → 草稿 profile（帧头/帧长/长度字段/校验/帧尾/id/字段），
@@ -179,7 +200,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - 真实抓包逼出的两个修正：帧头候选**按长度分组**取（否则 ASCII 日志的 4 字节片段挤掉
   2 字节真帧头）、定长判定允许**多数派等长**（≥80%，日志行穿插不再把定长帧误判成变长）。
 
-### HTTP / 插件 / 前端
+#### HTTP / 插件 / 前端
+
 
 - `cockpit/server.py`：新增 `GET /api/serial/monitor/stats`、
   `POST /api/serial/frames/{learn,verify,auto,codegen}`；`capture start` 支持 `trigger`/`pre_bytes`；
@@ -191,7 +213,9 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   HTTP 白名单同步 5 个端点。
 - WebUI：帧抽屉预览行加「学习」按钮；解码摘要把 `reasons` 翻成人话；波形健康度条。
 
-### 修复：调试面板把内核错误"吞成 HTTP 503"
+
+#### 修复：调试面板把内核错误"吞成 HTTP 503"
+
 实机踩到：探针被别的会话占着时点「开始调试」，内核回 503 `debug-gdb-missing`，
 界面上看不到任何原因，用户只会觉得"点了没反应"。
 
@@ -211,7 +235,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - 测试：新增 `test/api-error.test.mjs` 5 例（真内核 409 `debug-elf-missing` /
   hint `先跑 build` 端到端验证过）。
 
-### 修复：强杀内核后会留下孤儿 openocd（作业对象兜底）
+#### 修复：强杀内核后会留下孤儿 openocd（作业对象兜底）
+
 
 - **现象**：调试探针被占着时点「开始调试」，内核回 `debug-gdb-missing`
   （`CMSIS-DAP command mismatch`）；清场时强杀内核会留下**父进程已消失**的
@@ -231,7 +256,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   → 2.5 s 后两者都不在进程表里；对照组（裸 `Popen`）子进程存活。正常 `DELETE` 关闭
   会话的收尾路径不受影响（关闭后进程消失，可立刻重新 open）。
 
-### 健壮性复查：串口学习的规模闸门与"静默失效"
+#### 健壮性复查：串口学习的规模闸门与"静默失效"
+
 
 读源码复查时发现并修掉的几处（都有实测/单测支撑）：
 
@@ -258,7 +284,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   显示已跑秒数。
 - 清理 `learn()` 里 `if not fixed or True:` 的死条件。
 
-### 实机（STM32F103C8T6 / COM10）
+#### 实机（STM32F103C8T6 / COM10）
+
 
 - 固件新增 `LEARN` 命令：发 200 帧 / 20 Hz 私有协议（`5A A5 | id | v1 | v2 | seq | flags |
   crc8_maxim`，10 字节）供 Agent 自学，期间三帧演示暂停。
@@ -267,7 +294,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   直播解码 59 帧 / 6 通道（ENV temp·hum / VSYS mV·mA + 位标志）。
 - 新增 `projects/STM32F103C8T6.frames.json` 的 `f103-private`；教程新增 5.7 节与附录 D。
 
-### 测试
+#### 测试
+
 
 - 新增 `tests/test_framelearn.py`（22 例：learn / verify / auto / codegen / 真机噪声回归）；
   `tests/test_serialframes.py` 追加 6 组（`Compat` / `ChecksumDecl` / `Escape` / `MultiHead` /
@@ -276,11 +304,10 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   新增 `tests/test_winproc.py`（10 例：作业关句柄杀成员且不误伤、`spawn` 语义、
   `adopt` 各种降级不抛、以及「`taskkill /F` 父进程 → 子进程被带走」的端到端）
 
----
+### 帧协议 P0/P1：位域 / 变长 / 多 ID / 组帧
 
-## [Unreleased] — 2026-11-05（帧协议 P0/P1 · 位域 / 变长 / 多 ID / 组帧）
+#### 内核：帧协议 P0（位域 / 变长 / 多 ID）
 
-### 内核：帧协议 P0（位域 / 变长 / 多 ID）
 
 - `services/elab/serialframes.py`：字段支持 `bit_offset` / `bit_length` / `bit_order`
   （`lsb0` 默认、`msb0` 线性大端位流），有符号位域做符号扩展；位域只允许整型。
@@ -291,7 +318,8 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - `services/elab/serialcodec.py`：解码支持位域 / 变长 / variant 分发；通道取 variant 字段并集，
   缺失值输出 `null`；返回新增 `unknown_id`。
 
-### 内核：帧协议 P1（模板 / 组帧）
+#### 内核：帧协议 P1（模板 / 组帧）
+
 
 - 新增 `serialcodec.encode`：字段值 → 字节（枚举 label、逆 `scale/bias`、位写入、
   固定长/变长反算、head/tail/id/length/checksum 自动写）。
@@ -304,13 +332,15 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - 旧 profile 输出形状不变：未启用新特性时不出现 `length_field` / `id_field` / `variants` 键。
 - `tests/test_serialframes.py` 新增 `ValidateEnhanced` / `DecodeEnhanced` / `Encode` / `Templates`。
 
-### 驾驶舱前端
+#### 驾驶舱前端
+
 
 - 帧协议抽屉：模板下拉 + `导入`、草稿预览（无需先保存）、组帧（字段值 → HEX 并填入发送框）、
   预览记录表新增 `ID` 列。
 - 波形通道名只取 `plot` 字段，修复「枚举字段错位标到曲线」；`frames` / `values` 容忍 `null`。
 
-### DSH 插件
+#### DSH 插件
+
 
 - 新增 `elab_frame_profile`（list/get/preview/save/delete/encode/templates/import）；
   Agent 只写声明式 JSON；写操作受 `allowAgentWrite` + `rev` 乐观锁。
@@ -319,15 +349,12 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - HTTP 白名单新增 `serial/frames/templates`、`serial/frames/encode`、`serial/frames/templates/import`；
   `elab_guide` 索引补充三个工具。
 
-### 实机（STM32F103C8T6 / COM10）
+#### 实机（STM32F103C8T6 / COM10）
+
 
 - `examples/STM32F103C8T6/Core/Src/main.c` 每 100ms 发三类帧：位域遥测、
   变长 MAVLink、多 ID 分发；心跳/LED 仍为 1Hz。
 - 新增 `projects/STM32F103C8T6.frames.json` 三份实机 profile；串口教程新增 5.6 节与附录 C。
-
----
-
-## [Unreleased] — 2026-11-04（Provider 工具链架构 P1/P2 · ESP32 实机闭环）
 
 ### 内核：工具链 provider（数据与执行分离）
 
@@ -347,10 +374,63 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   编译 → 烧录 → 烧录校验 → 串口心跳闭环。
 - 新增 `tests/test_provider.py`（manifest、优先级、等价 argv、安装哈希、卡片投影等 32 项）。
 
-### 仓库整理
+#### 仓库整理（Provider 批次）
 
 - 删除误生成的根 `package.json`、遗留 `projects/idf_adapt_probe.yaml.bak` 与未被引用的截图。
 - README、架构文档、ESP32 方案文档同步到 Provider 架构（内联 `tools:` 仅作兜底）。
+
+---
+
+## [DSH 插件 1.0.0] — 2026-11-06（Agent 工具门面化 27→14 · 契约归位 · 兼容层）
+
+`packages/dsh-elab-cockpit` 的大版本（npm 包版本，与内核版本独立）。
+默认下载内核版本同步为 `v4.0.0`。
+
+**破坏性变更**：工具面从 27 个平铺工具收敛为 **14 个混合门面**（6 门面 + 8 细粒度）。
+旧名（`elab_triple` / `elab_frame_profile` / `elab_debug_open` …）默认不再注册；
+需要过渡期时把插件配置 `toolMode: both` 打开，17 个旧名会作为带废弃提示的别名一并注册。
+
+### Agent 工具：27 → 14（混合门面）
+
+
+- **注册面重构**：原来是 27 个 `elab_*` 工具一次性全注册，且**两头失衡**——
+  过度平铺（`serial_read`/`serial_decoded`/`serial_decode`/`serial_wait` 语义重叠，
+  agent 得自己猜该调哪个）与过度聚合（`elab_frame_profile` 一个工具背 12 个动作）。
+  现在按**意图**分门面：**6 门面 + 8 细粒度 = 14 个注册工具**
+  - 门面：`elab_run`（build/triple/loop/step/preview/cancel）· `elab_serial`
+    （monitor/write/decode/decoded/stats/read/wait）· `elab_debug`
+    （open/control/inspect/breakpoint/wait/close）· `elab_frame`
+    （list/get/preview/save/delete/encode/templates/import）· `elab_frame_learn`
+    （learn/verify/auto/codegen）· `elab_pkg`（status…verify/**adapt**）；
+  - 细粒度高频入口：`elab_status` · `elab_guide` · `elab_log` · `elab_serial_read` ·
+    `elab_serial_wait` · `elab_serial_capture` · `elab_serial_widget` · `elab_debug_inspect`。
+- **意图树**：`elab_guide` 正文从扁平清单升级为**两层树**（group → action），
+  每个入口带**同义词**（"烧进去"→ flash）、**前置条件**（写门控 / 串口互斥 / 调试能力探测）
+  与**调用示例**；支持 `topic=overview|run|serial|debug|frame|pkg` 只取一组。
+  常驻系统提示段同步加 5 行分组路由表（仍保持 < 1200 字）。
+- **契约归位 domain**：工具的 name/description/parameters 移到
+  `packages/dsh-elab-cockpit/src/domain/tools.ts`（Tool 概念属 domain，实现属 adapters），
+  `boundary.test.mjs` 新增守卫（适配器不得内联 `name: 'elab_…'`）。
+- **兼容层**：旧名（`elab_triple`/`elab_frame_profile`/`elab_debug_open` …）收进对应门面，
+  迁移表进 `elab_guide`；需要过渡期时把插件配置 `toolMode: both` 打开，
+  17 个旧名会作为带废弃提示的别名一并注册（默认 `facade` 不注册，上下文最省）。
+  旧 `elab_serial(project, data)` 直写形态由新门面的参数推断兼容（action 可省）。
+- **兼容红线不变**：旧 profile 解码结果与保存形状逐字不变；不引第三方依赖；
+  写操作仍受 `allowAgentWrite` + `rev` 乐观锁约束。
+
+### 其它插件侧增量（11-04 ~ 11-06 各批次）
+
+- **帧协议 P0/P1**：新增 `elab_frame_profile`（list/get/preview/save/delete/encode/templates/import）
+  —— 本版已收进 `elab_frame` 门面 + `elab_frame_learn` 门面；`elab_serial_decode` 支持
+  `project` + `profile` 草稿（草稿 apply 需先落盘）；HTTP 白名单新增 `serial/frames/templates`、
+  `serial/frames/encode`、`serial/frames/templates/import`。
+- **串口存量优化**：`elab_frame_profile` 扩展 `learn / verify / auto / codegen`，
+  新增 `elab_serial_stats`，`elab_serial_capture` 支持 `trigger / pre_bytes`；HTTP 白名单同步 5 个端点。
+- **健壮性批次**：新增 `icd-topics.test.mjs` 三例守卫（前端 KNOWN_TOPICS ⊇ 内核集合、
+  插件自包含镜像 `domain/icd.ts` 与共享层逐项一致、topic 命名空间白名单）。
+- **调试错误不再被吞**：HTTP 客户端同时认「`error` 为字符串」与「`error` 为对象」两种形状，
+  `ElabApiError` / `ApiError` 新增 `hint` 与 `status`；面板统一走 `toPanelError()` 保留 `code`+`message`+`hint`。
+- **死代码清扫**：移除 `pendingAdaptations` / `kernelMeta` / `kernelPlanSteps` / `ALL_CHANNELS` 等未引用导出。
 
 ---
 

@@ -257,7 +257,7 @@ open 自增** —— 前端发现它变化必须同时重置"行/字节"两个�
 把解码器写成**会话属性**（`actor=human|agent` 记录谁最后选定；空串 = 关闭）。内核在 RX
 批次入环时增量解码（半帧留到下一批），帧进有界环（1024），
 `GET /api/serial/monitor/decoded?after=N` 按帧序号增量读回（`frames/next_after/gap`，
-`gap` 只报告不抹平）。—— 面板波形页与 agent 的 `elab_serial_decoded` 读的是**同一份帧**，
+`gap` 只报告不抹平）。—— 面板波形页与 agent 的 `elab_serial(action="decoded")` 读的是**同一份帧**，
 所以 agent 选定解码器后，人看到的波形就是它下结论用的数据；`TX` 不参与解码（那是我们
 自己写的命令）。`decode` 投影也随 `GET /api/serial/monitor` 快照返回。
 

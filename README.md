@@ -21,6 +21,12 @@
 
 ---
 
+> **当前版本**：内核 **v4.0.0** · DSH 插件 **1.0.0**
+> v4.0.0 是大版本：引入工具链 Provider 架构、帧协议补强与 **Agent 自学习协议**，
+> 并把 DSH agent 工具面从 27 个平铺工具收敛为 **14 个混合门面**（破坏性变更，
+> 过渡期见 [`toolMode: both`](packages/dsh-elab-cockpit/README.md)）。
+> 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 <a id="position"></a>
 
 ## 项目定位
@@ -53,7 +59,9 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 工具层  packages/dsh-elab-cockpit      面板 / elab_* agent 工具 / 进程托管（可卸载）
    │  唯一缝隙：loopback HTTP ICD（/api/* 命令 + /events SSE）
 业务层  services/elab/** + cockpit/server.py
-   │  编排 / 编译 / 烧录 / 调试 / 串口；STEP_META、KERNEL_PLANS、SERIAL_META 是词汇唯一事实源
+   │  编排 / 编译 / 烧录 / 调试 / 串口
+   │  services/elab/flow.py = 流程清单唯一事实源（STEP_META / KERNEL_PLANS）
+   │  cockpit/server.py = 串口自描述（SERIAL_META：视图/编码/解码器/帧协议 schema）
    │  只读协议：pack.yaml（elab.pkg），不 import 包内文件
 业务层  cockpit/web/**                 零依赖驾驶舱 UI（React 产物已入仓）
 数据层  packs/** + market/index.json   芯片参数 / 厂商指纹 / 平台坑位 / 社区市场索引
@@ -117,14 +125,14 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 </table>
 </div>
 
-- 解码器是**会话属性**：agent 用 `elab_serial_monitor` / `elab_serial_decode` 选定后，面板波形页标「agent 选定」，读的是内核帧环的同一份帧。
+- 解码器是**会话属性**：agent 用 `elab_serial action=monitor op=decoder` / `elab_serial action=decode` 选定后，面板波形页标「agent 选定」，读的是内核帧环的同一份帧。
 - 监视是"看"不是证据：实时流只活环形缓冲；可复核判定走闭环 `monitor`。串口监视与闭环 run **双向 409 互斥**，agent 会话带租约到期自动释放端口。
 
 **帧协议增强（2026-11-05，STM32F103C8T6 实机）**：工程 profile 现在支持**位域**
 （`bit_offset` / `bit_length` / `bit_order`）、**变长切帧**（`frame.length_field`）与
 **多 ID 分发**（`frame.id_field` + `variants`）；`帧协议` 抽屉内置 4 份只读模板
 （遥测 / MAVLink / Modbus RTU / DL/T 645），支持**未保存草稿预览**和**字段值反向组帧**
-（成功后 HEX 直接填入发送框）。Agent 通过 `elab_frame_profile` 只写声明式 JSON，
+（成功后 HEX 直接填入发送框）。Agent 通过 `elab_frame` / `elab_frame_learn` 只写声明式 JSON，
 写操作受 `allowAgentWrite` + `rev` 乐观锁保护。
 
 #### ★ Agent 自学习协议：不认识的格式，抓一段字节就会解
@@ -137,11 +145,11 @@ ELAB-Flow 做的是 **"一套工具链和流程跑不同芯片"**，不是"一�
 | 步骤 | Agent 工具 / 端点 | 真机结果 |
 |---|---|---|
 | 抓包 | `elab_serial_capture`（可**布防**：按字节 pattern / 解码字段 / 第 N 帧触发，带预录） | 命中 `field mv>3350`，45 批次 6.5 KB，命中前的现场一并留证 |
-| **自学** | `elab_frame_profile action=learn`（`capture=<录制文件>`） | 帧头 `5AA5`、定长 10、`crc8_maxim`、id@2 两种取值 → 置信度 **0.99**，回放 **168/168** |
+| **自学** | `elab_frame_learn action=learn`（`capture=<录制文件>`） | 帧头 `5AA5`、定长 10、`crc8_maxim`、id@2 两种取值 → 置信度 **0.99**，回放 **168/168** |
 | 证明可逆 | `action=verify` | 解 → 逐字段重编 → 与线上字节比对 **177/177** 全等 |
 | 自动匹配 | `action=auto`（工程已有 4 个 profile 时挑最像的） | 选中 `profile:f103-private`（0.709），不并列不硬猜 |
 | 生成代码 | `action=codegen` | `generated/f103-private.h`，`gcc -std=c99 -Wall -Werror` 干净编译 |
-| 即刻解码 | `elab_serial_monitor action=decoder` | 直播 **59 帧 / 6 通道**，`ENV`(temp/hum) 与 `VSYS`(mV/mA) 按 id 分发，位标志 `DATA`/`VSYS` 同时给出 |
+| 即刻解码 | `elab_serial action=monitor op=decoder` | 直播 **59 帧 / 6 通道**，`ENV`(temp/hum) 与 `VSYS`(mV/mA) 按 id 分发，位标志 `DATA`/`VSYS` 同时给出 |
 
 `learn` **只产草稿、不写文件**：证据链（"帧头命中几次""校验通过率""哪些片段长度不符被排除"）
 与置信度一起返回，人复核后走 `save` 的 `rev` 乐观锁落盘——学习可证伪，不会偷偷改你的配置。
@@ -337,16 +345,22 @@ HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
 
 #### 在 DSH 界面里用？（可选）
 
-装插件后是另一套入口：右栏 ELAB 面板 + 25 个 `elab_*` 工具（写硬件 / 写盘受 `allowAgentWrite` 门控，默认关）。
+装插件后是另一套入口：右栏 ELAB 面板 + 14 个 `elab_*` 工具（**混合门面**：6 个门面 + 8 个高频细粒度；
+写硬件 / 写盘受 `allowAgentWrite` 门控，默认关）。
 完整调用教程见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)，这里只列工具面：
 
 | 组 | 工具 |
 |---|---|
-| 看 | `elab_status` · `elab_guide`（使用契约）· `elab_preview`（只读 argv）· `elab_log` |
-| 闭环 | `elab_build` · `elab_triple` · `elab_loop` · `elab_step` · `elab_cancel` |
-| 工程与包 | `elab_adapt`（`write=false` 先看只读报告）· `elab_pkg` |
-| 调试 | `elab_debug_open / control / inspect / breakpoint / wait / close` |
-| 串口 | `elab_serial` · `_monitor` · `_read` · `_wait` · `_decode` · `_decoded` · `_capture` · `_widget` · `_frame_profile` |
+| 看 | `elab_status`（现状）· `elab_guide`（意图树 + 旧名迁移表）· `elab_log`（日志） |
+| 闭环 | `elab_run`（`action=build/triple/loop/step/preview/cancel`） |
+| 串口 | `elab_serial`（`action=monitor/write/decode/decoded/stats/read/wait`）· `elab_serial_read` · `elab_serial_wait` · `elab_serial_capture` · `elab_serial_widget` |
+| 调试 | `elab_debug`（`action=open/control/inspect/breakpoint/wait/close`）· `elab_debug_inspect` |
+| 帧协议 | `elab_frame`（`action=list/get/preview/save/delete/encode/templates/import`）· `elab_frame_learn`（`action=learn/verify/auto/codegen`） |
+| 工程与包 | `elab_pkg`（`action=status/search/install/activate/remove/update/verify/adapt`） |
+
+> 旧名（`elab_triple` / `elab_frame_profile` / `elab_debug_open` …）已收进对应门面；
+> 需要过渡期时把插件配置 `toolMode: both` 打开，旧名会作为带废弃提示的别名一并注册。
+> 完整意图树（每个动作的同义词与前置条件）用 `elab_guide` 按 `topic` 取。
 
 <a id="quickstart"></a>
 
@@ -395,7 +409,8 @@ debug:
 
 ```text
 services/elab/**          内核：闭环编排、编译/烧录/调试、串口字节面、OTA、适配包/provider 协议
-cockpit/server.py         内核 HTTP 面 + 自描述（STEP_META / KERNEL_PLANS）
+services/elab/flow.py     流程清单（STEP_META / KERNEL_PLANS）：步骤标签、通道、三档定义的唯一事实源
+cockpit/server.py         内核 HTTP 面 + 串口自描述（SERIAL_META）
 cockpit/web/**            独立驾驶舱 UI（产物已入仓）
 packs/official|installed  芯片适配包（芯片参数/指纹；骨架仓不含芯片；installed/ 不入库）
 providers/official|installed 工具链 provider（声明式命令模板；installed/ 不入库）

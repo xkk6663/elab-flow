@@ -59,8 +59,9 @@ DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页
 - **多 ID**：`frame.id_field` + `variants`，按 id 分发字段，通道取并集、缺失为 `null`。
 
 驾驶舱 `帧协议` 抽屉提供 4 份只读模板、**未保存草稿预览**和**字段值 → HEX 反向组帧**。
-Agent 侧新增 `elab_frame_profile`（list/get/preview/save/delete/encode/templates/import）：
-只写声明式 JSON，写操作需要 `allowAgentWrite` + `rev`。窄栏仍只读选 profile。
+Agent 侧用两个门面：`elab_frame`（list/get/preview/save/delete/encode/templates/import）管 profile，
+`elab_frame_learn`（learn/verify/auto/codegen）走自学习闭环。只写声明式 JSON，
+写操作需要 `allowAgentWrite` + `rev`。窄栏仍只读选 profile。
 
 <img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/serial-frames/02-wave-telemetry.png" width="330" alt="右栏：位域遥测 profile 实时波形">
 
@@ -184,7 +185,7 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 └ 串口工作区：行 | 字节 | 终端 | 波形     （＋ 组件行 ＋ 发送栏）
 ```
 
-- **阶梯灯**来自内核自描述（`cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`），插件只渲染、不写死步骤。
+- **阶梯灯**来自内核自描述（`services/elab/flow.py` 的 `STEP_META` / `KERNEL_PLANS`），插件只渲染、不写死步骤。
 - **RAM / FLASH 占用**是从 elf 里读出的实数，不是估算。
 - 档位不可用的步骤会置灰（例如没有探针时 `onhw` 步骤被剔除），命令视图与面板视图来自同一判定。
 - 一键闭环的每一步都走内核编排；SSE 事件原样透传，断线可用 `id:` 游标续传。
@@ -202,9 +203,9 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 
 | 机制 | 生效范围 | 内容 |
 |---|---|---|
-| `elab_*` 工具注册 | 进程级（所有会话） | 编译 / 烧录 / 调试 / 串口的结构化工具；`autoExposeTools` 默认开 |
+| `elab_*` 工具注册 | 进程级（所有会话） | 编译 / 烧录 / 调试 / 串口的结构化工具；`autoExposeTools` 默认开。**混合门面**：6 门面 + 8 细粒度 = 14 个（`toolMode: facade` 默认；`both` 额外注册旧名别名） |
 | 常驻系统提示段 | 进程级（所有会话） | 插件挂载时注册 `plugin:elab-cockpit`：工具有哪些、推荐顺序、单飞/互斥/写门控/判活纪律 |
-| `elab_guide` 工具 | 按需调用 | 完整工具清单 + 规则 + 面板说明；只读、不启动内核，第一次接手工程或不确定用哪个工具时先调它 |
+| `elab_guide` 工具 | 按需调用 | **意图树**（每个动作带同义词/前置条件/示例）+ 旧名迁移表 + 规则 + 面板说明；只读、不启动内核，第一次接手工程或不确定用哪个工具时先调它 |
 | `.agents/skills` / `AGENTS.md` | 工作区级 | 只留给芯片长尾知识（引脚、坑位、验收清单）与工程约定，不再是必需项 |
 
 > 常驻段依赖宿主挂载 `@deepseek-ai/dsh-system-prompt`；未挂载时插件静默跳过这一层，
@@ -214,18 +215,18 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 
 ```
 你：用 elab 跑三连，把 RAM/FLASH 占用和失败日志给我。
-agent：elab_status（拿工程名）→ elab_triple → elab_log
+agent：elab_status（拿工程名）→ elab_run(action="triple") → elab_log
 ```
 
 | 你想要 | 让 agent 走的顺序 |
 |---|---|
-| 只编译 / 看占用 | `elab_status` → `elab_build` → `elab_log` |
-| 编译 + 烧录 + 调试校验 | `elab_status` → `elab_triple` → `elab_log` |
-| 完整体检 + 串口闭环 | `elab_status` → `elab_loop` → `elab_log` |
-| 看运行日志 / 判活 | `elab_serial_monitor(open)` → `elab_serial_wait`（等 `[alive]`）→ `elab_serial_read` |
-| 解协议帧 / 改 profile / 组帧 | `elab_frame_profile(list)` → `preview`（可传草稿）→ `encode` → `save`（`rev` + `allowAgentWrite`） |
-| 单步 / 断点 / 寄存器 | `elab_debug_open` → `elab_debug_control` → `elab_debug_inspect` → `elab_debug_close` |
-| 接新工程 / 换芯片包 | `elab_adapt`（`write=false` 先探测）→ `elab_pkg(install/activate)` |
+| 只编译 / 看占用 | `elab_status` → `elab_run(action="build")` → `elab_log` |
+| 编译 + 烧录 + 调试校验 | `elab_status` → `elab_run(action="triple")` → `elab_log` |
+| 完整体检 + 串口闭环 | `elab_status` → `elab_run(action="loop")` → `elab_log` |
+| 看运行日志 / 判活 | `elab_serial(action="monitor", op="open")` → `elab_serial_wait`（等 `[alive]`）→ `elab_serial_read` |
+| 解协议帧 / 改 profile / 组帧 | `elab_frame(action="list")` → `preview`（可传草稿）→ `encode` → `save`（`rev` + `allowAgentWrite`） |
+| 单步 / 断点 / 寄存器 | `elab_debug(action="open")` → `action="control"` → `elab_debug_inspect` → `action="close"` |
+| 接新工程 / 换芯片包 | `elab_pkg(action="adapt", write=false)`（先探测）→ `elab_pkg(action="install")` |
 
 ### 三条硬纪律（agent 会从提示段与 `elab_guide` 读到）
 
