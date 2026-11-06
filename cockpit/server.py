@@ -40,6 +40,7 @@ from elab import project_admin as project_admin_mod      # noqa: E402
 from elab import flash as flash_mod                      # noqa: E402
 from elab import debugsession as dbgsess_mod           # noqa: E402
 from elab.plan import plan_for                          # noqa: E402
+from elab.flow import KERNEL_PLANS, STEP_META           # noqa: E402  流程清单（唯一事实源）
 from elab import run as run_mod                      # noqa: E402
 from elab._winproc import adopt as adopt_proc        # noqa: E402
 from elab import provider as provider_mod            # noqa: E402
@@ -78,22 +79,10 @@ DIST_DIR = _HERE / "web" / "dist"
 # ★ 内核自描述（§16 分层解耦）：业务词汇的唯一事实源。
 #   工具层（DSH 插件 / CLI 帮助）只渲染这里的定义，不自带业务名词 ——
 #   内核改名/加步骤/调档位，工具层无需改代码。
-STEP_META = {
-    "doctor":       {"label": "体检",     "channel": "build"},
-    "doctor_deep":  {"label": "深度体检", "channel": "build"},
-    "build":        {"label": "编译",     "channel": "build"},
-    "flash":        {"label": "烧录",     "channel": "flash"},
-    "debug_verify": {"label": "调试校验", "channel": "debug"},
-    "monitor":      {"label": "串口闭环", "channel": "serial"},
-}
-KERNEL_PLANS = [
-    {"id": "basic",  "title": "编译", "steps": ["build"],
-     "requires_hardware": False},
-    {"id": "triple", "title": "三连", "steps": ["build", "flash", "debug_verify"],
-     "requires_hardware": True},
-    {"id": "loop",   "title": "闭环", "steps": ["doctor", "build", "flash", "debug_verify", "monitor"],
-     "requires_hardware": False},
-]
+#   ★ 流程清单（步骤标签 / 通道 / 三档）已挪到 `services/elab/flow.py`：
+#     驾驶舱只是 HTTP 载体，词汇不该挂在载体上（载体可换，词汇不变）。
+#     上面的 import 即本模块的 STEP_META / KERNEL_PLANS —— 保持模块级同名，
+#     免得 `server.STEP_META` 这类既有引用点失效。
 
 #: 串口词汇表（内核自描述，§16 / §4.4）：视图、表示、编码、行尾、解码器。
 #: 工具层与前端**只渲染**这里的清单；新增能力只改内核，别在工具层写死业务名词。

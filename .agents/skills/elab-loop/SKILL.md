@@ -21,18 +21,18 @@ loopback HTTP ICD 与它说话 —— **工具层没有业务逻辑，业务变�
 | 顺序 | 工具 | 用途 |
 |---|---|---|
 | 1 | `elab_status` | 查工程列表 + 每步可用性 + 当前 run 归属（**写操作前先调它拿工程名**） |
-| 2 | `elab_build` / `elab_triple` / `elab_loop` | 发起：只编译 / 编译+烧录+调试 / 完整闭环（缺什么自动剔除并在返回里说明） |
+| 2 | `elab_run(action="build"/"triple"/"loop")` | 发起：只编译 / 编译+烧录+调试 / 完整闭环（缺什么自动剔除并在返回里说明） |
 | 3 | `elab_log` | 读日志尾部 N 行（默认 200，可按步骤过滤）——别让用户去翻终端 |
-| 4 | `elab_cancel` | 取消当前 run（无论谁发起的都能取消） |
+| 4 | `elab_run(action="cancel")` | 取消当前 run（无论谁发起的都能取消） |
 
 规则（违反会被结构化拒绝，如实转告用户）：
 - **单飞**：同一会话同时最多 1 个 run；人工 run 进行中你发起 → `human-busy`
   （等待结束或请用户点「■ 取消」，不要重试刷屏）。
 - **串口互斥**：串口监视会话占用时，含烧录/调试的 run → `serial-busy`
   （先请用户在「串口」通道点「关闭监视」）。
-- **串口写 / 适配写盘**：`elab_serial` / `elab_adapt(write=true)` 需要 `allowAgentWrite`
+- **串口写 / 适配写盘**：`elab_serial(action="write")` / `elab_pkg(action="adapt", write=true)` 需要 `allowAgentWrite`
   （默认关）。被拒时告诉用户怎么开，不要绕路。
-- 工具返回里有 `run` id —— 后续 `elab_log` / `elab_cancel` 用得上，别丢。
+- 工具返回里有 `run` id —— 后续 `elab_log` / `elab_run(action="cancel")` 用得上，别丢。
 
 ### ② CLI（等价语义）
 
@@ -51,8 +51,8 @@ loopback HTTP ICD 与它说话 —— **工具层没有业务逻辑，业务变�
 ## 分层边界（硬规则）
 
 - 业务代码 → `services/elab/**`（内核）、`projects/**`（适配）；
-- 步骤标签 / 加步骤 / 档位定义 → `cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`
-  （内核自描述，工具层自动跟随）；
+- 步骤标签 / 加步骤 / 档位定义 → `services/elab/flow.py` 的 `STEP_META` / `KERNEL_PLANS`
+  （流程清单唯一事实源，芯片无关；驾驶舱只引用不复制，工具层自动跟随）；
 - DSH 插件在本仓 `packages/dsh-elab-cockpit`（工具层）：只有修工具 bug 才碰；
   插件市场与 npm 都直接取 `packages/dsh-elab-cockpit`（无镜像仓 / 分发仓）；
 - 门禁：`packages/dsh-elab-cockpit/test/boundary.test.mjs`。

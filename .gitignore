@@ -19,10 +19,12 @@ packs/installed/
 # 随仓只保留 providers/official/**（官方源）与 market/index.json（索引）
 providers/installed/
 
-# 芯片平台 skill 由 `elab pkg install` / `elab skill` 从适配包生成（骨架不含芯片）。
-# 入库的只有通用 elab-loop skill。
+# 芯片平台 skill 由 `elab pkg install` / `elab skill` 从适配包生成（骨架不含芯片），
+# 入库的只有通用 skill（agent 入口 / 工具索引 / 闭环 / 发版）。
 skills/*/*/SKILL.md
 .agents/skills/*/SKILL.md
+!.agents/skills/elab-agent/SKILL.md
+!.agents/skills/elab-tools/SKILL.md
 !.agents/skills/elab-loop/SKILL.md
 !.agents/skills/elab-release/SKILL.md
 

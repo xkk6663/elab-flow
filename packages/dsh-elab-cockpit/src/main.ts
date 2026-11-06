@@ -60,6 +60,12 @@ export type Config = {
   autoExposeTools?: boolean
   /** 允许 agent 写硬件/写盘（串口、适配落盘；默认 false，§6.2 规则 6）。 */
   allowAgentWrite?: boolean
+  /**
+   * 工具注册面（默认 facade）：
+   *  - facade：只注册 14 个新工具（6 门面 + 8 细粒度）—— 上下文最省；
+   *  - both：额外注册旧名别名（过渡期；别名带废弃提示）。
+   */
+  toolMode?: 'facade' | 'both'
 }
 
 /** 从插件行配置构造内部配置。 */
@@ -68,7 +74,7 @@ export interface ResolvedConfig {
   autoProvision: boolean
   host: Partial<HostRouteConfig>
   discover: Partial<DiscoverConfig>
-  tools: { autoExposeTools: boolean; allowAgentWrite: boolean }
+  tools: { autoExposeTools: boolean; allowAgentWrite: boolean; toolMode: 'facade' | 'both' }
 }
 
 export function resolveConfig(config?: Config): ResolvedConfig {
@@ -96,6 +102,7 @@ export function resolveConfig(config?: Config): ResolvedConfig {
     tools: {
       autoExposeTools: config?.autoExposeTools ?? true,
       allowAgentWrite: config?.allowAgentWrite ?? false,
+      toolMode: config?.toolMode ?? 'facade',
     },
   }
 }
@@ -230,12 +237,16 @@ export function apply(ctx: HostRouteContext, config?: Config, env?: { persistPat
   // ④ P5 工具化：elab_* agent 工具（§6.1，autoExposeTools=true 时注册）
   if (resolved.tools.autoExposeTools && ctx.tools !== undefined) {
     const toolRegister = ctx.tools.register.bind(ctx.tools)
-    registerElabTools((definition: unknown) => toolRegister(definition), {
-      ensureHost: (sessionId?: string) => hostController.ensureHost(sessionId),
-      arbiter,
-      allowAgentWrite: () => resolved.tools.allowAgentWrite,
-      warn: (msg: string) => ctx.logger?.warn?.(msg),
-    })
+    registerElabTools(
+      (definition: unknown) => toolRegister(definition),
+      {
+        ensureHost: (sessionId?: string) => hostController.ensureHost(sessionId),
+        arbiter,
+        allowAgentWrite: () => resolved.tools.allowAgentWrite,
+        warn: (msg: string) => ctx.logger?.warn?.(msg),
+      },
+      resolved.tools.toolMode,
+    )
   }
 
   // ④' 常驻系统提示段：让 agent 在任何工程里都知道 elab_* 工具怎么用

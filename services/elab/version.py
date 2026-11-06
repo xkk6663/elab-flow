@@ -59,7 +59,3 @@ def alloc_build(root: str | Path, proj_name: str) -> int:
     path.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return nxt
 
-
-def peek_build(root: str | Path, proj_name: str) -> int:
-    """只读查询（doctor/展示用，不递增）。"""
-    return int(_load(Path(root)).get(proj_name, 0))

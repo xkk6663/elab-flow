@@ -507,7 +507,7 @@ function snapshotJson(input) {
 }
 
 // src/domain/envpack.ts
-var DEFAULT_KERNEL_VERSION = "3.1.0";
+var DEFAULT_KERNEL_VERSION = "4.0.0";
 
 // src/domain/kernel-meta.ts
 var current = null;

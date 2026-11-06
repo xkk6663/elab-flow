@@ -42,9 +42,6 @@ from .config import Config
 
 #: 写完之后收回显的默认窗口（ms）。理由见模块 docstring。
 DEFAULT_READ_MS = 600
-#: 写出去时附加的行结束符。串口 CLI 普遍认 CR，Windows 终端惯例是 CRLF。
-DEFAULT_EOL = "\r\n"
-
 #: 进程内串行锁：一次只允许一个往返持有串口。
 #: ★ 跨进程的互斥（与 `elab run` 的 monitor 步骤）由 **调用方**负责 —— 本模块不
 #:   认识 run 概念，让它去查 RunManager 是把"传输"和"调度"焊死。

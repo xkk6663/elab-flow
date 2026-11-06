@@ -12,7 +12,8 @@
 | 层 | 路径 | 说明 |
 |---|---|---|
 | **业务层** | `services/elab/**` | elab 内核：闭环编排、烧录、串口、OTA（改功能/修缺陷写这里） |
-| **业务层** | `cockpit/server.py` | 内核 HTTP 面 + **内核自描述**（`STEP_META` / `KERNEL_PLANS`：步骤标签、通道、三档定义的唯一事实源） |
+| **业务层** | `services/elab/flow.py` | **流程清单**（`STEP_META` / `KERNEL_PLANS`：步骤标签、通道、三档定义）的唯一事实源 —— 芯片无关，CLI 与驾驶舱共用 |
+| **业务层** | `cockpit/server.py` | 内核 HTTP 面 + **串口自描述**（`SERIAL_META`：视图/编码/解码器/帧协议 schema） |
 | **业务层** | `projects/**`、`examples/**` | 工程适配与示例 |
 | **数据层（适配包）** | `packs/official/**`、`packs/installed/**` | 芯片参数 / 厂商指纹 / 平台坑位 —— **芯片知识的唯一宿主**；骨架仓不内置任何芯片 |
 | **数据层（工具链 provider）** | `providers/official/**`、`providers/installed/**` | 声明式 `provider.yaml`（命令模板/env/产物/主机前提），**不是可执行插件**；`providers/installed/` 不入库 |
@@ -23,7 +24,9 @@
 ## Agent 边界规则（硬）
 
 1. **业务代码只写业务层**：改闭环行为/步骤/档位/串口 → `services/elab/**`；
-   改步骤标签、加步骤、调三档定义 → `cockpit/server.py` 的 `STEP_META` / `KERNEL_PLANS`（内核自描述，工具层自动跟随，**不要**去改插件的内置默认——那只是内核过旧时的兑底）。
+   改步骤标签、加步骤、调三档定义 → `services/elab/flow.py` 的 `STEP_META` / `KERNEL_PLANS`
+   （流程清单的唯一事实源，芯片无关；驾驶舱只引用不复制，工具层自动跟随，
+   **不要**去改插件的内置默认——那只是内核过旧时的兑底）。
 2. **DSH 插件源码只在本仓** `packages/dsh-elab-cockpit/**`：改面板/工具/进程托管写这里。
    插件市场按子目录安装（`github:xkk6663/elab-flow#path:/packages/dsh-elab-cockpit`），
    npm 也直接从该目录 `npm publish` —— **没有镜像仓 / 分发仓**；插件版本只由

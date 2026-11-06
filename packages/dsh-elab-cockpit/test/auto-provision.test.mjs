@@ -7,11 +7,24 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { createAutoProvisioner } from '../src/app/auto-provision.ts'
 import { DEFAULT_KERNEL_VERSION, findPack } from '../src/domain/envpack.ts'
 
 const item = (ok) => ({ ok })
+
+/**
+ * 读内核仓库当前版本（`cockpit/server.py` 的 `COCKPIT_VERSION`）。
+ * 插件默认下载的内核版本必须与它一致 —— 这里读源码而不是写死版本字面量，
+ * 避免每次内核 bump 都要改测试（改了就会漂移）。
+ */
+function readKernelVersion() {
+  const src = readFileSync(new URL('../../../cockpit/server.py', import.meta.url), 'utf8')
+  const m = src.match(/^COCKPIT_VERSION\s*=\s*["']([^"']+)["']/m)
+  assert.ok(m, 'cockpit/server.py 里找不到 COCKPIT_VERSION')
+  return m[1]
+}
 
 /** 探测结果假值：tools=false 表示四个工具都缺。 */
 function makeEnv({ python = true, tools = true } = {}) {
@@ -79,7 +92,9 @@ function make(opts, provisionerOpts = {}) {
 }
 
 test('默认内核版本可被环境包清单/UI 共用', () => {
-  assert.equal(DEFAULT_KERNEL_VERSION, '3.1.0')
+  // 不写死版本字面量：断言「插件默认下载的内核版本 == 内核仓库当前版本」，
+  // 两者必须同步 bump（写死字面量则每次内核发版都要改测试，必然漂移）。
+  assert.equal(DEFAULT_KERNEL_VERSION, readKernelVersion())
   // 常量与清单无绑定关系（这里只断言它非空且形状合法）
   assert.match(DEFAULT_KERNEL_VERSION, /^[0-9]+\.[0-9]+(\.[0-9]+)?$/)
   // findPack 至少能被调用（导入路径正确）

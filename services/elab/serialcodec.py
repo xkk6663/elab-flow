@@ -20,9 +20,6 @@ from __future__ import annotations
 
 import struct
 
-PROFILE_TYPES = ("u8", "u16", "u24", "u32", "i8", "i16", "i24", "i32",
-                 "f32", "f64", "ascii", "bytes")
-
 #: JustFloat 的帧尾：float(+inf) 的小端字节序。
 JUSTFLOAT_TAIL = b"\x00\x00\x80\x7f"
 

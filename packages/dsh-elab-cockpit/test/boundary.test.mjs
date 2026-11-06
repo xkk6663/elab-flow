@@ -172,3 +172,21 @@ test('分层事实：domain 无 React / node:fs / node:http；adapters 不 impor
     )
   }
 })
+
+test('工具契约归 domain：适配器不得内联 elab_* 工具名（契约 = domain/tools.ts）', () => {
+  // ★ Tool 概念属 domain、实现属 adapters（§4.4）。工具的 name/description/
+  //   parameters 是业务词汇，放在适配器里就是「适配器定义业务」。
+  //   机械判据：适配器里不得出现 `name: 'elab_...'` 字面量 —— 全部走 TOOL_CONTRACTS。
+  for (const f of files.filter((f) => rel(f).startsWith('adapters/'))) {
+    const src = readFileSync(f, 'utf8')
+    for (const m of src.matchAll(/name\s*:\s*['"]elab_[a-z_]+['"]/g)) {
+      assert.equal(m, null, `${rel(f)} 内联了工具名 ${m[0]}（应从 domain/tools.ts 的 TOOL_CONTRACTS 取）`)
+    }
+  }
+  // 契约文件必须在 domain，且列出注册面
+  const contracts = resolve(SRC, 'domain', 'tools.ts')
+  assert.ok(statSync(contracts).isFile(), 'domain/tools.ts 缺失（工具契约无处安放）')
+  const src = readFileSync(contracts, 'utf8')
+  assert.match(src, /export const TOOL_CONTRACTS/, 'domain/tools.ts 必须导出 TOOL_CONTRACTS')
+  assert.match(src, /export const TOOL_GROUPS/, 'domain/tools.ts 必须导出 TOOL_GROUPS（意图树）')
+})

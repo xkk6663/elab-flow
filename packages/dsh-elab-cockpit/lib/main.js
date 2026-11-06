@@ -53,6 +53,7 @@ export function resolveConfig(config) {
         tools: {
             autoExposeTools: config?.autoExposeTools ?? true,
             allowAgentWrite: config?.allowAgentWrite ?? false,
+            toolMode: config?.toolMode ?? 'facade',
         },
     };
 }
@@ -192,7 +193,7 @@ export function apply(ctx, config, env) {
             arbiter,
             allowAgentWrite: () => resolved.tools.allowAgentWrite,
             warn: (msg) => ctx.logger?.warn?.(msg),
-        });
+        }, resolved.tools.toolMode);
     }
     // ④' 常驻系统提示段：让 agent 在任何工程里都知道 elab_* 工具怎么用
     //     （跨工程生效，不依赖 AGENTS.md / .agents/skills；细节走 elab_guide 按需取）
