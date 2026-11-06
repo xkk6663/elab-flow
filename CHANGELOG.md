@@ -431,6 +431,10 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - **调试错误不再被吞**：HTTP 客户端同时认「`error` 为字符串」与「`error` 为对象」两种形状，
   `ElabApiError` / `ApiError` 新增 `hint` 与 `status`；面板统一走 `toPanelError()` 保留 `code`+`message`+`hint`。
 - **死代码清扫**：移除 `pendingAdaptations` / `kernelMeta` / `kernelPlanSteps` / `ALL_CHANNELS` 等未引用导出。
+- **市场展示面更新**：卡片图从 2 张 v3.0.0 时期的旧 UI 换成 4 张 v4.0.0 真机窄栏图
+  （闭环三连 / 串口监视 / 源码级调试 / 波形解码），`screenshots.json` 同步；
+  市场条目中英简介按新能力面重写（多芯、源码级调试、帧协议、自学习）。
+  图经 LANCZOS 缩放 + P256 量化（244 KB → 83 KB），npm 包体积反而从 612.1 kB 降到 562.8 kB。
 
 ---
 

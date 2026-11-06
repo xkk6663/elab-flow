@@ -115,4 +115,5 @@ services/elab/**                                解析（ResolvedToolchain）→
 - 某步骤不可用：看 `/api/projects` 卡片 `steps` 的 `kind/reason`，或 `run --dry-run` 的 `blocked`。
 - provider 报错：`elab provider list` 看 installed/steps，再对照方案 §8 的失败表。
 - 串口收不到/判据 inconclusive：先看 `GET /api/capabilities` 的 `meta.serial`，再用 `elab monitor --caps`。
-- 版本/发布：`elab-release` skill。
+- 版本/发布：`elab-release` skill（版本落点、门禁、tag、npm 发布、**GitHub Release 同步发布**、
+  **插件市场展示面 = 卡片图（`assets/` + `screenshots.json`）+ 中英简介**）。

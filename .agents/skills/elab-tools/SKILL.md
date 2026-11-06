@@ -41,6 +41,7 @@ description: elab-Flow 的 agent 工具索引：按「我要做什么」快速�
 | 版本锁定 | 无 | `elab lock` / `elab lock --check --strict` | 无 |
 | 生成平台 skill | 无 | `elab skill -p P|--chip C|--all` | 无 |
 | 发布 | 无 | 见 `elab-release` | 无 |
+| 市场展示面 | 无（改 `assets/` + `screenshots.json` + 市场条目简介） | 见 `elab-release` §7 | 无 |
 
 `P` = `projects/*.yaml` 的 `name`，别用目录名猜。`S` = 逗号分隔步骤或 `tool:<name>`。
 

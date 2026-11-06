@@ -1,6 +1,6 @@
 ---
 name: elab-release
-description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版与维护流程（单仓单标签）：版本落点、门禁、内核 v* 标签、npm 发布、dsh-market 自动刷新与回滚。触发：用户说要发版 / 版本更新 / 升级版本 / 打 tag / npm publish / 发布插件 / 市场更新 / 维护仓库。
+description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版与维护流程（单仓单标签）：版本落点、门禁、内核 v* 标签、npm 发布、GitHub Release 同步发布、插件市场展示面（截图 + 简介）更新、dsh-market 自动刷新与回滚。触发：用户说要发版 / 版本更新 / 升级版本 / 打 tag / npm publish / 发布插件 / 发 release / 市场更新 / 换市场图 / 改市场简介 / 维护仓库。
 ---
 
 # elab-Flow 版本更新与发布
@@ -32,7 +32,9 @@ description: elab-Flow 主仓与 dsh-elab-cockpit 插件的版本更新、发版
 - 临时文件：`tmp_*.txt`、`tmp_*` 配置、根目录调试脚本。
 - 缓存：`__pycache__/`、`.pytest_cache/`、构建中间物（`.work/` 不入库）。
 - 未引用截图：`git grep --fixed-strings <文件名>` 计数为 0 且不在 `screenshots.json` 的才删。
+  —— 反过来也成立：`screenshots.json` 里列了但 `assets/` 里没有 = 市场展示图裂了，发版前必查。
 - 确认构建产物归属：`cockpit/web/dist/**` 与插件 `lib/**` 是**入库产物**，改源码后必须重建。
+- 市场展示图与简介：见 §7（换图 = 改 `assets/` + 改 `screenshots.json` + 改市场条目简介）。
 
 ## 3. 门禁（缺一不可）
 
@@ -85,14 +87,22 @@ git push origin v3.0.0        # ② 绿了再推 tag
 
 ## 5. 网络与代理（GitHub 推送）
 
-- 本机系统代理常为 `127.0.0.1:7890`（Clash mixed，HTTP/SOCKS 都收）。git 不读系统代理，
-  需要显式给：
-  ```powershell
-  git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main
+- **代理端口会变，每次先探测再推**，不要沿用文档里的旧端口：
+  ```bash
+  for p in 4507 7890 7891 10809; do
+    timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$p" 2>/dev/null && echo "$p OPEN" || echo "$p closed"
+  done
+  ```
+  本机历史端口：`7890`（Clash mixed）、`7891`、`4507`（环境变量口）。**以实测为准**。
+- git 不读系统代理，需要显式给：
+  ```bash
+  git -c http.proxy=http://127.0.0.1:<探测到的端口> -c https.proxy=http://127.0.0.1:<端口> push origin main
   ```
 - 节点抖动时会报 `schannel: failed to receive handshake` 或 `unexpected eof` —— **重试 1–2 次**
   通常就好；持续失败再换节点，不要误判为凭据问题。
-- 无代理时 `api.github.com` 常不可达；`npm publish` 可直连，不用代理。
+- **代理全关时**：`api.github.com` / `github.com` 不可达，但 `registry.npmjs.org` 通常直连可用。
+  此时**只做本地改动**（版本号 + 物料 + 提交），push / publish / release 全部等指令；
+  别反复重试网络（见 §8.3 与 §11 纪律）。
 
 ## 6. npm 发布
 
@@ -119,7 +129,115 @@ npm publish                         # 默认 latest
   `packages/dsh-elab-cockpit/docs/dsh-market-submission/`。
 - 截图来源：插件根 `screenshots.json`（路径相对包根），新图必须同时进 `assets/`。
 
-## 8. 发布后核对
+### 7.1 展示面 = 图 + 简介，两样必须一起更新
+
+市场条目拆成两块，**由不同来源提供**，只改一块会露馅：
+
+| 展示位 | 来源 | 改法 |
+|---|---|---|
+| 卡片图（多张轮播） | 插件根 `screenshots.json` → `assets/*.png` | 换图 + 改 `screenshots.json` 清单 |
+| 卡片简介（中英） | 市场条目 yml 的 `description.en` / `description.zh` | 改 yml（备份在本仓 `docs/dsh-market-submission/`） |
+
+**换图时两处都要动**：`screenshots.json` 是清单（决定展示哪几张、什么顺序），
+`assets/` 是图本体。只加图不改清单 = 新图不展示；只改清单不换图 = 展示的还是旧 UI。
+
+图的选择标准：**必须是当前 UI 的真机窄栏截图**，且覆盖版本的核心能力面。
+不要用 WebUI 宽屏图（那是独立 WebUI，DSH 插件展示的是窄栏）。
+
+**压缩配方**（市场图进 npm 包，别把包撑大）：
+
+```python
+from PIL import Image
+im = Image.open(src).convert('RGB')
+r = im.resize((900, round(im.height * 900 / im.width)), Image.LANCZOS)   # 统一宽 900
+r.quantize(colors=256, method=Image.FASTOCTREE,
+           dither=Image.FLOYDSTEINBERG).save(dst, optimize=True)          # P256 量化
+```
+
+- LANCZOS 缩放 + 256 色调色板量化：244 KB → 83 KB，肉眼无色带、文字仍清晰。
+- **量化后必须目视复查**（看整图 + 裁一块放大看文字），别只看文件大小。
+- `ffmpeg` 能用但压 PNG 收益差（只做 `scale` 反而变大），优先 Pillow。
+
+**流程**：
+
+1. 从 `docs/tutorials/assets/dsh/`（DSH 窄栏）与 `docs/tutorials/assets/wave/`（窄栏波形）
+   挑真机图；`webui/` / `serial-frames/` 是独立 WebUI，**不要**用于插件市场。
+2. 按上式压缩，落到 `packages/dsh-elab-cockpit/assets/<语义名>.png`。
+   命名用语义（`dsh-closed-loop.png` / `dsh-serial-monitor.png` / `dsh-debug-source.png` /
+   `dsh-serial-wave.png`），不要用序号 —— 删图后序号会错位。
+3. 改 `screenshots.json` 清单（顺序 = 展示顺序，第一张是封面）。
+4. 改市场条目 yml 的 `description.en` / `description.zh`（本仓备份文件里改）。
+5. `npm pack --dry-run` 核对包体积；`JSON.parse` 校验 json 合法。
+6. 提交后推 main → 探针次日刷新；**简介变化要另提 awesome-dsh-plugin 的 PR**
+   （展示信息不走探针刷新）。
+
+### 7.2 什么时候必须提市场 PR
+
+| 变化 | 走探针（推 main 即可） | 要提 PR |
+|---|---|---|
+| 版本号 / 下载量 | ✅ | |
+| 卡片图（`screenshots.json` + `assets/`） | ✅ | |
+| 简介 / 分类 / 名字 | | ✅ |
+
+提 PR 前确认备份 yml 与目标一致（`packages/dsh-elab-cockpit/docs/dsh-market-submission/`）。
+
+## 8. 主仓 GitHub Release（同步发布）
+
+内核发版（打 `vX.Y.Z` tag）时，**GitHub Release 与 tag 一起发**，否则 tag 只是个指针，
+用户点进去没有说明。插件单独发版**不发**主仓 Release。
+
+### 8.1 Release 正文放仓库里，不临时现编
+
+正文文件：**`docs/releases/vX.Y.Z.md`**（如 [v4.0.0.md](file:///c:/Users/xiao1/Desktop/ELAB/dsh-elab-flow/docs/releases/v4.0.0.md)），
+入库、跟着版本走、可回溯。发布时直接把它当 body。
+
+正文按这五块写（现成范例见 `docs/releases/v4.0.0.md`）：
+
+1. **这是什么** —— 一句话定位 + 本版是主仓大版本还是插件版；
+2. **本版要点** —— 按能力面分节，每节 3–6 条，动词开头（"新增…/支持…/迁移为…"），
+   写**做了什么**而不是改了哪个文件；
+3. **安装** —— 可直接复制的命令（npm / git clone / bootstrap）；
+4. **升级注意** —— 破坏性变更、兼容下限、迁移提示（用户最需要的一段，别省）；
+5. **验证状态** —— 门禁结果表 + 实机验证过的机型。
+
+插件侧变更合并成正文里的一节（标注 `DSH 插件 x.y.z`），
+**不要**在主仓 Release 里贴插件的完整 CHANGELOG 条目。
+
+### 8.2 发布顺序
+
+```bash
+git push origin main                                  # ① 先推 main
+# ② 等 CI 绿（badge: .../plugin.yml/badge.svg?branch=main&cb=<随机数>）
+git tag -a v4.0.0 -m "elab-Flow v4.0.0"              # ③ 绿了再打 tag
+git push origin v4.0.0                               # ④ 推 tag
+gh release create v4.0.0 --title "elab-Flow v4.0.0" \
+  --notes-file docs/releases/v4.0.0.md                # ⑤ 发 Release（挂在已有 tag 上）
+```
+
+- **顺序不变**：先 main、再 tag、最后 Release。反过来会让 tag 自带红灯。
+- Release 必须**挂在已推送的 tag 上**（`gh release create vX.Y.Z`），不要让 GitHub 自动新建 tag ——
+  自动建的 tag 可能指向错误的提交。
+- 用 `--notes-file` 而不是 `--notes`（正文长，命令行转义容易出错）。
+
+### 8.3 没有 gh CLI / 网络不通时
+
+本机**无 `gh` CLI**，且 GitHub 网页与 `api.github.com` 在直连下常不可达（需代理）。
+这种情况**只备料不发布**：把 `docs/releases/vX.Y.Z.md` 写好入库、tag 打本地，
+等网络可用再执行 §8.2 的 ③④⑤ 步。**不要**为了发 Release 去动远端的其它状态。
+
+发 Release 属于**发布动作**，不是「改文件」——用户说「先不推送」时，
+只做到「物料备好 + tag 打本地」为止，push / publish / release 一律等明确指令。
+
+### 8.4 发布后核对（Release 专属）
+
+| 项 | 怎么查 |
+|---|---|
+| tag 存在且指向正确提交 | `git ls-remote --tags origin v4.0.0`（`^{}` 行才是提交） |
+| Release 存在 | `https://github.com/xkk6663/elab-flow/releases/tag/v4.0.0` |
+| Release 正文对得上 | 打开页面看首屏与「安装」段 |
+| 市场卡片图已换 | `https://awesome-dsh-plugin.com/p/xkk6663/elab-flow--packages-dsh-elab-cockpit/`（探针有延迟；简介要等 PR 合） |
+
+## 9. 发布后核对
 
 | 项 | 命令 / 来源 |
 |---|---|
@@ -132,16 +250,19 @@ npm publish                         # 默认 latest
 - **GitHub REST API 未认证时限流（60 次/小时，共享出口 IP 很容易 403）**：核对优先用
   badge，查 `actions/runs` 留给需要查看失败日志时。
 
-## 9. 回滚
+## 10. 回滚
 
 - 主仓：`git revert <commit>`；若内核版本已对外发布，再打新的 `v*` tag。**不要**强推 main。
 - npm：只能发更高版本修，或用 `dist-tag` 把 `latest` 指回旧版本。
 - 插件降级：用户侧固定旧版本安装；内核 `COCKPIT_VERSION` 与插件 `MIN_KERNEL_VERSION`
   决定兼容提示。
 
-## 10. 纪律
+## 11. 纪律
 
 - 业务层（`services/elab/**`、`cockpit/server.py`）与工具层（`packages/dsh-elab-cockpit/**`）
   不跨层 import；插件只走 loopback HTTP ICD。
 - 芯片知识只写 `packs/**`；改包后 `elab pkg index` 重生成 `market/index.json`。
 - 改 `cockpit/server.py` 后，本仓与用户的 elab 工作检出**两份都要同步**。
+- **发版是发布，改文件是改文件**：用户说「先不推送 / 代理没开」时，只做到
+  「版本号落地 + 物料备好 + 本地提交」，`push` / `npm publish` / `gh release create`
+  一律等明确指令（见 §8.3）。
