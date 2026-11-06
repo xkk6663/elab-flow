@@ -40,7 +40,7 @@ DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页
 
 ### 串口心跳：判活两条硬指标
 
-`▶ 串口` 自动选口 @115200：相邻 `[alive]` 间隔 ≈ 1.000 s、每次 `toggles` 严格 +2（与板载 LED 同一时基）。
+`▶ 串口` 自动选口@115200：相邻 `[alive]` 间隔 ≈ 1.000 s、每次 `toggles` 严格 +2（与板载 LED 同一时基）。
 运行中按钮变 **`■ 关闭监视`**，再点即关闭并释放串口。判定纪律（C36）：agent 只凭串口计数判活，
 「LED 均匀闪烁」必须由人肉眼确认。
 
@@ -336,7 +336,7 @@ agent 读的 `elab_status` / `elab_log` / 调试会话与面板显示的是**同
 
 - 硬件：STM32F103C8T6（64 KB Flash / 20 KB RAM）+ CMSIS-DAP 探针 + COM10，工程 `STM32F103C8T6`
 - 闭环：`doctor` → `build --clean` → `flash`（Verified OK）→ `monitor` 判 **ok**
-- 串口：`auto` 选口 @115200；复位后打印 `[log] HAL init / clock / GPIO / DMA / UART1 / main loop`，
+- 串口：`auto` 选口@115200；复位后打印 `[log] HAL init / clock / GPIO / DMA / UART1 / main loop`，
   主循环每秒 `[alive] test tick=…` 心跳；串口日志能直接看出程序跑到哪一步
 - 收发：`PING` → `[cmd] PING -> PONG`；`STAT` 返回 `stage=main_loop` / tick / cmds / rx 字节；
   `ECHO hello-elab` 原样回显——TX → 设备 → RX 全链路验证
@@ -350,7 +350,7 @@ agent 读的 `elab_status` / `elab_log` / 调试会话与面板显示的是**同
 ### 既有验证（2026-11-02，STM32F411CEU6 波形）
 
 - 硬件：STM32F411CEU6（512 KB Flash / 128 KB RAM）+ CMSIS-DAP 探针 + COM10，工程 `f411`
-- 串口：`auto` 选口 @115200；FireWater 两通道正弦 + 每秒 `[alive] tick=…` 心跳
+- 串口：`auto` 选口@115200；FireWater 两通道正弦 + 每秒 `[alive] tick=…` 心跳
 - 波形：`1024 帧（显示）· 共 4773 帧 · 2 通道 · 跳过 58`（「跳过」正是心跳等非数字行）
 - 组件（历史，M2 时期的面板 UI）：`PING 周期（100ms）` 实测 `运行中 · 第 35 轮 · 280 B`，板子回 `PONG:7`；
   暂停 → `已暂停 · 第 50 轮 · 400 B`；停止 → `已停止 · 400 B`

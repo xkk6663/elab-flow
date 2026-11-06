@@ -316,7 +316,7 @@ if (HAL_GetTick() - last_tick >= LED_HALF_PERIOD_MS) {
 }
 ```
 
-实测日志（复位后 8 秒，`COM10 @115200`）：
+实测日志（复位后 8 秒，`COM10@115200`）：
 
 ```text
 [alive] test tick=0 cmds=0 led=1Hz toggles=2  stage=main_loop

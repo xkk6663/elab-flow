@@ -267,7 +267,7 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   6 → **7** 个门面）；插件 `README.md` 新增「2026-11-06 新增：Modbus RTU 主站」小节（两张 DSH 实拍）、
   `elab_*` 数量表述与「一句话使唤它」表同步。
 
-#### 实机验收（F411 + DAPLink CDC @115200）
+#### 实机验收（F411 + DAPLink CDC@115200）
 
 - 100 次 FC03：**ok=100 fail=0**，RTT p50 90.8ms / p95 92.4ms / max 93.4ms。
 - 稳定性：100 次 ×4 轮 + 300 次连读 = **700 次事务 0 失败**；`overrun` / `drop` / `tx_drop` 全程 0
