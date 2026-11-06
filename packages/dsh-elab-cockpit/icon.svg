@@ -1,10 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="elab cockpit">
-  <rect x="6" y="8" width="52" height="48" rx="7" fill="none" stroke="#2478c8" stroke-width="4"/>
-  <path d="M6 20h52" stroke="#2478c8" stroke-width="4"/>
-  <circle cx="14" cy="14" r="2.4" fill="#2478c8"/>
-  <circle cx="22" cy="14" r="2.4" fill="#2478c8"/>
-  <path d="M16 30h20" stroke="#2478c8" stroke-width="3.5" stroke-linecap="round"/>
-  <path d="M16 38h14" stroke="#9cc3e6" stroke-width="3.5" stroke-linecap="round"/>
-  <path d="M16 46h24" stroke="#9cc3e6" stroke-width="3.5" stroke-linecap="round"/>
-  <circle cx="46" cy="30" r="4" fill="#3fa45b"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="elab cockpit">
+  <!-- 驾驶舱图标（与仓库根 cockpit.ico 同源）：
+       暗底圆角方块 #17202E + 绿色脉搏线 #34D399。
+       几何由 cockpit.ico 的 48px 帧逐像素拟合得来（圆角半径 12 / 线宽 5.5），
+       矢量重绘以便任意尺寸清晰。改这里要同步改仓库根的 cockpit.ico。 -->
+  <rect x="0" y="0" width="48" height="48" rx="12" fill="#17202e"/>
+  <path d="M4.5 21 H17.75 L21.25 34 L24 9.25 L27 21.5 H32 L34.5 25.75 L37 20.5 H43.25"
+        fill="none" stroke="#34d399" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

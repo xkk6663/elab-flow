@@ -187,6 +187,28 @@ r.quantize(colors=256, method=Image.FASTOCTREE,
 | 卡片图（`screenshots.json` + `assets/`） | ✅ | |
 | 简介 / 分类 / 名字 | | ✅ |
 
+### 7.3 三个「图标」位，别搞混
+
+| 名称 | 是什么 | 在哪 | 改它会影响谁 |
+|---|---|---|---|
+| **卡片图 / 封面** | 市场卡片里轮播的界面截图 | `screenshots.json` + `assets/*.png` | awesome-dsh-plugin 站点、DSH 插件市场详情页 |
+| **插件头像** | 包的小图标 | `packages/dsh-elab-cockpit/icon.svg`（`package.json#icon`） | npm registry 包页、DSH 宿主插件列表 |
+| **入口卡图标** | DSH 右栏「开始」页那张卡的图形 | `scripts/build-client.mjs` 里的 `guide.icon` | 仅 DSH 宿主内 |
+
+三条容易踩的事实：
+
+1. **市场站的卡片不渲染头像** —— `build-site.mjs` 的 `buildRows()` / `catalogPayload()`
+   只输出文字与统计（name / owner / stars / downloads / cat），没有 `icon` /
+   `logo` / `avatar` 字段。所以「市场展示页的头像」这个说法本身不成立，
+   市场站上根本没有头像位。
+2. **插件头像 = `package.json#icon` → `icon.svg`**，宿主通过 `exports["./icon"]`
+   取它，npm registry 展示它。它与市场条目 yml 无关，与 `screenshots.json` 也无关。
+3. **头像必须与驾驶舱图标同源** —— 驾驶舱的桌面图标是仓库根 `cockpit.ico`
+   （暗底圆角方块 `#17202e` + 绿色脉搏线 `#34d399`）。插件头像用同一套造型，
+   不能自绘成别的样子。`cockpit.ico` 只有 16/32/48 三帧，所以 `icon.svg` 是
+   **按其 48px 帧逐像素拟合后矢量重绘**的（圆角半径 12 / 线宽 5.5），
+   改一边要同步另一边。
+
 提 PR 前确认备份 yml 与目标一致（`packages/dsh-elab-cockpit/docs/dsh-market-submission/`）。
 
 ## 8. 主仓 GitHub Release（同步发布）

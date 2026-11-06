@@ -438,6 +438,14 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - **市场封面**：新增 `assets/dsh-full-window.png`（DSH 全窗口：宿主导航 + 对话区 +
   右侧 ELAB 面板整栏）并置 `screenshots.json` 首位 —— 访客先看到插件在宿主里的
   完整形态，再看窄栏细节。压缩宽度用 1200（信息密度高于窄栏特写），77 KB。
+- **插件头像换成驾驶舱图标**：`packages/dsh-elab-cockpit/icon.svg` 原本是自绘的
+  「蓝色浏览器窗口」造型，与驾驶舱桌面图标（仓库根 `cockpit.ico`，暗底绿脉搏）
+  毫无关系。现在按 `cockpit.ico` 的 48px 帧**逐像素拟合**重建为矢量：
+  暗底圆角方块 `#17202e` + 绿色脉搏线 `#34d399`（圆角半径 12 / 线宽 5.5）。
+  与原 ico 光栅化对比平均每通道误差 1.88/255，16/32/128px 下均清晰可辨。
+  矢量重绘是为了任意尺寸不失真（ico 只有 16/32/48 三帧）。
+  注：awesome-dsh-plugin 市场站的插件卡片**不渲染头像**（纯文字 + 统计），
+  所以头像的唯一消费方是 npm registry 与 DSH 宿主（读 `package.json#icon`）。
 
 ---
 
