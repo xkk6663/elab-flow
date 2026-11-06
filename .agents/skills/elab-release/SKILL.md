@@ -144,17 +144,25 @@ npm publish                         # 默认 latest
 图的选择标准：**必须是当前 UI 的真机窄栏截图**，且覆盖版本的核心能力面。
 不要用 WebUI 宽屏图（那是独立 WebUI，DSH 插件展示的是窄栏）。
 
+**封面图（清单第一张）用「DSH 全窗口」图**：包含宿主左侧导航 + 中间对话区 +
+右侧 ELAB 面板整栏（编译/烧录/调试校验/串口四个 tab 都在画面里），
+让访客一眼看到「插件长什么样、装进 DSH 是什么效果」。
+窄栏细节图排在后面。素材：`docs/tutorials/assets/dsh/01-auto-probe-full.png`
+（主仓 README 与插件 README 已用同一张，三处保持一致）。
+
 **压缩配方**（市场图进 npm 包，别把包撑大）：
 
 ```python
 from PIL import Image
 im = Image.open(src).convert('RGB')
-r = im.resize((900, round(im.height * 900 / im.width)), Image.LANCZOS)   # 统一宽 900
+w = 1200 if 'full-window' in dst else 900      # 封面全窗口图信息密度高，用 1200
+r = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS)
 r.quantize(colors=256, method=Image.FASTOCTREE,
            dither=Image.FLOYDSTEINBERG).save(dst, optimize=True)          # P256 量化
 ```
 
 - LANCZOS 缩放 + 256 色调色板量化：244 KB → 83 KB，肉眼无色带、文字仍清晰。
+- 宽度按信息密度定：窄栏特写 900，全窗口封面 1200（2559 → 1200 宽仍 77 KB）。
 - **量化后必须目视复查**（看整图 + 裁一块放大看文字），别只看文件大小。
 - `ffmpeg` 能用但压 PNG 收益差（只做 `scale` 反而变大），优先 Pillow。
 
@@ -163,9 +171,9 @@ r.quantize(colors=256, method=Image.FASTOCTREE,
 1. 从 `docs/tutorials/assets/dsh/`（DSH 窄栏）与 `docs/tutorials/assets/wave/`（窄栏波形）
    挑真机图；`webui/` / `serial-frames/` 是独立 WebUI，**不要**用于插件市场。
 2. 按上式压缩，落到 `packages/dsh-elab-cockpit/assets/<语义名>.png`。
-   命名用语义（`dsh-closed-loop.png` / `dsh-serial-monitor.png` / `dsh-debug-source.png` /
-   `dsh-serial-wave.png`），不要用序号 —— 删图后序号会错位。
-3. 改 `screenshots.json` 清单（顺序 = 展示顺序，第一张是封面）。
+   命名用语义（`dsh-full-window.png` / `dsh-closed-loop.png` / `dsh-serial-monitor.png` /
+   `dsh-debug-source.png` / `dsh-serial-wave.png`），不要用序号 —— 删图后序号会错位。
+3. 改 `screenshots.json` 清单（顺序 = 展示顺序，**第一张是封面，放全窗口图**）。
 4. 改市场条目 yml 的 `description.en` / `description.zh`（本仓备份文件里改）。
 5. `npm pack --dry-run` 核对包体积；`JSON.parse` 校验 json 合法。
 6. 提交后推 main → 探针次日刷新；**简介变化要另提 awesome-dsh-plugin 的 PR**

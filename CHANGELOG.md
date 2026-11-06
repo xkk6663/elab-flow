@@ -435,6 +435,9 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   （闭环三连 / 串口监视 / 源码级调试 / 波形解码），`screenshots.json` 同步；
   市场条目中英简介按新能力面重写（多芯、源码级调试、帧协议、自学习）。
   图经 LANCZOS 缩放 + P256 量化（244 KB → 83 KB），npm 包体积反而从 612.1 kB 降到 562.8 kB。
+- **市场封面**：新增 `assets/dsh-full-window.png`（DSH 全窗口：宿主导航 + 对话区 +
+  右侧 ELAB 面板整栏）并置 `screenshots.json` 首位 —— 访客先看到插件在宿主里的
+  完整形态，再看窄栏细节。压缩宽度用 1200（信息密度高于窄栏特写），77 KB。
 
 ---
 
