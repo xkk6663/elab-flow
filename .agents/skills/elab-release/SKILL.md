@@ -104,6 +104,41 @@ git push origin v3.0.0        # ② 绿了再推 tag
   此时**只做本地改动**（版本号 + 物料 + 提交），push / publish / release 全部等指令；
   别反复重试网络（见 §8.3 与 §11 纪律）。
 
+### 5.1 git 传输整条断掉时：走 Git Data API
+
+**判据：`api.github.com` 通、`github.com` 的 git 端点不通。** 2026-11-06 实测（三个出口一致）：
+
+| 出口 | `api.github.com` | `github.com/<repo>.git/info/refs` |
+|---|---|---|
+| `7891`（Clash mixed） | 200 | 超时 |
+| `7890` | 403 | 立刻失败 |
+| `2111`（宿主代理） | 200 | 超时 |
+
+此时两条 git 通道都会失败，且**换 SSL 后端无效**（说明是传输层被切断，不是 TLS 库问题）：
+
+- HTTPS：`schannel: failed to receive handshake` → 加 `-c http.sslBackend=openssl` 变成
+  `TLS connect error: unexpected eof while reading`；
+- SSH：`ssh -T git@github.com`（config 已映射到 `ssh.github.com:443`）报
+  `Connection timed out during banner exchange`。
+
+**做法**：用脚本逐提交重放，保留完整历史与提交说明：
+
+```bash
+python .agents/skills/elab-release/gh_api_push.py --dry-run   # 先看计划与体积
+python .agents/skills/elab-release/gh_api_push.py             # blob → tree → commit → PATCH ref
+```
+
+- 只上传每个提交**相对父提交的变化**（`base_tree` 叠加），34 MiB / 598 blob 实测约 4 分钟。
+- PAT 从 Windows 凭据管理器取（`git credential fill`），无需交互。
+- **重建的 commit 对象与本地不等价**：GitHub 把 author/committer 时间规范成 UTC `Z`，
+  本地是 `+08:00`；穷举 `encoding` / message 尾换行 / 时间格式都复刻不出同一 sha。
+  → 推送后**远端 main 的 sha 与本地不同，但 tree 逐字节相同**，两条历史平行。
+- 脚本用「本地哪个提交的 tree == 远端 main 的 tree」自动推断已推基线，所以下次继续
+  正常 `git commit` 后直接再跑它即可；不要试图用 `git push` 追平（会非快进）。
+- 发 tag / Release 同样走 API（`POST /git/tags` → `POST /git/refs` → `POST /releases`），
+  tag 必须指向**远端** commit sha。
+- 发布后核对用 `GET /repos/.../git/commits/<sha>` 比对 tree，而不是比对 commit sha。
+
 ## 6. npm 发布
 
 ```powershell
@@ -291,12 +326,23 @@ gh release create v4.0.0 --title "elab-Flow v4.0.0" \
 
 ### 8.3 没有 gh CLI / 网络不通时
 
-本机**无 `gh` CLI**，且 GitHub 网页与 `api.github.com` 在直连下常不可达（需代理）。
-这种情况**只备料不发布**：把 `docs/releases/vX.Y.Z.md` 写好入库、tag 打本地，
-等网络可用再执行 §8.2 的 ③④⑤ 步。**不要**为了发 Release 去动远端的其它状态。
+本机**无 `gh` CLI**，GitHub 网页在直连下不可达，`api.github.com` 需走代理。
+因此 ③④⑤ 三步实际都用 REST API 完成（等效命令见 §5.1）：
+
+| 步骤 | API |
+|---|---|
+| 推 tag | `POST /git/tags`（annotated，`object` = 远端 commit sha）→ `POST /git/refs` |
+| 发 Release | `POST /releases`（`body` 直接读 `docs/releases/vX.Y.Z.md`） |
+
+若 `api.github.com` 也不可达，则**只备料不发布**：把 `docs/releases/vX.Y.Z.md` 写好入库、
+tag 打本地，等网络可用再推送。**不要**为了发 Release 去动远端的其它状态。
 
 发 Release 属于**发布动作**，不是「改文件」——用户说「先不推送」时，
 只做到「物料备好 + tag 打本地」为止，push / publish / release 一律等明确指令。
+
+> 本轮（v4.0.0）实测：`npm publish` 走 `registry.npmjs.org` 直连可用，
+> 且发布后 **registry 有 1–2 分钟传播延迟** —— 立刻 `npm view` 会看不到新版本，
+> 别误判为发布失败；轮询 `GET https://registry.npmjs.org/<pkg>` 的 `dist-tags` 确认。
 
 ### 8.4 发布后核对（Release 专属）
 
