@@ -110,6 +110,11 @@ def _win32():
         k32.EscapeCommFunction.restype = wintypes.BOOL
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
         k32.CloseHandle.restype = wintypes.BOOL
+        # 查"已到货多少字节"（SerialIO.in_waiting 的 ctypes 实现）。
+        # COMSTAT 的第一个字段是一整块位域（1 个 DWORD），按 DWORD 传即可 ——
+        # 我们只读 cbInQue，位域内容不看。
+        k32.ClearCommError.argtypes = [wintypes.HANDLE, wintypes.LPDWORD, wintypes.LPVOID]
+        k32.ClearCommError.restype = wintypes.BOOL
 
         import winreg
         return (ctypes, wintypes, k32, winreg), None
@@ -669,6 +674,44 @@ class SerialIO:
         k32.PurgeComm(h, 0x0008 | 0x0004)   # PURGE_TXCLEAR | PURGE_RXCLEAR
         self._h = h
         self.backend = "ctypes"
+
+    @property
+    def in_waiting(self) -> int | None:
+        """内核里**已经到货**多少字节；``None`` = 这个后端问不出来。
+
+        ★ 为什么需要它（实测 298ms → 40ms）：pyserial 的 ``read(n)`` 语义是
+          "凑够 n 个字节或超时"，不是"有多少给多少"。读线程用 ``read(4096)``
+          时，一帧 11 字节的回包必须**再等满 200ms 超时**才返回 —— 在 Modbus
+          这种"一问一答、下一问要等上一答"的协议里，那就是每条事务 +200ms。
+          有了这个数，读线程可以"先问有多少，再按数读"，回包到手即返回。
+        """
+        ser = self._ser
+        if ser is not None:
+            try:
+                return int(getattr(ser, "in_waiting", 0) or 0)
+            except Exception:            # noqa: BLE001 —— 问不出来就当没有这能力
+                return None
+        if self._h is None:
+            return None
+        # ctypes 后端：ClearCommError 顺手带回 COMSTAT.cbInQue（输入队列字节数）。
+        # 不查它的话，ReadFile 会在**收到 11 字节后继续等满 200ms** 超时：
+        # 一问一答的协议为此每次都白等一个读超时。
+        import ctypes
+        from ctypes import wintypes
+        env, _e = _win32()
+        if env is None:
+            return None
+        _ctypes, _wintypes, k32, _winreg = env
+
+        class _COMSTAT(ctypes.Structure):
+            _fields_ = [("flags", wintypes.DWORD), ("cbInQue", wintypes.DWORD),
+                        ("cbOutQue", wintypes.DWORD)]
+
+        stat = _COMSTAT()
+        errs = wintypes.DWORD(0)
+        if not k32.ClearCommError(self._h, ctypes.byref(errs), ctypes.byref(stat)):
+            return None
+        return int(stat.cbInQue)
 
     def read(self, n: int = 4096) -> bytes:
         if self._ser is not None:

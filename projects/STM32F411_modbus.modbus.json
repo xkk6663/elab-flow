@@ -1,0 +1,313 @@
+{
+  "rev": 0,
+  "unit_id": 1,
+  "timeout_ms": 200,
+  "retries": 2,
+  "points": [
+    {
+      "name": "device_id",
+      "fc": 3,
+      "address": 0,
+      "type": "u16",
+      "note": "0x0411 = STM32F411"
+    },
+    {
+      "name": "fw_version",
+      "fc": 3,
+      "address": 1,
+      "type": "u16",
+      "note": "0x0100 = v1.0"
+    },
+    {
+      "name": "tick",
+      "fc": 3,
+      "address": 2,
+      "type": "u16",
+      "unit": "s",
+      "plot": true,
+      "note": "心跳秒计数，每秒 +1"
+    },
+    {
+      "name": "toggles",
+      "fc": 3,
+      "address": 3,
+      "type": "u16",
+      "plot": true,
+      "note": "LED 翻转次数，每秒 +2"
+    },
+    {
+      "name": "stage",
+      "fc": 3,
+      "address": 4,
+      "type": "u16",
+      "note": "1 = 从站在跑"
+    },
+    {
+      "name": "frames",
+      "fc": 3,
+      "address": 5,
+      "type": "u16",
+      "note": "收到的合法帧计数（低 16 位）"
+    },
+    {
+      "name": "led",
+      "fc": 3,
+      "address": 16,
+      "type": "u16",
+      "writable": true,
+      "note": "0x0010 写 1 点亮（PC13 低电平点亮，固件已处理极性）"
+    },
+    {
+      "name": "burst",
+      "fc": 3,
+      "address": 17,
+      "type": "u16",
+      "writable": true,
+      "plot": false,
+      "note": "写 N=1..8 → 连发 N 帧 ASCII，用来观察 TX 双缓冲乒乓（tx_pingpong 增长）"
+    },
+    {
+      "name": "runtime",
+      "fc": 3,
+      "address": 32,
+      "type": "u32",
+      "word_order": "big",
+      "unit": "100ms",
+      "note": "运行计数器：字序测试点"
+    },
+    {
+      "name": "temp",
+      "fc": 3,
+      "address": 48,
+      "type": "f32",
+      "word_order": "big",
+      "unit": "°C",
+      "plot": true,
+      "note": "模拟温度：float 字序 + 缩放测试点"
+    },
+    {
+      "name": "uptime",
+      "fc": 3,
+      "address": 64,
+      "type": "u32",
+      "word_order": "big",
+      "unit": "s"
+    },
+    {
+      "name": "dma_rx_bytes",
+      "fc": 3,
+      "address": 256,
+      "type": "u16",
+      "note": "DMA 交给帧缓冲的字节（低 16 位）"
+    },
+    {
+      "name": "dma_ht",
+      "fc": 3,
+      "address": 257,
+      "type": "u16",
+      "note": "半满中断（HT）次数：前半个 256B 缓冲在用"
+    },
+    {
+      "name": "dma_tc",
+      "fc": 3,
+      "address": 258,
+      "type": "u16",
+      "note": "全满中断（TC）次数：缓冲绕回到后半区"
+    },
+    {
+      "name": "dma_idle",
+      "fc": 3,
+      "address": 259,
+      "type": "u16",
+      "note": "IDLE 定界次数 ≈ 收到的帧数"
+    },
+    {
+      "name": "dma_overrun",
+      "fc": 3,
+      "address": 260,
+      "type": "u16",
+      "note": "超长帧字节数（正常应恒 0）"
+    },
+    {
+      "name": "dma_drop",
+      "fc": 3,
+      "address": 261,
+      "type": "u16",
+      "note": "主循环没取走被挤掉的帧（正常应恒 0）"
+    },
+    {
+      "name": "dma_tx_bytes",
+      "fc": 3,
+      "address": 262,
+      "type": "u16"
+    },
+    {
+      "name": "dma_tx_pingpong",
+      "fc": 3,
+      "address": 263,
+      "type": "u16",
+      "note": "TX 乒乓切换次数（>0 = 两块发送缓冲都在用）"
+    },
+    {
+      "name": "dma_tx_drop",
+      "fc": 3,
+      "address": 264,
+      "type": "u16",
+      "note": "两块发送缓冲都忙时被拒的请求（正常应恒 0）"
+    },
+    {
+      "name": "last_frame_len",
+      "fc": 3,
+      "address": 265,
+      "type": "u16",
+      "note": "最近一帧字节数"
+    },
+    {
+      "name": "scratch0",
+      "fc": 3,
+      "address": 272,
+      "type": "u16",
+      "writable": true,
+      "note": "0x0110 可写暂存，FC06/FC10 回读验证用"
+    },
+    {
+      "name": "scratch1",
+      "fc": 3,
+      "address": 273,
+      "type": "u16",
+      "writable": true
+    },
+    {
+      "name": "scratch2",
+      "fc": 3,
+      "address": 274,
+      "type": "u16",
+      "writable": true
+    },
+    {
+      "name": "scratch3",
+      "fc": 3,
+      "address": 275,
+      "type": "u16",
+      "writable": true
+    },
+    {
+      "name": "coil0",
+      "fc": 1,
+      "address": 0,
+      "type": "bit",
+      "writable": true,
+      "plot": false,
+      "note": "线圈 0 与 LED 联动"
+    },
+    {
+      "name": "coil1",
+      "fc": 1,
+      "address": 1,
+      "type": "bit",
+      "writable": true,
+      "plot": false
+    },
+    {
+      "name": "coil2",
+      "fc": 1,
+      "address": 2,
+      "type": "bit",
+      "writable": true,
+      "plot": false
+    },
+    {
+      "name": "coil3",
+      "fc": 1,
+      "address": 3,
+      "type": "bit",
+      "writable": true,
+      "plot": false
+    },
+    {
+      "name": "di_led",
+      "fc": 2,
+      "address": 0,
+      "type": "bit",
+      "plot": false,
+      "note": "离散输入 0：LED 当前状态"
+    },
+    {
+      "name": "di_bus",
+      "fc": 2,
+      "address": 1,
+      "type": "bit",
+      "plot": false,
+      "note": "离散输入 1：最近 2s 总线上有帧"
+    }
+  ],
+  "groups": [
+    {
+      "name": "fast",
+      "interval_ms": 500,
+      "enabled": true,
+      "points": [
+        "tick",
+        "toggles",
+        "temp"
+      ],
+      "note": "0x02/0x03 相邻合并成一条读；0x30/0x31 是 f32 的两个字（大端字序）"
+    },
+    {
+      "name": "diag",
+      "interval_ms": 1000,
+      "enabled": true,
+      "points": [
+        "dma_rx_bytes",
+        "dma_ht",
+        "dma_tc",
+        "dma_idle",
+        "dma_overrun",
+        "dma_drop",
+        "dma_tx_bytes",
+        "dma_tx_pingpong",
+        "dma_tx_drop",
+        "last_frame_len"
+      ],
+      "note": "0x0100 段连续 10 个寄存器 → 一条读就够；双缓冲是否在工作全看这几个数"
+    },
+    {
+      "name": "slow",
+      "interval_ms": 2000,
+      "enabled": true,
+      "points": [
+        "device_id",
+        "fw_version",
+        "stage",
+        "frames",
+        "runtime",
+        "uptime"
+      ],
+      "note": "身份与累计量：0x00–0x05 一条、0x20/0x21 一条、0x40/0x41 一条"
+    },
+    {
+      "name": "bits",
+      "interval_ms": 2000,
+      "enabled": true,
+      "points": [
+        "coil0",
+        "coil1",
+        "coil2",
+        "coil3",
+        "di_led",
+        "di_bus"
+      ],
+      "note": "FC01 与 FC02 必须各发一条（功能码不同不能合并），位打包 LSB 在前"
+    },
+    {
+      "name": "writes",
+      "interval_ms": 1000,
+      "enabled": false,
+      "points": [
+        "led",
+        "burst"
+      ],
+      "note": "写点不参与轮询（默认关闭）：读回来的只是自己刚写下去的值"
+    }
+  ]
+}

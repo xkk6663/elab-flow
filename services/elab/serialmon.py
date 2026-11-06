@@ -224,6 +224,10 @@ class _Session:
         self.frame_events: deque[int] = deque(maxlen=RATE_MAX_EVENTS)
         self.thread = None              # 由 _start_reader 创建（suspend/resume 可重启）
         self.wlock = threading.Lock()   # write() 与读线程收尾（close io）互斥
+        #: RX 观察者（Modbus 事务引擎等挂在会话上的**读者**）。
+        #: 约定：只读、只入自己的队列、**不得**阻塞或反写会话 —— 读线程是本进程
+        #: 唯一的字节源，在这里做协议解析会把串口拖死（计划 D2）。
+        self.rx_sinks: list = []
 
     # ── 读线程 ──────────────────────────────────────────────────
     def start(self) -> None:
@@ -259,7 +263,16 @@ class _Session:
                     self.state = "closed"
                     break
                 try:
-                    chunk = s.read(4096)
+                    # ★ 先问"到货多少"，再按到货量读（见 SerialIO.in_waiting）：
+                    #   read(4096) 的语义是"凑够 4096 或超时"，一问一答的协议
+                    #   会为此白等满一个读超时（实测 298ms/条 → 40ms/条）。
+                    #   avail=0 时退回 read(1)：阻塞式等**第一个字节**，既省 CPU
+                    #   又让延迟只有"1 个字节的时间"。
+                    avail = getattr(s, "in_waiting", None)
+                    if isinstance(avail, int):
+                        chunk = s.read(min(4096, avail)) if avail > 0 else s.read(1)
+                    else:
+                        chunk = s.read(4096)
                 except lost_cls as exc:
                     # 拔线 / 驱动卸载 / 端口被抢：先如实标记，再按策略重连。
                     if not self._on_transport_lost(exc):
@@ -498,6 +511,26 @@ class _Session:
                 self._decode_locked(rec["data"], t_us, hms)
             if direction == "rx":
                 self._last_rx_us = t_us
+        # ★ RX 观察者在**锁外**调用：观察者可能拿自己的锁，读线程不能因此被
+        #   别人的锁序拖住（Modbus 引擎的 feed() 只做 append + notify）。
+        if direction == "rx" and self.rx_sinks:
+            for sink in list(self.rx_sinks):
+                try:
+                    sink(bytes(data))
+                except Exception:        # noqa: BLE001
+                    # 观察者自己炸了不该影响读线程 —— 串口还得继续监视
+                    continue
+
+    def add_rx_sink(self, fn) -> None:
+        """挂一个 RX 观察者（幂等：同一个函数不会挂两次）。"""
+        with self.dlock:
+            if fn not in self.rx_sinks:
+                self.rx_sinks.append(fn)
+
+    def remove_rx_sink(self, fn) -> None:
+        with self.dlock:
+            if fn in self.rx_sinks:
+                self.rx_sinks.remove(fn)
 
     # ── 会话级解码（共享帧环）──────────────────────────────────
     def _idle_gap_ms(self) -> int:
@@ -1060,6 +1093,12 @@ class _Session:
             self.lease_deadline = time.time() + self.lease_s
 
     def shutdown(self) -> None:
+        # 引擎先收摊：它还在等应答的话，下面关 io 会让它等满超时才退出
+        try:
+            from . import modbusmaster as _mm
+            _mm.detach_session(self)
+        except Exception:            # noqa: BLE001
+            pass
         self.stop.set()
         t = self.thread
         if t is not None and t.is_alive():

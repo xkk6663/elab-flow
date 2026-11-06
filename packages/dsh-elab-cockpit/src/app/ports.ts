@@ -21,6 +21,8 @@ import type {
   ElabEvent,
   EnvResponse,
   HostInfo,
+  ModbusRunResult,
+  ModbusStateResponse,
   PlanPreview,
   SerialAction,
   SerialBytesTail,
@@ -286,4 +288,50 @@ export interface RunEventConnection {
  */
 export interface RunEventsPort {
   connect(run: string | null, sessionId: string | undefined, sink: RunEventSink): RunEventConnection
+}
+
+/**
+ * Modbus 面板的客户端子集（CockpitPane 注入 elabApi 的 modbus 部分）。
+ *
+ * ★ 与 `SerialPort` 同一纪律：面板只声明**它自己用到的**方法，不整包注入
+ *   `typeof elabApi`——这样换实现（测试假后端）不用造 60 个空方法。
+ *   读写都挂在**已开的串口会话**上，所以这里没有"开串口"——`modbusOpen` 代管。
+ */
+export interface ModbusPort {
+  /** GET /api/modbus/state（引擎快照 + 点表 + 增量流水）。 */
+  modbusState(project: string, after?: number, sessionId?: string): Promise<ModbusStateResponse>
+  /** POST /api/modbus/open：建主站（复用/代开串口会话）。 */
+  modbusOpen(opts: {
+    project: string
+    port?: string
+    baud?: number
+    unit_id?: number
+    timeout_ms?: number
+    retries?: number
+    probe?: boolean
+    sessionId?: string
+  }): Promise<{ ok: boolean; detail?: string; probe?: ModbusRunResult }>
+  modbusClose(sessionId?: string): Promise<{ ok: boolean }>
+  /** 起轮询（groups 缺省用点表里的组）。 */
+  modbusStart(groups?: string[], sessionId?: string): Promise<{ ok: boolean; groups?: string[] }>
+  modbusStop(sessionId?: string): Promise<{ ok: boolean }>
+  modbusRead(opts: {
+    project?: string
+    fc: number
+    address: number
+    count: number
+    unit_id?: number
+    sessionId?: string
+  }): Promise<ModbusRunResult>
+  /** ★ 写：调用方必须先弹确认，实现侧固定加 confirm:true。 */
+  modbusWrite(opts: {
+    project?: string
+    fc: number
+    address: number
+    value?: number
+    values?: number[]
+    unit_id?: number
+    broadcast?: boolean
+    sessionId?: string
+  }): Promise<ModbusRunResult>
 }

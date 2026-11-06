@@ -48,6 +48,12 @@ import type {
   PkgJob,
   PkgVerifyResult,
 } from "./types";
+import type {
+  ModbusMap,
+  ModbusRunResult,
+  ModbusStateResponse,
+  ModbusTxn,
+} from "../modbus/types";
 
 /** 后端契约版本；与 ICD 的 EVENT_SCHEMA_VERSION 比对，不一致就显式报错而不是渲染错位界面 */
 import { EVENT_SCHEMA_VERSION } from "./types";
@@ -1082,6 +1088,61 @@ export const api = {
   debugRtos: (opts: { debugSession?: string } = {}) =>
     req<DebugRtosResponse>(
       `/api/debug/rtos${opts.debugSession ? `?debug_session=${encodeURIComponent(opts.debugSession)}` : ""}`),
+
+  /* ── Modbus RTU 主站（面板 300ms 只需轮询这一条 state）────────────── */
+
+  /** GET /api/modbus/state —— 引擎快照 + 增量事务 + 点表（引擎没起来也回点表）。 */
+  modbusState: (project: string, after = 0) =>
+    req<ModbusStateResponse>(
+      `/api/modbus/state?project=${encodeURIComponent(project)}&after=${after}`,
+    ),
+
+  /** POST /api/modbus/open —— 复用/代开串口会话后挂主站（probe 顺手读设备 ID）。 */
+  modbusOpen: (body: {
+    project: string;
+    port?: string;
+    baud?: number;
+    unit_id?: number;
+    timeout_ms?: number;
+    retries?: number;
+    probe?: boolean;
+  }) => post<{ ok: boolean; engine: unknown; map: ModbusMap; probe?: unknown }>("/api/modbus/open", body),
+
+  modbusClose: () => post<{ ok: boolean }>("/api/modbus/close", {}),
+
+  /** POST /api/modbus/start —— 起轮询（groups 省略 = 用点表里的分组）。 */
+  modbusStart: (groups?: unknown) =>
+    post<{ ok: boolean; started?: number }>("/api/modbus/start", groups === undefined ? {} : { groups }),
+
+  modbusStop: () => post<{ ok: boolean }>("/api/modbus/stop", {}),
+
+  /** POST /api/modbus/read —— 单次读（FC01/02/03/04）。 */
+  modbusRead: (body: { fc: number; address: number; count: number; unit_id?: number }) =>
+    post<ModbusRunResult>("/api/modbus/read", body),
+
+  /** POST /api/modbus/write —— 单次写；内核要求 confirm=true（面板先弹确认）。 */
+  modbusWrite: (body: {
+    fc: number;
+    address: number;
+    value?: number;
+    values?: number[];
+    unit_id?: number;
+    broadcast?: boolean;
+  }) => post<ModbusRunResult>("/api/modbus/write", { ...body, confirm: true }),
+
+  /** GET /api/modbus/transactions —— 增量事务流水（?after= 游标）。 */
+  modbusTransactions: (after = 0) =>
+    req<{ transactions: ModbusTxn[]; seq: number; capacity: number; covered: number }>(
+      `/api/modbus/transactions?after=${after}`,
+    ),
+
+  /** GET/POST /api/modbus/map —— 读点表（不带 map）/ 保存（带 map + rev）。 */
+  modbusMap: (project: string) =>
+    req<{ ok: boolean; map: ModbusMap; source: string }>(
+      `/api/modbus/map?project=${encodeURIComponent(project)}`,
+    ),
+  modbusMapSave: (project: string, map: ModbusMap, rev: number) =>
+    post<{ ok: boolean; map: ModbusMap }>("/api/modbus/map", { project, map, rev }),
 };
 
 /**

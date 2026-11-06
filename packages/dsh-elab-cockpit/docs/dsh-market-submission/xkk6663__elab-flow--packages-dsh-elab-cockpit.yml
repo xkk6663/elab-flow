@@ -2,5 +2,6 @@ url: https://github.com/xkk6663/elab-flow/tree/main/packages/dsh-elab-cockpit
 name: xkk6663/elab-flow#dsh-elab-cockpit
 category: dev
 description:
-  en: 'Embedded closed-loop dev cockpit for DeepSeek Harness: the agent builds, flashes, debug-verifies and monitors STM32/AT32/ESP32 boards in one panel - source-level debugging (breakpoints, registers, memory, disassembly, SVD peripherals), serial frame-protocol decoding and agent self-learning, with every step visible live as a progress ladder, streaming logs, RAM/FLASH usage and multi-channel waveforms.'
-  zh: '嵌入式闭环开发驾驶舱（DSH 插件）：agent 在一个面板里闭环开发 STM32/AT32/ESP32——编译、烧录、调试校验、串口监视；源码级调试（断点/寄存器/内存/反汇编/SVD 外设）、串口帧协议解码与 Agent 自学习协议；开发全程对用户可视化（阶梯进度、实时日志、RAM/FLASH 占用、多通道波形）。'
+  en: 'Embedded closed-loop dev cockpit for DeepSeek Harness: the agent builds, flashes, debug-verifies and monitors STM32/AT32/ESP32 boards in one panel - source-level debugging (breakpoints, registers, memory, disassembly, SVD peripherals), serial frame-protocol decoding and agent self-learning, plus a Modbus RTU master (point table, polling, single/batch read-write, DMA diagnostics); every step visible live as a progress ladder, streaming logs, RAM/FLASH usage and multi-channel waveforms.'
+  zh: '嵌入式闭环开发驾驶舱（DSH 插件）：agent 在一个面板里闭环开发 STM32/AT32/ESP32——编译、烧录、调试校验、串口监视；源码级调试（断点/寄存器/内存/反汇编/SVD 外设）、串口帧协议解码与 Agent 自学习协议，并内置 Modbus RTU 主站（点表、轮询、单次/批量读写、DMA 诊断）；开发全程对用户可视化（阶梯进度、实时日志、RAM/FLASH 占用、多通道波形）。'
+icon: https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/market-icon.png

@@ -54,6 +54,15 @@ export interface EvidenceTailProps {
   onChannel(channel: LogChannelId): void
   /** 串口通道的融合工作区（行/字节/终端/波形 + 发送）；给定后替代日志区。 */
   serialContent?: ReactNode
+  /**
+   * 额外**工作区页签**（Modbus 这类"不是日志通道"的视图）。
+   * 激活时整块让位给 `content`；点任一日志通道即自动退出。
+   * ★ 不塞进 `LOG_CHANNELS`：那是"事件 → 日志归类"的语义，Modbus 没有日志行，
+   *   混进去会让 `channelOfEvent` 出现永不命中的分支。
+   */
+  workTab?: { id: string; label: string; content: ReactNode } | null
+  workTabActive?: boolean
+  onWorkTab?(active: boolean): void
   /** 右栏面板「放大/恢复」（宿主 sidebarRight 全屏）；缺省时不显示按钮。 */
   onToggleFullscreen?: () => void
 }
@@ -121,6 +130,8 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
   const lines = buffers[channel] ?? []
   /** 串口通道切到融合工作区：日志区整体让位（跟随/进度由工作区自己管）。 */
   const serialMode = channel === 'serial' && props.serialContent !== undefined
+  /** 额外工作区（Modbus）：激活时同样整块让位，日志区的控件全部隐藏。 */
+  const workMode = props.workTabActive === true && props.workTab !== undefined && props.workTab !== null
 
   // 命令式追加后滚到底（只在"跟随"时；用户手动上滚则暂停）
   useEffect(() => {
@@ -178,7 +189,11 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
               <button
                 key={c}
                 type="button"
-                onClick={() => props.onChannel(c)}
+                onClick={() => {
+                  // 从额外工作区切回日志：先退出工作区，再切通道
+                  if (workMode) props.onWorkTab?.(false)
+                  props.onChannel(c)
+                }}
                 style={{
                   padding: '1px 6px',
                   fontSize: '11px',
@@ -197,8 +212,28 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
             )
           })}
 
+        {props.workTab !== undefined && props.workTab !== null ? (
+          <button
+            type="button"
+            onClick={() => props.onWorkTab?.(!workMode)}
+            title={`${props.workTab.label} 工作区（与日志通道互斥）`}
+            style={{
+              padding: '1px 6px',
+              fontSize: '11px',
+              borderRadius: '4px',
+              border: `1px solid ${workMode ? 'var(--elab-accent)' : 'transparent'}`,
+              background: workMode ? 'var(--elab-bg-raised)' : 'transparent',
+              color: workMode ? 'var(--elab-fg-primary)' : 'var(--elab-fg-muted)',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {props.workTab.label}
+          </button>
+        ) : null}
+
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '4px' }}>
-          {serialMode ? null : (
+          {serialMode || workMode ? null : (
             <>
               <button
                 type="button"
@@ -257,7 +292,11 @@ export function EvidenceTail(props: EvidenceTailProps): ReactNode {
         </div>
       </div>
 
-      {serialMode ? (
+      {workMode ? (
+        <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {props.workTab?.content}
+        </div>
+      ) : serialMode ? (
         <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {props.serialContent}
         </div>

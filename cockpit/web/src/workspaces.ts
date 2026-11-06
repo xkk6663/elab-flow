@@ -115,8 +115,24 @@ const debugWs: WorkspaceDef = {
   },
 };
 
+/**
+ * Modbus 工作区：RTU 主站的连接 / 轮询 / 单次读写 / 点表 / 事务流水。
+ * ★ 它挂在**串口会话**上（主站不新开口），所以门禁与串口工作区同源：
+ *   串口后端不可用就整体置灰，而不是让用户点进去看一片空表。
+ */
+const modbusWs: WorkspaceDef = {
+  id: "modbus",
+  label: "Modbus",
+  channel: "modbus",
+  steps: [],
+  dim: (_card, caps) => !(caps?.serial.available ?? false),
+  dimReason: (_card, caps) => caps?.serial.hint ?? "串口后端不可用（Modbus 挂在串口会话上）",
+  emptyText: (_card, _caps) =>
+    "Modbus 工作区：点「打开主站」建立从站连接（复用/打开串口会话），再点「开始轮询」。",
+};
+
 /** 静态工作区（顺序即导航顺序） */
-export const STATIC_WORKSPACES: WorkspaceDef[] = [buildWs, flashWs, serialWs, debugWs];
+export const STATIC_WORKSPACES: WorkspaceDef[] = [buildWs, flashWs, serialWs, debugWs, modbusWs];
 
 /**
  * 工具工作区（单一「工具」页，2026-10-08 二次收敛）：

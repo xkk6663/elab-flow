@@ -68,6 +68,8 @@ const GET_ALLOW = new Set([
     'debug/session', 'debug/stack', 'debug/variables', 'debug/registers',
     'debug/breakpoints', 'debug/memory', 'debug/disasm', 'debug/source',
     'debug/watch', 'debug/audit', 'debug/peripherals', 'debug/rtos',
+    // Modbus RTU 主站（M1）：元数据 / 寄存器快照 / 事务流水 / 点表
+    'modbus/meta', 'modbus/state', 'modbus/transactions', 'modbus/map',
 ]);
 /** 允许转发的 POST 端点。 */
 const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial/decode',
@@ -91,13 +93,18 @@ const POST_ALLOW = new Set(['run', 'cancel', 'serial', 'serial/monitor', 'serial
     'debug/session', 'debug/control', 'debug/breakpoints', 'debug/watch',
     'debug/evaluate', 'debug/write',
     // P3-C：寄存器组批量写（GET 同路径只读，写只看 POST）
-    'debug/registers']);
+    'debug/registers',
+    // Modbus RTU 主站：开会话 / 轮询 / 单次读写 / 点表保存（写必须 confirm，走 rev 乐观锁）
+    'modbus/open', 'modbus/close', 'modbus/start', 'modbus/stop',
+    'modbus/read', 'modbus/write', 'modbus/map']);
 /** 允许转发的 DELETE 端点（调试会话关闭必须恢复运行 —— D8/C36）。 */
 const DELETE_ALLOW = new Set(['debug/session']);
 /** 需要按 `x-elab-actor` 注入 actor 的端点（调试租约/写权限依赖它）。 */
 const ACTOR_INJECT = new Set([
     'debug/session', 'debug/control', 'debug/breakpoints', 'debug/watch',
     'debug/evaluate', 'debug/write',
+    // 总线上写寄存器会动硬件：谁写的必须留痕
+    'modbus/write', 'modbus/open', 'modbus/close', 'modbus/start', 'modbus/stop',
 ]);
 function json(res, code, body) {
     const text = JSON.stringify(body);

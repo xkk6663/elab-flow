@@ -363,6 +363,50 @@ const PKG_TOOL = {
     group: 'pkg',
     actions: ['status', 'search', 'install', 'activate', 'remove', 'update', 'verify', 'adapt'],
 };
+const MODBUS_TOOL = {
+    name: 'elab_modbus',
+    summary: 'Modbus RTU 主站：读/写/轮询/点表（挂在已开的串口会话上）',
+    description: 'Modbus RTU 主站操作，**挂在已打开的串口会话上**（不新开口、不复制读线程，' +
+        '与面板看到的是同一份字节）。meta 取词汇表（功能码中文名/类型/限制/异常码）；' +
+        'status 只读快照（引擎状态 + 寄存器值 + 增量事务流水），引擎没起来也回点表；' +
+        'open 打开主站（可 probe 读一次设备 ID，把上电首帧抖动吸收在 open 里）；' +
+        'read 单次读（FC01/02/03/04，count 上限 125 寄存器 / 2000 位）；' +
+        'write 单次写（FC05/06/0F/10，**必须 confirm=true 且需 allowAgentWrite**，会真的动物理世界）；' +
+        'start/stop 起停轮询（按点表分组，同功能码相邻地址自动合并成一条读，单飞 + 退避）；' +
+        'transactions 读增量事务流水（?after= 游标）；map 不带参读点表、带 map+rev 保存（乐观锁）。' +
+        '★ 点表是声明式 JSON（projects/<name>.modbus.json），现场语义全在里面：地址/类型/字序/换算/单位。',
+    parameters: {
+        action: {
+            type: 'string',
+            required: true,
+            enum: ['meta', 'status', 'open', 'close', 'read', 'write', 'start', 'stop',
+                'transactions', 'map'],
+            description: '要执行的动作',
+        },
+        project: { type: 'string', description: '工程名（open/read/map 必填；status 可选）' },
+        port: { type: 'string', description: 'open 时显式指定端口（缺省用工程 serial.port / 自动探测）' },
+        baud: { type: 'number', description: 'open 时的波特率（缺省取工程配置，常见 9600/115200）' },
+        unit_id: { type: 'number', description: '从站地址 1..247（广播写用 broadcast 而不是 0）' },
+        fc: { type: 'number', description: '功能码：读 1/2/3/4；写 5/6/15/16' },
+        address: { type: 'number', description: '协议地址（0 基；40001 → 0）' },
+        count: { type: 'number', description: '读取数量（寄存器 ≤125，位 ≤2000）' },
+        value: { type: 'number', description: 'FC05/06 的单个值（FC05 只认 0/1，内核转 0xFF00/0x0000）' },
+        values: { type: 'string', description: 'FC15/16 的批量值 JSON 数组（字符串），如 "[1,0,1,0]"' },
+        confirm: { type: 'boolean', description: '写操作必须显式 true（内核拒绝无确认的写）' },
+        broadcast: { type: 'boolean', description: '写广播（unit=0，不等应答；从站执行但不回）' },
+        probe: { type: 'boolean', description: 'open 后顺手读一次 FC03 addr=0 count=2（默认 true）' },
+        timeout_ms: { type: 'number', description: 'open 时的事务超时（默认 120ms；USB-CDC 桥建议 ≥60）' },
+        retries: { type: 'number', description: 'open 时的重试次数（默认 2；超时重试，异常码不重试）' },
+        groups: { type: 'string', description: 'start 的分组覆盖 JSON 数组（缺省用点表里的 groups）' },
+        map: { type: 'string', description: 'map 动作：点名表 JSON（带上则保存，必须同时给 rev）' },
+        rev: { type: 'number', description: 'map 保存的乐观锁版本（来自上一次读点表）' },
+        after: { type: 'number', description: 'status/transactions 的增量游标（上次返回的 next_after）' },
+    },
+    kind: 'edit',
+    group: 'modbus',
+    actions: ['meta', 'status', 'open', 'close', 'read', 'write', 'start', 'stop',
+        'transactions', 'map'],
+};
 /** 注册面：工具名 → 契约。适配器按这张表注册，缺实现即注册失败（有守卫测试）。 */
 export const TOOL_CONTRACTS = {
     elab_status: STATUS_TOOL,
@@ -379,6 +423,7 @@ export const TOOL_CONTRACTS = {
     elab_frame: FRAME_TOOL,
     elab_frame_learn: FRAME_LEARN_TOOL,
     elab_pkg: PKG_TOOL,
+    elab_modbus: MODBUS_TOOL,
 };
 // ── 意图树（渐进披露的第二层）────────────────────────────────────────
 export const TOOL_GROUPS = [
@@ -815,6 +860,98 @@ export const TOOL_GROUPS = [
                 synonyms: ['接入工程', '适配', 'adapt', '新工程', '绑定工程'],
                 preconditions: ['write=true 需 allowAgentWrite'],
                 example: 'elab_pkg action="adapt" path="C:/work/demo"',
+            },
+        ],
+    },
+    {
+        id: 'modbus',
+        title: 'Modbus RTU 主站（读写/轮询/点表）',
+        intent: '按点表读从站、写寄存器、起停轮询、改点表 —— 语义全在工程的 .modbus.json 里。',
+        preconditions: [
+            '主站挂在**已打开的串口会话**上（open 会复用/代开会话，不新开口）',
+            '写操作需 confirm=true 且 allowAgentWrite（总线上写会动物理世界）',
+            '点表保存走 rev 乐观锁，409 = 别人先改了，重读再改，不要覆盖',
+        ],
+        entries: [
+            {
+                tool: 'elab_modbus',
+                action: 'meta',
+                use: '词汇表：功能码中文名/类型/限制/异常码/端点',
+                synonyms: ['功能码', 'fc 有哪些', '异常码', 'modbus 文档', '类型怎么配'],
+                preconditions: ['无（只读）'],
+                example: 'elab_modbus action="meta"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'status',
+                use: '只读快照：引擎状态 + 寄存器值 + 增量事务（引擎没起来也回点表）',
+                synonyms: ['modbus 状态', '读到了吗', '寄存器当前值', '事务', '丢帧'],
+                preconditions: ['无（只读）'],
+                example: 'elab_modbus action="status" project="STM32F411_modbus"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'open',
+                use: '打开主站（复用串口会话；probe 顺手读设备 ID）',
+                synonyms: ['连从站', '打开 modbus', '开始通信', 'connect'],
+                preconditions: ['工程有点表或先给了 unit_id', '串口没被闭环/调试占着'],
+                example: 'elab_modbus action="open" project="STM32F411_modbus"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'read',
+                use: '单次读（FC01/02/03/04）',
+                synonyms: ['读寄存器', '读线圈', 'read holding', '看一下值'],
+                preconditions: ['主站已 open'],
+                example: 'elab_modbus action="read" fc=3 address=0 count=6',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'write',
+                use: '单次写（FC05/06/0F/10，必须 confirm，需 allowAgentWrite）',
+                synonyms: ['写寄存器', '点灯', 'write', '改值', '下发'],
+                preconditions: ['主站已 open', 'confirm=true', 'allowAgentWrite 已开'],
+                example: 'elab_modbus action="write" fc=6 address=16 value=1 confirm=true',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'start',
+                use: '起轮询（按点表分组，相邻地址自动合并）',
+                synonyms: ['轮询', '开始采集', 'poll', '周期读', '采起来'],
+                preconditions: ['主站已 open', '点表里有 enabled 的 groups'],
+                example: 'elab_modbus action="start"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'stop',
+                use: '停轮询（keep 会话与引擎，随时可再 start）',
+                synonyms: ['停止轮询', 'stop poll', '别采了'],
+                preconditions: ['轮询在跑'],
+                example: 'elab_modbus action="stop"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'map',
+                use: '读/存点表（存要 rev，走乐观锁）',
+                synonyms: ['点表', '寄存器映射', '地址表', '加个点位'],
+                preconditions: ['存点表需 allowAgentWrite + rev'],
+                example: 'elab_modbus action="map" project="STM32F411_modbus"',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'transactions',
+                use: '增量事务流水（?after= 游标）：谁发的、耗时、错在哪类',
+                synonyms: ['事务流水', '通信记录', '耗时多少', '为什么超时'],
+                preconditions: ['主站已 open'],
+                example: 'elab_modbus action="transactions" after=0',
+            },
+            {
+                tool: 'elab_modbus',
+                action: 'close',
+                use: '关主站（释放引擎，串口会话本身不关）',
+                synonyms: ['断开从站', '关闭 modbus', 'close', '松开总线'],
+                preconditions: ['主站已 open'],
+                example: 'elab_modbus action="close"',
             },
         ],
     },

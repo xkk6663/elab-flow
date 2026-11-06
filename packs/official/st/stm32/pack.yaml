@@ -8,7 +8,7 @@ name: st/stm32
 vendor: st
 platform: stm32
 version: 0.1.0
-license: MIT
+license: Apache-2.0
 status: official
 description: STM32F1/F4 芯片适配包（STM32CubeMX 工程指纹 + 芯片参数 + 平台坑位）
 

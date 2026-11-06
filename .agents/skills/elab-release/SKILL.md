@@ -117,7 +117,10 @@ npm publish                         # 默认 latest
 - **版本只能前进**：目标版本必须高于 npm `latest`；`0.3.0` 低于已发布的 `0.3.2` 会回退
   `latest`，应改 `0.3.3` / `0.4.0`。已发布版本不可覆盖，也不能 unpublish。
 - `package.json#files` 决定包内容：`lib`、`envpacks/manifest.json`、`cordis.patch.yml`、
-  `icon.svg`、`locale`、`README.md`、`screenshots.json`、`assets`。
+  `icon.svg`、`locale`、`README.md`、`LICENSE`、`NOTICE`、`screenshots.json`、`assets`。
+- **`LICENSE` / `NOTICE` 是打包时生成的**（`prepack` → `scripts/copy-license.mjs` 从仓库根复制），
+  不入库（`.gitignore` 排除）以免两份副本漂移。npm 只自动带上包根的 README 与 LICENSE，
+  **NOTICE 必须显式列进 `files`**（Apache-2.0 §4(d) 要求再分发时携带 NOTICE）。
 - 回退展示版本：`npm dist-tag add dsh-elab-cockpit@<旧版本> latest`（不是删版本）。
 
 ## 7. dsh-market（awesome-dsh-plugin）
@@ -186,30 +189,67 @@ r.quantize(colors=256, method=Image.FASTOCTREE,
 | 版本号 / 下载量 | ✅ | |
 | 卡片图（`screenshots.json` + `assets/`） | ✅ | |
 | 简介 / 分类 / 名字 | | ✅ |
+| 市场卡图标（条目 yml 的 `icon:`） | | ✅ |
 
-### 7.3 三个「图标」位，别搞混
+### 7.3 四个「图标」位，别搞混
 
 | 名称 | 是什么 | 在哪 | 改它会影响谁 |
 |---|---|---|---|
 | **卡片图 / 封面** | 市场卡片里轮播的界面截图 | `screenshots.json` + `assets/*.png` | awesome-dsh-plugin 站点、DSH 插件市场详情页 |
+| **市场卡图标** | 市场卡片上那块方形小图（头像位） | 市场条目 yml 的 `icon:` 字段 + 本仓 `assets/market-icon.png` | **DSH 内置市场（dsh-market）卡片** |
 | **插件头像** | 包的小图标 | `packages/dsh-elab-cockpit/icon.svg`（`package.json#icon`） | npm registry 包页、DSH 宿主插件列表 |
 | **入口卡图标** | DSH 右栏「开始」页那张卡的图形 | `scripts/build-client.mjs` 里的 `guide.icon` | 仅 DSH 宿主内 |
 
-三条容易踩的事实：
+四条容易踩的事实：
 
-1. **市场站的卡片不渲染头像** —— `build-site.mjs` 的 `buildRows()` / `catalogPayload()`
-   只输出文字与统计（name / owner / stars / downloads / cat），没有 `icon` /
-   `logo` / `avatar` 字段。所以「市场展示页的头像」这个说法本身不成立，
-   市场站上根本没有头像位。
-2. **插件头像 = `package.json#icon` → `icon.svg`**，宿主通过 `exports["./icon"]`
+1. **市场站不渲染头像，但 DSH 内置市场渲染** —— 两处别混：
+   - `awesome-dsh-plugin` **站点**：`build-site.mjs` 的 `buildRows()` / `catalogPayload()`
+     只输出文字与统计（name / owner / stars / downloads / cat），没有 `icon` /
+     `logo` / `avatar` 字段 → 站点上根本没有头像位。
+   - **DSH 宿主内的插件市场（`dsh-market`）有头像位**：`src/client/MarketSection.tsx`
+     的 `OwnerAvatar({ name, owner, icon })` 优先级是
+     **条目 yml 的 `icon:` → GitHub owner 头像 → 名字首字母色块**。
+   - 所以没声明 `icon:` 时，市场卡默认显示的是**仓库 owner 的 GitHub 头像**，
+     **不是** npm 包图标。npm 包图标（`package.json#icon`）不会流进市场。
+2. **市场卡图标只收位图，SVG 被拒** —— `scripts/lib/entries.mjs` 的 `iconProblem()`：
+   必须 `https:` + GitHub 域名（`raw` / `user-images` / `camo` / `github.com`）
+   + 扩展名 ∈ `.png` `.jpg` `.jpeg` `.webp`。**SVG 直接拒绝**，第三方图床也拒绝
+   （列表不让访客去它无法担保的图床取图）。
+   卡片按 ~96px 绘制 → 用**方形**图，192px 起步。
+   源图放本仓 `packages/dsh-elab-cockpit/assets/market-icon.png`，
+   URL 用 `https://raw.githubusercontent.com/xkk6663/elab-flow/main/packages/dsh-elab-cockpit/assets/market-icon.png`。
+   ⚠ raw URL 指向 **main**，**必须先推 main**，否则合并后 404 → 静默回退成 owner 头像。
+3. **插件头像 = `package.json#icon` → `icon.svg`**，宿主通过 `exports["./icon"]`
    取它，npm registry 展示它。它与市场条目 yml 无关，与 `screenshots.json` 也无关。
-3. **头像必须与驾驶舱图标同源** —— 驾驶舱的桌面图标是仓库根 `cockpit.ico`
-   （暗底圆角方块 `#17202e` + 绿色脉搏线 `#34d399`）。插件头像用同一套造型，
+4. **所有图标必须与驾驶舱图标同源** —— 驾驶舱的桌面图标是仓库根 `cockpit.ico`
+   （暗底圆角方块 `#17202e` + 绿色脉搏线 `#34d399`）。插件头像与市场卡图标用同一套造型，
    不能自绘成别的样子。`cockpit.ico` 只有 16/32/48 三帧，所以 `icon.svg` 是
    **按其 48px 帧逐像素拟合后矢量重绘**的（圆角半径 12 / 线宽 5.5），
    改一边要同步另一边。
 
-提 PR 前确认备份 yml 与目标一致（`packages/dsh-elab-cockpit/docs/dsh-market-submission/`）。
+市场卡图标（`market-icon.png`）的生成配方（Pillow 8× 超采样 → LANCZOS 缩放，
+几何严格照抄 `icon.svg` 的 path 与 stroke 参数）：
+
+```python
+from PIL import Image, ImageDraw
+SS, VIEW, OUT = 8, 48, 192          # 48 = SVG viewBox；192 = 成品边长
+S = VIEW * SS
+img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+d = ImageDraw.Draw(img)
+d.rounded_rectangle([0, 0, S - 1, S - 1], radius=12 * SS, fill=(0x17, 0x20, 0x2e, 255))
+pts = [(4.5, 21), (17.75, 21), (21.25, 34), (24, 9.25), (27, 21.5),
+       (32, 21.5), (34.5, 25.75), (37, 20.5), (43.25, 20.5)]
+pts = [(x * SS, y * SS) for x, y in pts]
+w = int(round(5.5 * SS))
+d.line(pts, fill=(0x34, 0xd3, 0x99, 255), width=w, joint="curve")
+for (x, y) in (pts[0], pts[-1]):    # linecap="round" 只作用于首尾端点
+    r = w / 2
+    d.ellipse([x - r, y - r, x + r, y + r], fill=(0x34, 0xd3, 0x99, 255))
+img.resize((OUT, OUT), Image.LANCZOS).save(dst, "PNG", optimize=True)
+```
+
+提 PR 前确认备份 yml 与目标一致（`packages/dsh-elab-cockpit/docs/dsh-market-submission/`），
+PR 正文模板见同目录 `PR-市场图标与简介.md`。
 
 ## 8. 主仓 GitHub Release（同步发布）
 
@@ -296,3 +336,39 @@ gh release create v4.0.0 --title "elab-Flow v4.0.0" \
 - **发版是发布，改文件是改文件**：用户说「先不推送 / 代理没开」时，只做到
   「版本号落地 + 物料备好 + 本地提交」，`push` / `npm publish` / `gh release create`
   一律等明确指令（见 §8.3）。
+
+## 12. 许可证
+
+本仓自 **v4.0.0** 起改用 **Apache-2.0**（此前 v1.0.0 – v3.1.0 为 MIT）。
+选 Apache-2.0 的理由：与上游 Lissio（Apache-2.0 移植来源）对齐，少一次跨协议再分发；
+附带明确的专利授权与变更声明要求，对商用集成更友好。
+
+### 12.1 改协议必须同步的 6 处
+
+| 位置 | 改什么 |
+|---|---|
+| 仓库根 `LICENSE` | 授权正文全文（**从官方源取，不要手抄**） |
+| 仓库根 `NOTICE` | 版权声明 + 第三方归属 + **协议沿革**（Apache-2.0 §4(d) 要求随分发携带） |
+| `README.md` | license 徽章 + 「许可证」小节（版本区间表） |
+| `packages/<pkg>/package.json` | `"license"` 字段用 **SPDX 标识**（`Apache-2.0`），npm 才认 |
+| `market/index.json` | 只改**随仓发布**的包；外置社区包的 license 由**它们自己的仓库**声明，别动 |
+| `packs/official/**/pack.yaml` | 与 `market/index.json` 保持一致 |
+
+内核**不校验 SPDX 白名单**（`services/elab/market.py` 只做 `str(man["license"])`），
+所以换标识不会破坏安装流程，但索引里的声明必须与包内实际授权一致。
+
+协议正文从官方源取（权威、不会被网页改写）：
+
+```bash
+curl -sL https://raw.githubusercontent.com/spdx/license-list-data/main/text/Apache-2.0.txt -o LICENSE
+```
+
+### 12.2 两条硬规则
+
+1. **改协议不可追溯** —— MIT 一旦发布就永久授权出去了。已发布的旧版本继续是原协议，
+   只能对**未来版本**生效，且必须在 LICENSE / README 里写清版本区间。
+   本仓 v4.0.0 尚未发布，所以协议切换零成本；一旦 v4.0.0 发布，再想改就只能 v5.0.0 起生效。
+2. **「禁止商用」类协议不是开源协议** —— PolyForm Noncommercial / BUSL / SSPL /
+   Elastic License / CC BY-NC-SA 都**不是 OSI 认证的开源协议**，属于「源码可见」。
+   选用前必须确认：(a) npm / SPDX 能否接受该标识；(b) 企业用户会不会直接不敢用
+   （插件是装进别人机器里的，禁商用会砍掉采用率）；(c) 是否需要**双许可**过渡。

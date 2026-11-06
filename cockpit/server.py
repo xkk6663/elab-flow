@@ -55,6 +55,8 @@ from elab import serialport as serialport_mod        # noqa: E402
 from elab import serialtransport as serialtransport_mod  # noqa: E402
 from elab import serialterm as serialterm_mod        # noqa: E402
 from elab import serialwidgets as serialwidgets_mod  # noqa: E402
+from elab import modbus as modbus_mod                # noqa: E402
+from elab import modbusmaster as modbusmaster_mod    # noqa: E402
 from elab.config import Config, ElabError, Host, to_fwd     # noqa: E402
 from elab.kernel import events as ev_mod              # noqa: E402
 from elab import pkg as pkg_mod                       # noqa: E402
@@ -238,7 +240,9 @@ SERIAL_META = {
                  # 观测（P3）：帧级健康度 + 触发式录制
                  "frame_stats", "capture_trigger",
                  # 网络传输（M4）：TCP 客户端/服务端 + UDP，默认只绑回环
-                 "net_transport", "udp", "allow_remote"],
+                 "net_transport", "udp", "allow_remote",
+                 # Modbus RTU 主站（协议计划 §5.5）：事务、寄存器映射、轮询
+                 "modbus_rtu", "modbus_poll", "modbus_map", "modbus_write"],
     # 传输种类（M4，内核自描述）：面板按此渲染「连接方式」，不写死业务名词
     "transports": {
         "kinds": ["serial", *serialtransport_mod.NET_KINDS],
@@ -289,6 +293,92 @@ SERIAL_META = {
         "interleaving": "exclusive",
     },
 }
+
+#: Modbus 自描述（协议计划 §5.5）：功能码 / 类型 / 字序 / 限制 / 异常码 / 错误分类
+#: 全部来自 ``elab.modbus``，时间参数来自 ``elab.modbusmaster`` —— 面板与 Agent
+#: 只渲染，不各自记数字（记的数字迟早会和内核不同步）。
+MODBUS_META = {
+    "mode": "rtu-master",
+    "transport": "serial",
+    "unit": {"min": modbus_mod.UNIT_MIN, "max": modbus_mod.UNIT_MAX,
+             "broadcast": modbus_mod.BROADCAST_UNIT,
+             "note": "0 只用于广播写，不应答；从站地址 1..247"},
+    "limits": modbus_mod.limits(),
+    "timing": {"default_timeout_ms": modbusmaster_mod.DEFAULT_TIMEOUT_MS,
+               "min_timeout_ms": modbusmaster_mod.MIN_TIMEOUT_MS,
+               "max_timeout_ms": modbusmaster_mod.MAX_TIMEOUT_MS,
+               "max_retries": modbusmaster_mod.MAX_RETRIES,
+               "min_interval_ms": modbusmaster_mod.MIN_INTERVAL_MS,
+               "merge_gap": modbusmaster_mod.MERGE_GAP,
+               "max_backoff": modbusmaster_mod.MAX_BACKOFF},
+    "poll": {"max_points": modbusmaster_mod.MAX_POINTS,
+             "max_groups": modbusmaster_mod.MAX_GROUPS,
+             "max_pending": modbusmaster_mod.MAX_PENDING,
+             "single_flight": True,
+             "merge": "同功能码、地址相邻（允许跨 merge_gap 个空洞）合并为一条读"},
+    "map": {
+        "path": "projects/<name>.modbus.json",
+        "rev": "乐观锁：保存必须带 rev，冲突返回 409",
+        "point": {
+            "name": "string（唯一）",
+            "fc": "1|2|3|4（读功能码）",
+            "address": "int（协议偏移，0 基；40001 的换算在文档里）",
+            "type": "bit|u16|s16|u32|s32|f32",
+            "word_order": "big|little（u32/s32/f32 必填）",
+            "scale": "number=1（只影响展示与波形）",
+            "bias": "number=0",
+            "unit": "string",
+            "writable": "bool=false（写点必须显式 true）",
+            "plot": "bool=true（bit 点默认不画）",
+            "enum": "{raw: label}（可选）",
+            "note": "string",
+        },
+        "group": {"name": "string", "interval_ms": "int（≥ min_interval_ms）",
+                  "points": "[name]（省略=全部点）", "enabled": "bool=true"},
+    },
+    "endpoints": {
+        "meta": "/api/modbus/meta",
+        "state": "/api/modbus/state",
+        "open": "/api/modbus/open",
+        "close": "/api/modbus/close",
+        "start": "/api/modbus/start",
+        "stop": "/api/modbus/stop",
+        "read": "/api/modbus/read",
+        "write": "/api/modbus/write",
+        "map": "/api/modbus/map",
+        "transactions": "/api/modbus/transactions",
+    },
+    "note": ("主站挂在**已打开的串口会话**上，不新开口、不复制读线程；"
+             "写操作要求 confirm=true（面板弹确认），广播写不等应答。"),
+    "errors": {"kinds": list(modbus_mod.ERROR_KINDS),
+               "note": "timeout/port 由事务层产生，crc/exception/malformed 由协议层判定"},
+}
+
+
+def _require_modbus():
+    """取当前 Modbus 主站；没有就给出**能照做**的下一步，而不是 500。"""
+    eng = modbusmaster_mod.current()
+    if eng is None:
+        raise ElabError("Modbus 主站未打开：先 POST /api/modbus/open"
+                        "（它会复用/打开串口会话，不新开口）")
+    return eng
+
+
+def _as_int(body: dict, key: str, default: int) -> int:
+    raw = body.get(key, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ElabError(f"{key} 必须是整数：{raw!r}") from None
+
+
+def _mb_call(fn, *args, **kw):
+    """把协议层的边界错误翻成 400（而不是让它变成 500 让用户猜）。"""
+    try:
+        return fn(*args, **kw)
+    except modbus_mod.ModbusError as exc:
+        raise ElabError(exc.detail) from exc
+
 
 def _frame_profile_of(cfg, body: dict) -> dict:
     """从请求体取 profile：优先**未保存草稿**，否则 project+id 装载。
@@ -2056,6 +2146,51 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     raise ElabError(str(exc))
                 return self._json({"profiles": profiles})
+            if path == "/api/modbus/meta":
+                # Modbus 词汇表（功能码/类型/限制/异常码）—— 内核唯一事实源
+                return self._json(MODBUS_META)
+            if path == "/api/modbus/state":
+                # 面板 300ms 轮询这一个端点：引擎快照 + 增量事务 + 当前映射。
+                eng = modbusmaster_mod.current()
+                project = (qs.get("project") or [""])[0]
+                try:
+                    after = int((qs.get("after") or ["0"])[0])
+                except ValueError:
+                    raise ElabError("after 必须是整数")
+                out = {"ok": True,
+                       "engine": eng.snapshot() if eng else {"active": False}}
+                if eng:
+                    out["transactions"] = eng.transactions(after)["transactions"]
+                    out["map"] = eng.map
+                else:
+                    out["transactions"] = []
+                    if project:
+                        try:
+                            out["map"] = modbusmaster_mod.load_map(self.cfg, project)
+                        except ValueError as exc:
+                            raise ElabError(str(exc))
+                return self._json(out)
+            if path == "/api/modbus/transactions":
+                eng = _require_modbus()
+                try:
+                    after = int((qs.get("after") or ["0"])[0])
+                except ValueError:
+                    raise ElabError("after 必须是整数")
+                return self._json(eng.transactions(after))
+            if path == "/api/modbus/map":
+                project = (qs.get("project") or [""])[0]
+                eng = modbusmaster_mod.current()
+                if eng is not None:
+                    # 引擎在跑就以引擎里的为准：它可能刚保存过还没落盘的新映射
+                    return self._json({"ok": True, "map": eng.map,
+                                       "source": "engine"})
+                if not project:
+                    raise ElabError("map 需要 project 参数")
+                try:
+                    raw = modbusmaster_mod.load_map(self.cfg, project)
+                except ValueError as exc:
+                    raise ElabError(str(exc))
+                return self._json({"ok": True, "map": raw, "source": "file"})
             if path == "/api/serial/frames":
                 # 帧协议配置（M5）：读全部 profile + rev + warnings。
                 project = (qs.get("project") or [""])[0]
@@ -2618,6 +2753,115 @@ class CockpitHandler(BaseHTTPRequestHandler):
                 raise ElabError(
                     f"action 必须是 open/close/decoder/clear/pause/resume/restore/"
                     f"log_profile：{action!r}")
+            if u.path == "/api/modbus/open":
+                # 复用已打开的串口会话（不新开口、不复制读线程）；没开就先开。
+                # probe=true（默认）顺手读一次设备 ID：把"上电首帧撞心跳"这类
+                # 一次性抖动吸收在 open 里，面板打开即是绿的。
+                body = self._body()
+                project = str(body.get("project") or "")
+                if not project:
+                    raise ElabError("modbus open 需要 project")
+                sess = serialmon_mod.current()
+                if sess is None:
+                    busy = _serial_blocker(self.mgr)
+                    if busy:
+                        return self._err(409, (
+                            f"有闭环正在跑（run={busy.get('run')}，"
+                            f"步骤 {'/'.join(busy.get('steps') or [])}）—— "
+                            f"它要用串口/SWD，等它跑完或先取消它。"))
+                    res = serialmon_mod.open_session(
+                        self.cfg, project,
+                        port=str(body.get("port") or ""),
+                        baud=_as_int(body, "baud", 0),
+                        opened_by=str(body.get("actor") or "human"),
+                        allow_agent_write=bool(body.get("allow_agent_write")),
+                        line=body.get("line"))
+                    if not res.get("ok"):
+                        return self._json(res, 400)
+                    sess = serialmon_mod.current()
+                if sess is None:
+                    raise ElabError("串口会话没有打开成功（端口可能被别的程序占用）")
+                eng = modbusmaster_mod.open_engine(
+                    sess, cfg=self.cfg, project=project,
+                    unit_id=_as_int(body, "unit_id", 1),
+                    timeout_ms=_as_int(body, "timeout_ms",
+                                       modbusmaster_mod.DEFAULT_TIMEOUT_MS),
+                    retries=_as_int(body, "retries",
+                                    modbusmaster_mod.DEFAULT_RETRIES))
+                out = {"ok": True, "engine": eng.snapshot(), "map": eng.map}
+                if body.get("probe", True):
+                    try:
+                        out["probe"] = _mb_call(eng.read,
+                                                modbus_mod.FC_READ_HOLDING, 0, 2)
+                    except ElabError as exc:
+                        out["probe"] = {"ok": False,
+                                        "error": {"kind": "malformed",
+                                                  "detail": str(exc)}}
+                return self._json(out)
+            if u.path == "/api/modbus/close":
+                return self._json(modbusmaster_mod.close_engine("面板关闭"))
+            if u.path == "/api/modbus/start":
+                body = self._body()
+                eng = _require_modbus()
+                groups = body.get("groups")
+                if groups is not None and not isinstance(groups, list):
+                    raise ElabError("groups 必须是数组（或省略）")
+                try:
+                    res = eng.start_polling(groups)
+                except ValueError as exc:
+                    raise ElabError(str(exc)) from exc
+                return self._json({**res, "engine": eng.snapshot()})
+            if u.path == "/api/modbus/stop":
+                eng = _require_modbus()
+                res = eng.stop_polling()
+                return self._json({**res, "engine": eng.snapshot()})
+            if u.path == "/api/modbus/read":
+                body = self._body()
+                eng = _require_modbus()
+                fc = _as_int(body, "fc", modbus_mod.FC_READ_HOLDING)
+                addr = _as_int(body, "address", 0)
+                count = _as_int(body, "count", 1)
+                unit = body.get("unit_id")
+                res = _mb_call(eng.read, fc, addr, count,
+                               unit_id=(None if unit is None else int(unit)))
+                return self._json(res)
+            if u.path == "/api/modbus/write":
+                # 写 = 会动物理世界（LED/继电器/变频器频率）。必须显式 confirm。
+                body = self._body()
+                if not body.get("confirm"):
+                    raise ElabError("写操作需要 confirm=true（面板会先弹确认框）")
+                eng = _require_modbus()
+                fc = _as_int(body, "fc", modbus_mod.FC_WRITE_REGISTER)
+                addr = _as_int(body, "address", 0)
+                if fc in (modbus_mod.FC_WRITE_COIL, modbus_mod.FC_WRITE_REGISTER):
+                    values = [_as_int(body, "value", 0)]
+                else:
+                    values = body.get("values")
+                    if not isinstance(values, list) or not values:
+                        raise ElabError("批量写需要 values 数组")
+                res = _mb_call(eng.write, fc, addr, values,
+                               broadcast=bool(body.get("broadcast")))
+                return self._json(res)
+            if u.path == "/api/modbus/map":
+                body = self._body()
+                project = str(body.get("project") or "")
+                if not project:
+                    raise ElabError("保存映射需要 project")
+                raw = body.get("map")
+                if not isinstance(raw, dict):
+                    raise ElabError("map 必须是对象")
+                rev = body.get("rev")
+                try:
+                    saved = modbusmaster_mod.save_map(
+                        self.cfg, project, raw,
+                        None if rev is None else int(rev))
+                except ValueError as exc:
+                    msg = str(exc)
+                    return self._err(409 if "rev" in msg else 400, msg)
+                eng = modbusmaster_mod.current()
+                if eng is not None:
+                    eng.apply_map(saved)
+                return self._json({"ok": True, "map": saved})
             if u.path == "/api/serial/frames":
                 # 保存 / 删除一个 profile。rev 不匹配 → 409（不覆盖别人的改动）。
                 body = self._body()

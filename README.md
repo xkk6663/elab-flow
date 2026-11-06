@@ -10,6 +10,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/xkk6663/elab-flow/elab.yml?branch=main&style=flat&label=CI)](https://github.com/xkk6663/elab-flow/actions/workflows/elab.yml)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10%20%E4%BB%85%E6%A0%87%E5%87%86%E5%BA%93-4D6BFE?style=flat)](README.md#快速开始)
 [![platform](https://img.shields.io/badge/Windows%20%7C%20Linux-4493F8?style=flat-square)](README.md#快速开始)
+[![license](https://img.shields.io/badge/license-Apache--2.0-4D6BFE?style=flat)](LICENSE)
 
 [项目定位](#position) · [是什么](#what) · [功能](#features) · [怎么用](#quickstart) · [仓库结构](#repo) · [文档](#docs)
 
@@ -22,8 +23,9 @@
 ---
 
 > **当前版本**：内核 **v4.0.0** · DSH 插件 **1.0.0**
-> v4.0.0 是大版本：引入工具链 Provider 架构、帧协议补强与 **Agent 自学习协议**，
-> 并把 DSH agent 工具面从 27 个平铺工具收敛为 **14 个混合门面**（破坏性变更，
+> v4.0.0 是大版本：新增 **Modbus RTU 主站**（点表 / 轮询 / 批量读写 / 面板）、
+> 工具链 Provider 架构、帧协议补强与 **Agent 自学习协议**，
+> 并把 DSH agent 工具面从 27 个平铺工具收敛为 **15 个混合入口**（破坏性变更，
 > 过渡期见 [`toolMode: both`](packages/dsh-elab-cockpit/README.md)）。
 > 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -345,7 +347,7 @@ HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
 
 #### 在 DSH 界面里用？（可选）
 
-装插件后是另一套入口：右栏 ELAB 面板 + 14 个 `elab_*` 工具（**混合门面**：6 个门面 + 8 个高频细粒度；
+装插件后是另一套入口：右栏 ELAB 面板 + 15 个 `elab_*` 工具（**混合门面**：7 个门面 + 8 个高频细粒度；
 写硬件 / 写盘受 `allowAgentWrite` 门控，默认关）。
 完整调用教程见 [插件 README](packages/dsh-elab-cockpit/README.md#dsh-界面agent-调用教程跨工程生效)，这里只列工具面：
 
@@ -356,11 +358,40 @@ HTTP 配套端点（都在 `http://127.0.0.1:8333`）：
 | 串口 | `elab_serial`（`action=monitor/write/decode/decoded/stats/read/wait`）· `elab_serial_read` · `elab_serial_wait` · `elab_serial_capture` · `elab_serial_widget` |
 | 调试 | `elab_debug`（`action=open/control/inspect/breakpoint/wait/close`）· `elab_debug_inspect` |
 | 帧协议 | `elab_frame`（`action=list/get/preview/save/delete/encode/templates/import`）· `elab_frame_learn`（`action=learn/verify/auto/codegen`） |
+| Modbus | `elab_modbus`（`action=meta/status/open/close/read/write/start/stop/transactions/map`） |
 | 工程与包 | `elab_pkg`（`action=status/search/install/activate/remove/update/verify/adapt`） |
 
 > 旧名（`elab_triple` / `elab_frame_profile` / `elab_debug_open` …）已收进对应门面；
 > 需要过渡期时把插件配置 `toolMode: both` 打开，旧名会作为带废弃提示的别名一并注册。
 > 完整意图树（每个动作的同义词与前置条件）用 `elab_guide` 按 `topic` 取。
+
+### ⑪ Modbus RTU 主站：点表驱动的工业总线（F411 从站实机）
+
+同一块面板不只测自己的协议，也直接读工业设备。主站**挂在已开的串口会话上**——不新开端口、
+不复制读线程，面板 / 串口工作区 / agent 三方看的是同一份字节。点表是声明式 JSON
+（`projects/<name>.modbus.json`），现场语义（地址 / 类型 / 字序 / 换算 / 单位）全在里面，
+面板本身不硬编码任何从站细节：换个从站只是换一份点表。
+
+| 能力 | 实机证据（STM32F411 从站 · COM10@115200） |
+|---|---|
+| 点表轮询 | 31 个点 / 5 组 → 每轮合并成 **8 条读**（同功能码相邻地址合并）；成功 21 / 超时 0 / CRC 0 / 异常 0 |
+| 单次读写 | FC03 读回 `[1041, 256]`；**FC16 批量写** `1,2,3,4` 后读回逐字一致；FC15 写线圈同样对账通过 |
+| 写保护 | 缺 `confirm` 内核直接拒；越界写被从站以**异常码 02** 挡回（`0x0010` 起批量 4 个越界），面板标 `exception` |
+| agent 同源 | `elab_modbus` 十个动作走同一个引擎，事务流水按 `source` 区分 `agent` / `panel` |
+| 双缓冲证据 | 诊断寄存器 `rx_ht=30 / rx_tc=30`（环的两半都被用到）、`tx_pingpong=32`（第二块发送缓冲真在用）、`overrun=0 / drop=0 / tx_drop=0` |
+
+<div align="center">
+<table>
+<tr>
+<td><img src="docs/tutorials/assets/protocol/modbus/01-panel.png" width="440" alt="Modbus 面板：连接条 / 统计 / 点表 / 单次读写 / 事务流水"><br><sub>面板总览：连接条 · 成功/超时/CRC/异常统计 · 点表 · 单次读与写 · 事务流水</sub></td>
+<td><img src="docs/tutorials/assets/protocol/modbus/07-batch-readback.png" width="440" alt="FC16 批量写后读回对账"><br><sub>FC16 批量写 <code>1,2,3,4</code> → 读回 <code>values=[1, 2, 3, 4]</code>；流水里 FC16 与 FC03 逐条落账</sub></td>
+</tr>
+</table>
+</div>
+
+细节（帧格式与 CRC、点表合并规则、**为什么用 CIRC DMA + HT/TC 而不是硬件 DBM**、
+接收重入竞态的修法、排错手册与验收表）见 [09-协议上手_Modbus](docs/tutorials/09-协议上手_Modbus.md)；
+从站例程在 [`examples/STM32F411_modbus`](examples/STM32F411_modbus)。
 
 <a id="quickstart"></a>
 
@@ -448,3 +479,19 @@ docs/**                   教程、设计约束、架构分析
 - 常驻监视的实时流只活环形缓冲（重启即失）；要证据走闭环 `monitor` 或「录制」。
 - 字节视图只渲染最近若干批（驾驶舱 300 / DSH 200）；波形共享解码最多看帧环 1024 帧，更早的用「导出 / 录制」留档。
 - 录制产物是有界 JSONL（可回放），界面暂无回放器；双槽传输中拔电续传待复验。
+
+<a id="license"></a>
+
+## 许可证
+
+**Apache License 2.0** —— 授权正文见 [LICENSE](LICENSE)，版权与归属声明见 [NOTICE](NOTICE)。
+
+| 版本区间 | 协议 | 说明 |
+|---|---|---|
+| **v4.0.0 起** | Apache-2.0 | 内核、随仓插件 `packages/dsh-elab-cockpit`、官方适配包 `packs/official/**` |
+| v1.0.0 – v3.1.0 | MIT | **该授权永久有效**，已发布版本继续是 MIT，本次变更不可追溯 |
+
+- Apache-2.0 附带**明确的专利授权**与**变更声明**要求，适合商用集成与二次分发。
+- 本项目含来自 [Lissio](https://codeberg.org/Horldsence/Lissio)（Apache-2.0）的移植代码，归属与逐文件修改清单见 NOTICE。
+- **按 Apache-2.0 §4(d)**：二次分发本项目时请**一并携带 LICENSE 与 NOTICE**。
+- 外置社区芯片包（`artery/at32`、`espressif/esp32`）的协议由各自仓库声明，与本仓无关。

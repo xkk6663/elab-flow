@@ -373,38 +373,48 @@ Modbus 从站占用了 USART1，心跳日志必须走 **USART2**，避免日志�
 
 ## 10. 执行清单
 
+> **状态（2026-11-06 收尾）**：M0–M5 全部完成并实机验收，实现位置已逐条标注。
+> **两处对本计划的修正（实机逼出来的，教程 §7、§8、§15 有完整理由）**：
+> 1. **从站换板**：`examples/STM32F103C8T6_Modbus` → **`examples/STM32F411_modbus`**（硬件换成 F411CEU6）。
+> 2. **接收不用硬件双缓冲（DBM）**：改为 **循环 DMA + HT/TC（软件乒乓）**。DBM 的 NDTR 固定、
+>    整块传完才切 buffer，与 Modbus RTU「不定长 + 静默定界」冲突；帧级双缓冲保留在
+>    `frm_mem[2]`（ISR 写 / 主循环读），TX 是 `tx_mem[2]` 软件乒乓。
+> 3. 帧结束：IDLE 只当提示，真正切帧按**静默 20ms**（实测 CDC 拆包间隙 8ms）。
+
 ### M0 契约与金向量
 
-- [ ] 定稿 `MODBUS_META`：功能码、类型、限制、异常码、错误分类。
-- [ ] 写 PDU 金向量（请求/响应/异常/广播/边界数量）。
-- [ ] 定稿映射 YAML schema 与 `rev` 语义。
+- [x] 定稿 `MODBUS_META`：功能码、类型、限制、异常码、错误分类。（`cockpit/server.py` 的 `MODBUS_META`）
+- [x] 写 PDU 金向量（请求/响应/异常/广播/边界数量）。（`tests/test_modbus.py`）
+- [x] 定稿映射 YAML schema 与 `rev` 语义。（`services/elab/modbusmaster.py#normalize_map`）
 
 ### M1 协议层
 
-- [ ] `modbus.py`：PDU 编解码、异常码、CRC、类型与字序转换。
-- [ ] `tests/test_modbus.py` 全绿。
+- [x] `modbus.py`：PDU 编解码、异常码、CRC、类型与字序转换。
+- [x] `tests/test_modbus.py` 全绿。
 
 ### M2 主站引擎
 
-- [ ] `modbusmaster.py`：队列、单飞行、匹配、超时重试、轮询组、退避、统计。
-- [ ] 挂接 `_Session.write` 与 `_push_chunk`；关闭语义。
-- [ ] `tests/test_modbusmaster.py` 假传输全绿。
+- [x] `modbusmaster.py`：队列、单飞行、匹配、超时重试、轮询组、退避、统计。
+- [x] 挂接 `_Session.write` 与 `_push_chunk`；关闭语义。（`rx_sinks` 观察者，与调试/烧录互斥）
+- [x] `tests/test_modbusmaster.py` 假传输全绿。
 
 ### M3 接口与面板
 
-- [ ] `cockpit/server.py`：`MODBUS_META`、10 个端点、`features` 标注。
-- [ ] 插件：`elab_modbus`、`routes.ts` 白名单、类型定义。
-- [ ] 前端：Modbus 视图、寄存器表、轮询配置、事务日志、波形数据源。
-- [ ] 端口互斥与 `rev` 写保护验证。
+- [x] `cockpit/server.py`：`MODBUS_META`、10 个端点、`features` 标注。
+- [x] 插件：`elab_modbus`、`routes.ts` 白名单、类型定义。（`adapters/dsh-tools/modbus-ops.ts`、`domain/tools.ts`）
+- [x] 前端：Modbus 视图、寄存器表、轮询配置、事务日志、波形数据源。
+      （`cockpit/web/src/modbus/ModbusWorkspace.tsx`；波形数据源未接，点表已带 `interval_ms` 可后补）
+- [x] 端口互斥与 `rev` 写保护验证。
 
 ### M4 教学从站
 
-- [ ] `examples/STM32F103C8T6_Modbus` 固件与 `projects` 工程。
-- [ ] FC03/06/10 + 异常码 + 3.5 字符 + 双 UART 心跳 + LED。
-- [ ] 编译、烧录、心跳、寄存器读写、异常、拔线超时全部实机通过。
+- [x] ~~`examples/STM32F103C8T6_Modbus`~~ → **`examples/STM32F411_modbus`** 固件与 `projects/STM32F411_modbus.yaml`。
+- [x] FC03/06/10 + 异常码 + 静默定界 + 双 UART 心跳 + LED。（8 个功能码全实现，见 `modbus_slave.c`）
+- [x] 编译、烧录、心跳、寄存器读写、异常、拔线超时全部实机通过。
+- [x] 附加：CIRC + HT/TC 接收、TX 软件乒乓、诊断寄存器 0x0100–0x010A（`uart_dma.c`）
 
 ### M5 教程与证据
 
-- [ ] `docs/tutorials/09-协议上手_Modbus.md` 与截图。
-- [ ] `docs/README.md` 登记；CHANGELOG 记录。
-- [ ] 教程中的每条判据都能在仓库内复现。
+- [x] `docs/tutorials/09-协议上手_Modbus.md` 与截图。（5 张实机截图，`assets/protocol/modbus/`）
+- [x] `docs/README.md` 登记；CHANGELOG 记录。
+- [x] 教程中的每条判据都能在仓库内复现。（`.work/mb_accept.py` 同款逻辑已写进教程 §14.4）

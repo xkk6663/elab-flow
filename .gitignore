@@ -45,3 +45,7 @@ node_modules/
 
 # frame codegen 产物（由 profile 生成，`POST /api/serial/frames/codegen write=true` 可重建）
 generated/
+
+# 插件包内携带的许可证副本（prepack 时从仓库根复制生成，不入库，避免两份副本漂移）
+packages/dsh-elab-cockpit/LICENSE
+packages/dsh-elab-cockpit/NOTICE

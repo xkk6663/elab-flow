@@ -1874,3 +1874,136 @@ export interface ElabConfig {
   /** 首次打开面板时自动准备内核与工具链（默认 true；唯一不自动的是主机 Python）。 */
   autoProvision: boolean;
 }
+
+// ── Modbus RTU 主站（/api/modbus/*）────────────────────────────────────
+//
+// 字段口径的权威在 `services/elab/modbusmaster.py`（snapshot / transactions /
+// read / write）与 `modbus.py`（限值、功能码、异常码）——这里只是照抄形状。
+// 2026-11-06 从 `cockpit/web/src/modbus/types.ts` 上移：DSH 窄栏也长出了
+// Modbus 面板，两边必须消费同一份定义（否则工具返回与面板渲染会悄悄分叉）。
+
+/** 点定义（projects/<name>.modbus.json 的 points[]）。 */
+export interface ModbusPointDef {
+  name: string;
+  fc: number;
+  address: number;
+  count?: number;
+  type?: string;
+  word_order?: string;
+  scale?: number;
+  bias?: number;
+  unit?: string;
+  writable?: boolean;
+  plot?: boolean;
+  enum?: Record<string, string>;
+  note?: string;
+}
+
+/** 一个点的实时值（snapshot.points[]）。 */
+export interface ModbusPointLive {
+  name: string;
+  def: ModbusPointDef;
+  /** 原始寄存器字（类型合并前的值；u16 时与 value 相同） */
+  raw: number | number[] | null;
+  /** 换算后的业务值（scale/bias 已应用） */
+  value: number | string | null;
+  unit: string;
+  /** Unix 秒；0 = 还没读到过 */
+  ts: number;
+  /** 空串 = 正常；否则是错误分类（timeout/crc/exception…） */
+  error: string;
+}
+
+/** 引擎统计（snapshot.stats）。 */
+export interface ModbusStats {
+  tx: number;
+  rx: number;
+  ok: number;
+  timeout: number;
+  crc: number;
+  exception: number;
+  malformed: number;
+  port: number;
+  retry: number;
+  noise: number;
+  dropped: number;
+  last_ok_ts: number;
+  last_ok_ms_ago: number | null;
+  /** 最近一次失败的人话描述；**可能是 null**（内核快照里没失败过就是 null）。 */
+  last_error: string | null;
+  last_error_ts: number;
+}
+
+/** GET /api/modbus/state 的 engine 段。 */
+export interface ModbusEngineState {
+  active: boolean;
+  unit_id?: number;
+  timeout_ms?: number;
+  retries?: number;
+  polling?: boolean;
+  groups?: string[];
+  session?: { project: string; port: string; baud: number; epoch: number };
+  stats?: ModbusStats;
+  points?: ModbusPointLive[];
+  pending?: number;
+  seq?: number;
+  uptime_s?: number;
+  last_error?: string;
+  map_rev?: number;
+}
+
+/** 一条事务（transactions[]）。 */
+export interface ModbusTxn {
+  seq: number;
+  ts: number;
+  source: string;
+  group: string;
+  point: string;
+  unit: number;
+  fc: number;
+  label: string;
+  address: number;
+  count: number;
+  tx_hex: string;
+  rx_hex: string;
+  ok: boolean;
+  attempts: number;
+  elapsed_ms: number;
+  error: { kind: string; code: number; code_name: string; detail: string } | null;
+}
+
+/** 点表（含 rev 与 groups）。 */
+export interface ModbusMap {
+  rev?: number;
+  unit_id?: number;
+  points: ModbusPointDef[];
+  groups?: Array<{ name: string; interval_ms: number; points?: string[]; enabled?: boolean }>;
+}
+
+/** GET /api/modbus/state。 */
+export interface ModbusStateResponse {
+  ok: boolean;
+  engine: ModbusEngineState;
+  transactions: ModbusTxn[];
+  map?: ModbusMap;
+}
+
+/** 一次读/写的结果（内核 run() 的返回）。 */
+export interface ModbusRunResult {
+  ok: boolean;
+  request?: {
+    unit: number;
+    fc: number;
+    label: string;
+    address: number;
+    count: number;
+    values?: number[];
+    broadcast?: boolean;
+  };
+  response?: { values?: unknown[]; echo_address?: number; echo_value?: number } | null;
+  values?: unknown[];
+  error?: { kind: string; code: number; code_name: string; detail: string } | null;
+  elapsed_ms?: number;
+  attempts?: number;
+  broadcast?: boolean;
+}

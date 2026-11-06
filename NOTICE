@@ -14,3 +14,10 @@ full mapping table):
   cockpit/web/src/serial/bytes.ts          — HEX/ASCII/UTF-8/GBK 投影
   cockpit/web/src/serial/useSerialStream.ts — 双游标/纪元重置的轮询缓冲（重写）
   services/elab/serialcodec.py             — JustFloat / FireWater 解码（按算法重写）
+
+────────────────────────────────────────────────────────────────────────────
+Protocol history / 协议沿革
+
+  v4.0.0 起          — Apache License 2.0（正文见仓库根 LICENSE）。
+  v1.0.0 ~ v3.1.0   — MIT License。该授权为永久授权，不受本次变更影响，
+                      已发布版本继续以 MIT 授权。

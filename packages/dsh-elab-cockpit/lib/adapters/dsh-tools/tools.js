@@ -24,6 +24,7 @@ import { debugAction, debugInspect } from "./debug-ops.js";
 import { frameAction, frameLearnAction } from "./frame-ops.js";
 import { AGENT_USAGE, agentGuidePayload } from "./guide.js";
 import { legacyToolDefinitions } from "./legacy.js";
+import { modbusAction } from "./modbus-ops.js";
 import { statusSnapshot } from "./overview-ops.js";
 import { pkgAction } from "./pkg-ops.js";
 import { jsonOutput, makeTool } from "./runtime.js";
@@ -46,6 +47,7 @@ const IMPLS = {
     elab_frame: async (deps, args) => frameAction(deps, String(args?.action ?? ''), args ?? {}),
     elab_frame_learn: async (deps, args) => frameLearnAction(deps, String(args?.action ?? ''), args ?? {}),
     elab_pkg: async (deps, args) => pkgAction(deps, String(args?.action ?? ''), args ?? {}),
+    elab_modbus: async (deps, args) => modbusAction(deps, String(args?.action ?? ''), args ?? {}),
 };
 /** 面板卡片标题（presentCall；门面标题带动作，agent/用户都看得懂在做什么）。 */
 const TITLES = {
@@ -63,6 +65,7 @@ const TITLES = {
     elab_frame: 'elab 帧协议 profile',
     elab_frame_learn: 'elab 协议自学习',
     elab_pkg: 'elab 芯片包与工程接入',
+    elab_modbus: 'elab Modbus RTU 主站',
 };
 /** 门面卡片标题：带上 action（用户看得到「这次到底调了哪个动作」）。 */
 function titleFor(contract, args) {

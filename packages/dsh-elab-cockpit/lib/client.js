@@ -2720,6 +2720,43 @@ var elabApi = {
     withSession("/elab/api/project", sessionId),
     { action: "set_probe", name, probe }
   ),
+  // ── Modbus RTU 主站（挂在串口会话上，与面板/agent 同一份字节）────────
+  /**
+   * GET /api/modbus/state：引擎快照 + 点表 + 增量事务流水。
+   * `after` 是流水游标（只回比它新的），engine 没起来也回点表 —— 面板可以
+   * 先画出"有哪些点"，再等用户点「打开主站」。
+   */
+  modbusState: (project, after = 0, sessionId) => {
+    const q = new URLSearchParams();
+    if (project !== "") q.set("project", project);
+    if (after > 0) q.set("after", String(after));
+    const qs = q.toString();
+    return request(
+      withSession(`/elab/api/modbus/state${qs === "" ? "" : `?${qs}`}`, sessionId)
+    );
+  },
+  /** POST /api/modbus/open：建主站（复用/代开串口会话）；probe=顺手读一次设备 ID。 */
+  modbusOpen: (opts) => post(
+    withSession("/elab/api/modbus/open", opts.sessionId),
+    opts
+  ),
+  /** POST /api/modbus/close：关主站（串口会话按会话策略保留/释放）。 */
+  modbusClose: (sessionId) => post(withSession("/elab/api/modbus/close", sessionId), {}),
+  /** POST /api/modbus/start：按点表分组起轮询；groups 缺省用点表里的组。 */
+  modbusStart: (groups, sessionId) => post(withSession("/elab/api/modbus/start", sessionId), {
+    ...groups === void 0 ? {} : { groups }
+  }),
+  modbusStop: (sessionId) => post(withSession("/elab/api/modbus/stop", sessionId), {}),
+  /** POST /api/modbus/read：单次读（FC01/02/03/04）。 */
+  modbusRead: (opts) => post(withSession("/elab/api/modbus/read", opts.sessionId), opts),
+  /**
+   * POST /api/modbus/write：单次写（FC05/06/0F/10）。
+   * ★ 面板侧必须**先弹确认**；内核还要求 `confirm: true` 才肯发。
+   */
+  modbusWrite: (opts) => post(withSession("/elab/api/modbus/write", opts.sessionId), {
+    ...opts,
+    confirm: true
+  }),
   discover: (sessionId, refresh = false) => {
     const q = new URLSearchParams();
     if (sessionId !== void 0 && sessionId !== "") q.set("sessionId", sessionId);
@@ -3944,6 +3981,7 @@ function EvidenceTail(props) {
   followRef.current = follow;
   const lines = buffers[channel] ?? [];
   const serialMode = channel === "serial" && props.serialContent !== void 0;
+  const workMode = props.workTabActive === true && props.workTab !== void 0 && props.workTab !== null;
   useEffect(() => {
     const el = scrollRef.current;
     if (el === null || !followRef.current) return;
@@ -3991,7 +4029,10 @@ function EvidenceTail(props) {
         {
           key: c,
           type: "button",
-          onClick: () => props.onChannel(c),
+          onClick: () => {
+            if (workMode) props.onWorkTab?.(false);
+            props.onChannel(c);
+          },
           style: {
             padding: "1px 6px",
             fontSize: "11px",
@@ -4008,7 +4049,26 @@ function EvidenceTail(props) {
         count > 0 ? /* @__PURE__ */ react_default.createElement("span", { style: { opacity: 0.6 } }, ` ${count}`) : null
       );
     }),
-    /* @__PURE__ */ react_default.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" } }, serialMode ? null : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
+    props.workTab !== void 0 && props.workTab !== null ? /* @__PURE__ */ react_default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => props.onWorkTab?.(!workMode),
+        title: `${props.workTab.label} \u5DE5\u4F5C\u533A\uFF08\u4E0E\u65E5\u5FD7\u901A\u9053\u4E92\u65A5\uFF09`,
+        style: {
+          padding: "1px 6px",
+          fontSize: "11px",
+          borderRadius: "4px",
+          border: `1px solid ${workMode ? "var(--elab-accent)" : "transparent"}`,
+          background: workMode ? "var(--elab-bg-raised)" : "transparent",
+          color: workMode ? "var(--elab-fg-primary)" : "var(--elab-fg-muted)",
+          cursor: "pointer",
+          whiteSpace: "nowrap"
+        }
+      },
+      props.workTab.label
+    ) : null,
+    /* @__PURE__ */ react_default.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: "4px" } }, serialMode || workMode ? null : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
@@ -4062,7 +4122,7 @@ function EvidenceTail(props) {
       },
       "\u26F6"
     ) : null)
-  ), serialMode ? /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, props.serialContent) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, progress !== null && progress.total > 0 ? /* @__PURE__ */ react_default.createElement(ProgressBar, { current: progress.current, total: progress.total, label: progress.label, startedAt: null }) : null, failure !== null ? /* @__PURE__ */ react_default.createElement(
+  ), workMode ? /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, props.workTab?.content) : serialMode ? /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" } }, props.serialContent) : /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, progress !== null && progress.total > 0 ? /* @__PURE__ */ react_default.createElement(ProgressBar, { current: progress.current, total: progress.total, label: progress.label, startedAt: null }) : null, failure !== null ? /* @__PURE__ */ react_default.createElement(
     "button",
     {
       type: "button",
@@ -6151,6 +6211,385 @@ function WaveChart(props) {
   ), pa ? /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "4px", paddingTop: "4px", borderTop: "1px dashed var(--elab-border)", fontSize: "var(--elab-fs-xs)", fontFamily: "var(--elab-font-mono)" } }, /* @__PURE__ */ react_default.createElement("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px", color: "var(--elab-fg-secondary)" } }, /* @__PURE__ */ react_default.createElement("span", null, "A #", pa.index, pa.t_us !== void 0 ? ` \xB7 ${new Date(pa.t_us / 1e3).toISOString().slice(11, 23)}` : ""), pb ? /* @__PURE__ */ react_default.createElement(react_default.Fragment, null, /* @__PURE__ */ react_default.createElement("span", null, "B #", pb.index, pb.t_us !== void 0 ? ` \xB7 ${new Date(pb.t_us / 1e3).toISOString().slice(11, 23)}` : ""), /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-primary)", fontWeight: 600 } }, "\u0394\u5E27 ", delta?.d_frames ?? "\u2014", "\u3000\u0394t ", fmtDuration(delta?.dt_us ?? null))) : /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-fg-faint)" } }, "Shift+\u70B9\u51FB\u8BBE\u7F6E B\uFF08\u5F53\u524D\u53EA\u6709 A\uFF09")), /* @__PURE__ */ react_default.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "var(--elab-fs-xs)", fontFamily: "var(--elab-font-mono)" } }, /* @__PURE__ */ react_default.createElement("thead", null, /* @__PURE__ */ react_default.createElement("tr", { style: { color: "var(--elab-fg-secondary)" } }, /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "\u901A\u9053"), /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "A"), pb ? /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "B") : null, pb ? /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, "\u0394\u539F\u59CB") : null, /* @__PURE__ */ react_default.createElement("th", { style: { textAlign: "left", padding: "2px 6px", borderBottom: "1px solid var(--elab-border)" } }, pb ? "\u0394\u7F29\u653E" : "\u5355\u4F4D"))), /* @__PURE__ */ react_default.createElement("tbody", null, shownCh.map((ch, i) => /* @__PURE__ */ react_default.createElement("tr", { key: ch }, /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, labelOf(ch)), /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(pa.values[ch])), pb ? /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(pb.values[ch])) : null, pb ? /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, fmtValue(delta?.dy[i] ?? NaN)) : null, /* @__PURE__ */ react_default.createElement("td", { style: { padding: "2px 6px" } }, pb ? fmtValue(delta?.dy_scaled[i] ?? NaN) : unitOf(ch) || "\u2014"))))), /* @__PURE__ */ react_default.createElement("div", { style: { color: "var(--elab-fg-faint)" } }, shownTimes === null ? "\u5F53\u524D\u7A97\u53E3\u6CA1\u6709\u65F6\u95F4\u6E90\uFF08\u4F1A\u8BDD\u672A\u5F00\u6216\u672A\u542F\u7528\u5171\u4EAB\u89E3\u7801\uFF09\u2192 \u0394t \u663E\u793A \u2014\u3002" : "\u0394t \u7528 RX \u6279\u6B21\u65F6\u95F4\u6233\uFF08\u540C\u6279\u591A\u5E27\u65F6\u95F4\u76F8\u540C\uFF09\uFF0C\u7CBE\u5EA6\u53D7\u6279\u5927\u5C0F\u9650\u5236\u3002")) : null);
 }
 
+// src/adapters/dsh-web/ModbusPane.tsx
+var POLL_MS = 400;
+var MAX_TXNS = 40;
+var FC_READ = [
+  { v: 1, label: "01 \u7EBF\u5708" },
+  { v: 2, label: "02 \u79BB\u6563" },
+  { v: 3, label: "03 \u4FDD\u6301" },
+  { v: 4, label: "04 \u8F93\u5165" }
+];
+var FC_WRITE = [
+  { v: 5, label: "05 \u5355\u7EBF\u5708" },
+  { v: 6, label: "06 \u5355\u5BC4\u5B58\u5668" },
+  { v: 15, label: "15 \u591A\u7EBF\u5708" },
+  { v: 16, label: "16 \u591A\u5BC4\u5B58\u5668" }
+];
+var MUTED = "var(--elab-fg-muted)";
+var MONO2 = "var(--elab-font-mono)";
+var numStyle = {
+  width: "54px",
+  padding: "1px 4px",
+  fontFamily: MONO2,
+  fontSize: "11px",
+  color: "var(--elab-fg-primary)",
+  background: "var(--elab-bg-code)",
+  border: "1px solid var(--elab-border)",
+  borderRadius: "3px"
+};
+var selStyle = { ...numStyle, width: "auto" };
+var btnStyle = (active = false, disabled = false) => ({
+  padding: "1px 7px",
+  fontSize: "11px",
+  borderRadius: "3px",
+  border: `1px solid ${active ? "var(--elab-accent)" : "var(--elab-border)"}`,
+  background: active ? "var(--elab-bg-raised)" : "transparent",
+  color: disabled ? "var(--elab-fg-dimmed)" : active ? "var(--elab-fg-primary)" : "var(--elab-fg-secondary)",
+  cursor: disabled ? "default" : "pointer",
+  whiteSpace: "nowrap"
+});
+var rowStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: "4px",
+  padding: "4px 8px",
+  borderBottom: "1px solid var(--elab-border)",
+  flexWrap: "wrap"
+};
+var labelStyle = { fontSize: "11px", color: MUTED, whiteSpace: "nowrap" };
+function fmtValue2(p) {
+  const v = p.value;
+  if (v === null || v === void 0) return "\u2014";
+  if (typeof v === "number") {
+    if (Number.isInteger(v)) return String(v);
+    return v.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return String(v);
+}
+function ageText(ts) {
+  if (!ts) return "\u2014";
+  const d = Date.now() / 1e3 - ts;
+  if (d < 1) return "\u521A\u521A";
+  if (d < 60) return `${d.toFixed(1)}s`;
+  return `${Math.round(d / 60)}m`;
+}
+function ModbusPane(props) {
+  const { api, project, sessionId, running = false } = props;
+  const [st, setSt] = useState(null);
+  const [err, setErr] = useState("");
+  const [actErr, setActErr] = useState("");
+  const [busy, setBusy] = useState("");
+  const [last, setLast] = useState(null);
+  const [lastKind, setLastKind] = useState("probe");
+  const [unit, setUnit] = useState("1");
+  const [timeoutMs, setTimeoutMs] = useState("120");
+  const [retries, setRetries] = useState("2");
+  const [rFc, setRFc] = useState(3);
+  const [rAddr, setRAddr] = useState("0");
+  const [rCount, setRCount] = useState("6");
+  const [wFc, setWFc] = useState(6);
+  const [wAddr, setWAddr] = useState("16");
+  const [wValue, setWValue] = useState("1");
+  const [wValues, setWValues] = useState("1,0,1,0");
+  const seqRef = useRef(0);
+  const txnsRef = useRef([]);
+  const [txns, setTxns] = useState([]);
+  const engine = st?.engine?.active === true ? st.engine : null;
+  const map = st?.map;
+  const stats = engine?.stats;
+  const points = useMemo(() => {
+    if (engine?.points !== void 0 && engine.points.length > 0) return engine.points;
+    return (map?.points ?? []).map((def) => ({
+      name: def.name,
+      def,
+      raw: null,
+      value: null,
+      unit: def.unit ?? "",
+      ts: 0,
+      error: ""
+    }));
+  }, [engine, map]);
+  const diagPoints = useMemo(
+    () => points.filter((p) => p.def.fc === 3 && p.def.address >= 256 && p.def.address <= 271),
+    [points]
+  );
+  const wTarget = useMemo(() => {
+    const addr = Number(wAddr);
+    if (!Number.isFinite(addr)) return void 0;
+    return points.find((p) => p.def.address === addr);
+  }, [points, wAddr]);
+  const poll = useCallback(async () => {
+    try {
+      const res = await api.modbusState(project, seqRef.current, sessionId);
+      setSt(res);
+      setErr("");
+      if (Array.isArray(res.transactions) && res.transactions.length > 0) {
+        const merged = [...txnsRef.current, ...res.transactions].slice(-MAX_TXNS);
+        txnsRef.current = merged;
+        setTxns(merged);
+        seqRef.current = merged[merged.length - 1]?.seq ?? seqRef.current;
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, project, sessionId]);
+  useEffect(() => {
+    seqRef.current = 0;
+    txnsRef.current = [];
+    setTxns([]);
+    setSt(null);
+    setLast(null);
+  }, [project]);
+  useEffect(() => {
+    void poll();
+    const t = window.setInterval(() => void poll(), POLL_MS);
+    return () => window.clearInterval(t);
+  }, [poll]);
+  const guard = async (tag, fn) => {
+    setBusy(tag);
+    setActErr("");
+    try {
+      await fn();
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  const doOpen = () => {
+    void guard("open", async () => {
+      const res = await api.modbusOpen({
+        project,
+        unit_id: Number(unit) || 1,
+        timeout_ms: Number(timeoutMs) || 120,
+        retries: Number(retries) || 0,
+        probe: true,
+        sessionId
+      });
+      if (res.probe !== void 0) {
+        setLast(res.probe);
+        setLastKind("probe");
+      }
+      await poll();
+    });
+  };
+  const doClose = () => {
+    void guard("close", async () => {
+      await api.modbusClose(sessionId);
+      await poll();
+    });
+  };
+  const doStart = () => {
+    void guard("start", async () => {
+      await api.modbusStart(void 0, sessionId);
+      await poll();
+    });
+  };
+  const doStop = () => {
+    void guard("stop", async () => {
+      await api.modbusStop(sessionId);
+      await poll();
+    });
+  };
+  const doRead = () => {
+    void guard("read", async () => {
+      const r = await api.modbusRead({
+        project,
+        fc: rFc,
+        address: Number(rAddr) || 0,
+        count: Number(rCount) || 1,
+        sessionId
+      });
+      setLast(r);
+      setLastKind("read");
+      await poll();
+    });
+  };
+  const doWrite = () => {
+    const addr = Number(wAddr) || 0;
+    const val = Number(wValue) || 0;
+    const multi = wFc === 15 || wFc === 16;
+    const vals = wValues.split(/[\s,;]+/).filter((x) => x !== "").map(Number);
+    if (multi) {
+      if (vals.length === 0 || vals.some((n) => !Number.isFinite(n))) {
+        setActErr("\u6279\u91CF\u5199\u7684\u503C\u5217\u8868\u5FC5\u987B\u662F\u9017\u53F7\u5206\u9694\u7684\u6570\u5B57\uFF0C\u4F8B\u5982 1,0,1,0");
+        return;
+      }
+      if (wFc === 15 && vals.some((n) => n !== 0 && n !== 1)) {
+        setActErr("FC15 \u5199\u7EBF\u5708\u53EA\u8BA4 0/1\uFF08\u5185\u6838\u4F1A\u518D\u8F6C\u6210 0xFF00/0x0000\uFF09");
+        return;
+      }
+    }
+    const fcLabel = FC_WRITE.find((f) => f.v === wFc)?.label ?? `FC${wFc}`;
+    const shown = multi ? `${vals.length} \u4E2A\uFF08${vals.join(", ")}\uFF09` : String(val);
+    const ok = window.confirm(
+      `\u786E\u8BA4\u5728\u603B\u7EBF\u4E0A\u5199\uFF1F
+
+${fcLabel}
+\u4ECE\u7AD9 ${unit} \xB7 \u5730\u5740 ${addr}\uFF080x${addr.toString(16).toUpperCase()}\uFF09
+\u503C ${shown}`
+    );
+    if (!ok) return;
+    void guard("write", async () => {
+      const r = await api.modbusWrite(
+        multi ? { project, fc: wFc, address: addr, values: vals, sessionId } : { project, fc: wFc, address: addr, value: val, sessionId }
+      );
+      setLast(r);
+      setLastKind("write");
+      await poll();
+    });
+  };
+  const dot2 = busy !== "" ? "var(--elab-status-run)" : engine?.polling === true ? stats !== void 0 && stats.last_error ? "var(--elab-status-fail)" : "var(--elab-status-ok)" : engine !== null ? "var(--elab-status-ok)" : "var(--elab-fg-dimmed)";
+  const linkLabel = engine !== null ? `${engine.session?.port ?? "auto"}@${engine.session?.baud ?? "?"} \xB7 \u4ECE\u7AD9 ${engine.unit_id ?? "?"} \xB7 ${engine.polling === true ? `\u8F6E\u8BE2\u4E2D\uFF08${(engine.groups ?? []).join("/")}\uFF09` : "\u7A7A\u95F2"}` : "\u672A\u8FDE\u63A5\uFF08\u70B9\u300C\u6253\u5F00\u4E3B\u7AD9\u300D\uFF09";
+  const lastText = (() => {
+    if (last === null) return "";
+    const kind = lastKind === "probe" ? "\u6253\u5F00\u65F6\u63A2\u6D4B" : lastKind === "write" ? "\u4E0A\u6B21\u5199\u5165" : "\u4E0A\u6B21\u8BFB\u53D6";
+    if (last.ok !== true) {
+      const d = last.error?.detail ?? last.error?.kind ?? "\u5931\u8D25";
+      return `${kind} \u2717 ${d}${last.elapsed_ms === void 0 ? "" : ` \xB7 ${last.elapsed_ms}ms`}`;
+    }
+    const vals = last.values;
+    const shown = Array.isArray(vals) && vals.length > 0 ? `values=[${vals.slice(0, 8).join(", ")}${vals.length > 8 ? ", \u2026" : ""}]` : "ok";
+    return `${kind} OK \xB7 ${shown}${last.elapsed_ms === void 0 ? "" : ` \xB7 ${last.elapsed_ms}ms`}`;
+  })();
+  const panelStyle = {
+    flex: "0 0 auto",
+    borderBottom: "1px solid var(--elab-border)"
+  };
+  const headStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "3px 8px",
+    background: "var(--elab-bg-surface)",
+    borderBottom: "1px solid var(--elab-border)"
+  };
+  return /* @__PURE__ */ react_default.createElement("div", { style: { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("div", { style: headStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { width: "7px", height: "7px", borderRadius: "50%", background: dot2, flex: "0 0 auto" } }), /* @__PURE__ */ react_default.createElement(
+    "span",
+    {
+      style: {
+        flex: "1 1 auto",
+        minWidth: 0,
+        fontSize: "11px",
+        fontFamily: MONO2,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      },
+      title: linkLabel
+    },
+    linkLabel
+  ), engine === null ? /* @__PURE__ */ react_default.createElement("button", { type: "button", style: btnStyle(true, busy === "open"), onClick: doOpen, disabled: busy === "open" }, "\u6253\u5F00\u4E3B\u7AD9") : /* @__PURE__ */ react_default.createElement("button", { type: "button", style: btnStyle(false, busy === "close"), onClick: doClose, disabled: busy === "close" }, "\u5173\u95ED\u4E3B\u7AD9"), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      style: btnStyle(engine?.polling === true, engine === null || busy !== ""),
+      onClick: engine?.polling === true ? doStop : doStart,
+      disabled: engine === null || busy !== "",
+      title: engine === null ? "\u5148\u6253\u5F00\u4E3B\u7AD9" : "\u6309\u70B9\u8868\u5206\u7EC4\u8F6E\u8BE2\uFF08\u540C\u529F\u80FD\u7801\u76F8\u90BB\u5730\u5740\u81EA\u52A8\u5408\u5E76\uFF09"
+    },
+    engine?.polling === true ? "\u505C\u6B62\u8F6E\u8BE2" : "\u5F00\u59CB\u8F6E\u8BE2"
+  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u4ECE\u7AD9"), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: unit, onChange: (e) => setUnit(e.currentTarget.value), "aria-label": "\u4ECE\u7AD9\u5730\u5740", disabled: engine !== null }), /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u8D85\u65F6ms"), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: timeoutMs, onChange: (e) => setTimeoutMs(e.currentTarget.value), "aria-label": "\u8D85\u65F6\u6BEB\u79D2", disabled: engine !== null }), /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u91CD\u8BD5"), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: retries, onChange: (e) => setRetries(e.currentTarget.value), "aria-label": "\u91CD\u8BD5\u6B21\u6570", disabled: engine !== null })), stats !== void 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { ...rowStyle, gap: "6px" } }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-ok)" } }, "\u6210\u529F ", stats.ok), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: stats.timeout > 0 ? "var(--elab-status-run)" : MUTED } }, "\u8D85\u65F6 ", stats.timeout), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: stats.crc > 0 ? "var(--elab-status-fail)" : MUTED } }, "CRC ", stats.crc), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: stats.exception > 0 ? "var(--elab-status-run)" : MUTED } }, "\u5F02\u5E38 ", stats.exception), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: MUTED } }, "\u91CD\u8BD5 ", stats.retry), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: MUTED } }, "\u6700\u8FD1\u6210\u529F ", stats.last_ok_ms_ago === null ? "\u2014" : `${stats.last_ok_ms_ago}ms \u524D`), stats.last_error ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-status-fail)" } }, "\u6700\u8FD1\u9519\u8BEF ", stats.last_error) : null) : null, actErr !== "" || err !== "" ? /* @__PURE__ */ react_default.createElement("div", { style: { ...rowStyle, color: "var(--elab-status-fail)", fontSize: "11px" } }, actErr !== "" ? actErr : err) : null, /* @__PURE__ */ react_default.createElement("div", { style: panelStyle }, /* @__PURE__ */ react_default.createElement("div", { style: headStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-primary)" } }, "\u70B9\u4F4D"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: MUTED } }, points.length, " \u4E2A \xB7 rev ", map?.rev ?? "\u2014", map?.groups !== void 0 && map.groups.length > 0 ? ` \xB7 ${map.groups.length} \u7EC4` : ""), /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto" } }), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "10px", color: MUTED } }, "\u5730\u5740\u4E3A\u534F\u8BAE\u504F\u79FB")), /* @__PURE__ */ react_default.createElement("div", { style: { maxHeight: "168px", overflow: "auto" } }, /* @__PURE__ */ react_default.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontFamily: MONO2, fontSize: "11px" } }, /* @__PURE__ */ react_default.createElement("tbody", null, points.map((p) => /* @__PURE__ */ react_default.createElement("tr", { key: p.name, style: { borderBottom: "1px solid var(--elab-border)" } }, /* @__PURE__ */ react_default.createElement("td", { style: { padding: "1px 6px", color: "var(--elab-fg-secondary)", maxWidth: "118px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: p.def.note ?? p.name }, p.name, p.def.writable === true ? /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-accent)" } }, " W") : null), /* @__PURE__ */ react_default.createElement("td", { style: { padding: "1px 6px", color: MUTED, whiteSpace: "nowrap" } }, "0x", p.def.address.toString(16).toUpperCase().padStart(4, "0")), /* @__PURE__ */ react_default.createElement("td", { style: { padding: "1px 6px", color: p.value === null ? "var(--elab-fg-dimmed)" : "var(--elab-fg-primary)", textAlign: "right", whiteSpace: "nowrap" } }, fmtValue2(p), p.unit !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { color: MUTED } }, ` ${p.unit}`) : null), /* @__PURE__ */ react_default.createElement("td", { style: { padding: "1px 6px", color: MUTED, textAlign: "right", whiteSpace: "nowrap", width: "46px" } }, p.error !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { color: "var(--elab-status-fail)" } }, p.error) : p.ts > 0 ? ageText(p.ts) : "\u672A\u8BFB"))), points.length === 0 ? /* @__PURE__ */ react_default.createElement("tr", null, /* @__PURE__ */ react_default.createElement("td", { colSpan: 4, style: { padding: "6px 8px", color: MUTED, fontSize: "11px" } }, "\u8BE5\u5DE5\u7A0B\u6CA1\u6709\u70B9\u8868\uFF08projects/<\u5DE5\u7A0B>.modbus.json\uFF09")) : null)))), /* @__PURE__ */ react_default.createElement("div", { style: { ...panelStyle, borderBottom: "none" } }, /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-primary)" } }, "\u5355\u6B21\u8BFB"), /* @__PURE__ */ react_default.createElement("select", { style: selStyle, value: rFc, onChange: (e) => setRFc(Number(e.currentTarget.value)), "aria-label": "\u8BFB\u529F\u80FD\u7801" }, FC_READ.map((f) => /* @__PURE__ */ react_default.createElement("option", { key: f.v, value: f.v }, f.label))), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: rAddr, onChange: (e) => setRAddr(e.currentTarget.value), "aria-label": "\u8BFB\u5730\u5740" }), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: rCount, onChange: (e) => setRCount(e.currentTarget.value), "aria-label": "\u8BFB\u6570\u91CF" }), /* @__PURE__ */ react_default.createElement("button", { type: "button", style: btnStyle(false, busy === "read"), onClick: doRead, disabled: busy === "read" }, "\u8BFB\u4E00\u6B21")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-primary)" } }, "\u5355\u6B21\u5199"), /* @__PURE__ */ react_default.createElement("select", { style: selStyle, value: wFc, onChange: (e) => setWFc(Number(e.currentTarget.value)), "aria-label": "\u5199\u529F\u80FD\u7801" }, FC_WRITE.map((f) => /* @__PURE__ */ react_default.createElement("option", { key: f.v, value: f.v }, f.label))), /* @__PURE__ */ react_default.createElement("input", { style: numStyle, value: wAddr, onChange: (e) => setWAddr(e.currentTarget.value), "aria-label": "\u5199\u5730\u5740" }), wFc === 15 || wFc === 16 ? /* @__PURE__ */ react_default.createElement(
+    "input",
+    {
+      style: { ...numStyle, width: "86px" },
+      value: wValues,
+      onChange: (e) => setWValues(e.currentTarget.value),
+      "aria-label": "\u6279\u91CF\u5199\u7684\u503C\u5217\u8868",
+      placeholder: "1,0,1,0"
+    }
+  ) : /* @__PURE__ */ react_default.createElement(
+    "input",
+    {
+      style: numStyle,
+      value: wValue,
+      onChange: (e) => setWValue(e.currentTarget.value),
+      "aria-label": "\u5199\u503C"
+    }
+  ), /* @__PURE__ */ react_default.createElement(
+    "button",
+    {
+      type: "button",
+      style: btnStyle(false, engine === null || running || busy === "write"),
+      onClick: doWrite,
+      disabled: engine === null || running || busy === "write",
+      title: running ? "\u6709 run \u5728\u8DD1\uFF1A\u5199\u4E0E\u70E7\u5F55/\u8C03\u8BD5\u4E92\u65A5" : "\u5199\u4F1A\u52A8\u7269\u7406\u4E16\u754C\uFF0C\u70B9\u540E\u8FD8\u8981\u518D\u786E\u8BA4\u4E00\u6B21"
+    },
+    "\u5199\u5165"
+  )), /* @__PURE__ */ react_default.createElement("div", { style: { padding: "0 8px 4px", fontSize: "10px", color: MUTED, lineHeight: 1.45 } }, wTarget !== void 0 ? `0x${(Number(wAddr) || 0).toString(16).toUpperCase().padStart(4, "0")} = ${wTarget.name}${wTarget.def.note === void 0 ? "" : ` \xB7 ${wTarget.def.note}`}` : "\u8BE5\u5730\u5740\u4E0D\u5728\u70B9\u8868\u91CC\uFF1B\u5199\u4E0B\u53BB\u524D\u8BF7\u786E\u8BA4\u4ECE\u7AD9\u6587\u6863\uFF08\u5730\u5740\u4E3A\u534F\u8BAE\u504F\u79FB\uFF0C40001 \u2192 0\uFF09")), lastText !== "" ? /* @__PURE__ */ react_default.createElement(
+    "div",
+    {
+      style: {
+        ...rowStyle,
+        fontFamily: MONO2,
+        fontSize: "11px",
+        color: last?.ok === true ? "var(--elab-fg-secondary)" : "var(--elab-status-fail)"
+      }
+    },
+    lastText
+  ) : null, diagPoints.length > 0 ? /* @__PURE__ */ react_default.createElement("div", { style: panelStyle }, /* @__PURE__ */ react_default.createElement("div", { style: headStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-primary)" } }, "DMA \u8BCA\u65AD"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "10px", color: MUTED } }, "0x0100 \u6BB5 \xB7 \u53CC\u7F13\u51B2\u8BA1\u6570")), /* @__PURE__ */ react_default.createElement(
+    "div",
+    {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(88px, 1fr))",
+        gap: "4px",
+        padding: "4px 8px"
+      }
+    },
+    diagPoints.map((p) => /* @__PURE__ */ react_default.createElement(
+      "div",
+      {
+        key: p.name,
+        style: {
+          minWidth: 0,
+          padding: "3px 5px",
+          border: "1px solid var(--elab-border)",
+          borderRadius: "3px",
+          background: "var(--elab-bg-surface)"
+        },
+        title: p.def.note ?? p.name
+      },
+      /* @__PURE__ */ react_default.createElement(
+        "div",
+        {
+          style: {
+            fontSize: "9px",
+            color: MUTED,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontFamily: MONO2
+          }
+        },
+        p.name
+      ),
+      /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "12px", fontFamily: MONO2, color: "var(--elab-fg-primary)" } }, fmtValue2(p))
+    ))
+  )) : null, /* @__PURE__ */ react_default.createElement("div", null, /* @__PURE__ */ react_default.createElement("div", { style: headStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-primary)" } }, "\u4E8B\u52A1\u6D41\u6C34"), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: MUTED } }, "\u6700\u8FD1 ", txns.length, " \u6761 \xB7 seq ", engine?.seq ?? 0)), /* @__PURE__ */ react_default.createElement("div", { style: { maxHeight: "132px", overflow: "auto" } }, txns.length === 0 ? /* @__PURE__ */ react_default.createElement("div", { style: { padding: "6px 8px", fontSize: "11px", color: MUTED } }, "\u8FD8\u6CA1\u6709\u4E8B\u52A1\u3002\u70B9\u300C\u6253\u5F00\u4E3B\u7AD9\u300D\u6216\u300C\u5F00\u59CB\u8F6E\u8BE2\u300D\u3002") : [...txns].reverse().map((t) => /* @__PURE__ */ react_default.createElement(
+    "div",
+    {
+      key: t.seq,
+      title: `${t.tx_hex}
+${t.rx_hex}${t.error === null ? "" : `
+${t.error.kind}: ${t.error.detail}`}`,
+      style: {
+        display: "flex",
+        gap: "6px",
+        padding: "1px 8px",
+        fontFamily: MONO2,
+        fontSize: "11px",
+        color: t.ok ? "var(--elab-fg-secondary)" : "var(--elab-status-fail)"
+      }
+    },
+    /* @__PURE__ */ react_default.createElement("span", { style: { color: MUTED, width: "18px" } }, String(t.fc).padStart(2, "0")),
+    /* @__PURE__ */ react_default.createElement("span", { style: { color: MUTED, width: "52px" } }, "0x", t.address.toString(16).toUpperCase()),
+    /* @__PURE__ */ react_default.createElement("span", { style: { flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, t.point !== "" ? t.point : t.label, t.error === null ? "" : ` \xB7 ${t.error.kind}`),
+    /* @__PURE__ */ react_default.createElement("span", { style: { color: MUTED } }, `${t.elapsed_ms}ms`)
+  )))));
+}
+
 // src/adapters/dsh-web/serial/useSerialStream.ts
 var SERIAL_POLL_MS = 500;
 var MAX_LOCAL_LINES = 2e3;
@@ -6491,13 +6930,13 @@ var inputStyle2 = {
   background: "var(--elab-bg-surface)",
   color: "var(--elab-fg-primary)"
 };
-var rowStyle = {
+var rowStyle2 = {
   display: "flex",
   gap: "8px",
   alignItems: "center",
   marginBottom: "8px"
 };
-var labelStyle = {
+var labelStyle2 = {
   flex: "0 0 96px",
   fontSize: "12px",
   color: "var(--elab-fg-secondary)"
@@ -6598,7 +7037,7 @@ function SettingsSection(_props) {
   if (cfg === null) {
     return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-muted)" } }, status === "error" ? `\u914D\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF1A${error ?? "\u672A\u77E5\u539F\u56E0"}` : "\u6B63\u5728\u8BFB\u53D6\u914D\u7F6E\u2026");
   }
-  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)" } }, /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "elab \u4ED3\u5E93\u6839"), /* @__PURE__ */ react_default.createElement(
+  return /* @__PURE__ */ react_default.createElement("div", { className: "elab-root", style: { padding: "12px", fontSize: "12px", color: "var(--elab-fg-primary)" } }, /* @__PURE__ */ react_default.createElement("div", { style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "elab \u4ED3\u5E93\u6839"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       value: draft.elabRoot ?? cfg.elabRoot,
@@ -6607,7 +7046,7 @@ function SettingsSection(_props) {
       "aria-label": "elab \u4ED3\u5E93\u6839",
       style: inputStyle2
     }
-  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "python \u8DEF\u5F84"), /* @__PURE__ */ react_default.createElement(
+  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "python \u8DEF\u5F84"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       value: draft.pythonPath ?? cfg.pythonPath,
@@ -6616,7 +7055,7 @@ function SettingsSection(_props) {
       "aria-label": "python \u8DEF\u5F84",
       style: inputStyle2
     }
-  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u81EA\u52A8\u51C6\u5907"), /* @__PURE__ */ react_default.createElement(
+  )), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "\u81EA\u52A8\u51C6\u5907"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       type: "checkbox",
@@ -6625,7 +7064,7 @@ function SettingsSection(_props) {
       "aria-label": "\u9996\u6B21\u6253\u5F00\u81EA\u52A8\u51C6\u5907\u5185\u6838\u4E0E\u5DE5\u5177\u94FE",
       style: { accentColor: "var(--elab-accent)", cursor: "pointer" }
     }
-  ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u9996\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u4E0B\u8F7D\u5185\u6838 / \u6D45\u514B\u9686\u56DE\u843D / \u5B89\u88C5\u5DE5\u5177\u94FE\uFF08\u53EA\u5199 ~/.dsh/elab\uFF1B\u4E3B\u673A Python \u4E0D\u4F1A\u88AB\u81EA\u52A8\u5B89\u88C5\uFF09")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u7A7A\u95F2\u56DE\u6536(\u79D2)"), /* @__PURE__ */ react_default.createElement(
+  ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "\u9996\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u4E0B\u8F7D\u5185\u6838 / \u6D45\u514B\u9686\u56DE\u843D / \u5B89\u88C5\u5DE5\u5177\u94FE\uFF08\u53EA\u5199 ~/.dsh/elab\uFF1B\u4E3B\u673A Python \u4E0D\u4F1A\u88AB\u81EA\u52A8\u5B89\u88C5\uFF09")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "\u7A7A\u95F2\u56DE\u6536(\u79D2)"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       type: "number",
@@ -6636,7 +7075,7 @@ function SettingsSection(_props) {
       "aria-label": "\u7A7A\u95F2\u56DE\u6536\u79D2\u6570",
       style: { ...inputStyle2, flex: "0 1 120px" }
     }
-  ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "cockpit \u8FDB\u7A0B\u7A7A\u95F2\u591A\u4E45\u81EA\u52A8\u9000\u51FA\uFF0860\u201386400\uFF09")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u53D1\u73B0\u6DF1\u5EA6"), /* @__PURE__ */ react_default.createElement(
+  ), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "11px", color: "var(--elab-fg-muted)" } }, "cockpit \u8FDB\u7A0B\u7A7A\u95F2\u591A\u4E45\u81EA\u52A8\u9000\u51FA\uFF0860\u201386400\uFF09")), /* @__PURE__ */ react_default.createElement("div", { style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "\u53D1\u73B0\u6DF1\u5EA6"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       type: "number",
@@ -6647,7 +7086,7 @@ function SettingsSection(_props) {
       "aria-label": "\u53D1\u73B0\u626B\u63CF\u6DF1\u5EA6",
       style: { ...inputStyle2, flex: "0 1 80px" }
     }
-  ), /* @__PURE__ */ react_default.createElement("span", { style: labelStyle }, "\u5019\u9009\u4E0A\u9650"), /* @__PURE__ */ react_default.createElement(
+  ), /* @__PURE__ */ react_default.createElement("span", { style: labelStyle2 }, "\u5019\u9009\u4E0A\u9650"), /* @__PURE__ */ react_default.createElement(
     "input",
     {
       type: "number",
@@ -6892,7 +7331,7 @@ function PackSettingsView(props) {
     [status]
   );
   const marketPacks = status?.market?.packs ?? [];
-  const rowStyle2 = {
+  const rowStyle3 = {
     display: "flex",
     flexDirection: "column",
     gap: "4px",
@@ -6922,7 +7361,7 @@ function PackSettingsView(props) {
     const updatable = installedRec?.updatable === true;
     const latest = installedRec?.latest ?? p.version;
     const disabled = frozen || !compat.ok;
-    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, isInstalled && !isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u5DF2\u5B89\u88C5", tone: "idle" }) : null, updatable ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${latest}`, tone: "warn" }) : null), p.description !== void 0 && p.description !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)" } }, p.description) : null, /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), compat.ok ? null : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-fail)" } }, `\u4E0D\u517C\u5BB9\uFF1A${compat.reasons.join("\uFF1B")}`), /* @__PURE__ */ react_default.createElement("div", { style: actionRowStyle }, isInstalled && updatable ? /* @__PURE__ */ react_default.createElement(
+    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle3 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, isInstalled && !isActive ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u5DF2\u5B89\u88C5", tone: "idle" }) : null, updatable ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${latest}`, tone: "warn" }) : null), p.description !== void 0 && p.description !== "" ? /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-secondary)" } }, p.description) : null, /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), compat.ok ? null : /* @__PURE__ */ react_default.createElement("div", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-status-fail)" } }, `\u4E0D\u517C\u5BB9\uFF1A${compat.reasons.join("\uFF1B")}`), /* @__PURE__ */ react_default.createElement("div", { style: actionRowStyle }, isInstalled && updatable ? /* @__PURE__ */ react_default.createElement(
       "button",
       {
         type: "button",
@@ -6957,7 +7396,7 @@ function PackSettingsView(props) {
   const renderInstalledRow = (p) => {
     const v = verifies[p.name];
     const disabled = frozen;
-    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle2 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), p.active ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, p.updatable && p.latest !== null ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${p.latest}`, tone: "warn" }) : null), /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)", wordBreak: "break-all" } }, p.dir), v !== void 0 ? /* @__PURE__ */ react_default.createElement(
+    return /* @__PURE__ */ react_default.createElement("div", { key: p.name, style: rowStyle3 }, /* @__PURE__ */ react_default.createElement("div", { style: nameRowStyle }, /* @__PURE__ */ react_default.createElement("span", { style: { fontWeight: 600, fontSize: "var(--elab-fs-sm)" } }, p.name), p.active ? /* @__PURE__ */ react_default.createElement(Badge, { text: "\u542F\u7528\u4E2D", tone: "ok" }) : null, p.updatable && p.latest !== null ? /* @__PURE__ */ react_default.createElement(Badge, { text: `\u53EF\u66F4\u65B0 v${p.latest}`, tone: "warn" }) : null), /* @__PURE__ */ react_default.createElement(PackMeta, { pack: p }), /* @__PURE__ */ react_default.createElement("span", { style: { fontSize: "var(--elab-fs-xs)", color: "var(--elab-fg-faint)", wordBreak: "break-all" } }, p.dir), v !== void 0 ? /* @__PURE__ */ react_default.createElement(
       "div",
       {
         style: {
@@ -7426,6 +7865,7 @@ function CockpitPane(props) {
   const snap = useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot);
   const buffersRef = useRef(emptyBuffers());
   const [channel, setChannel] = useState("build");
+  const [modbusActive, setModbusActive] = useState(false);
   const [focusStep, setFocusStep] = useState(null);
   const [tailVersion, setTailVersion] = useState(0);
   const [cleanTarget, setCleanTarget] = useState(null);
@@ -8160,6 +8600,21 @@ function CockpitPane(props) {
           progress: snap.progress,
           failure,
           onChannel: setChannel,
+          workTabActive: modbusActive,
+          onWorkTab: setModbusActive,
+          workTab: {
+            id: "modbus",
+            label: "Modbus",
+            content: /* @__PURE__ */ react_default.createElement(
+              ModbusPane,
+              {
+                api: elabApi,
+                project: snap.project,
+                running,
+                sessionId
+              }
+            )
+          },
           onToggleFullscreen: props.onToggleFullscreen,
           serialContent: channel === "serial" ? /* @__PURE__ */ react_default.createElement(
             SerialPane,

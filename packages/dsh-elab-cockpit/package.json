@@ -37,7 +37,8 @@
     "build:host": "tsc -p tsconfig.host.json --outDir lib",
     "build:client": "node scripts/build-client.mjs",
     "verify:contract": "node scripts/verify-client-contract.mjs",
-    "build": "npm run build:host && npm run build:client && npm run verify:contract"
+    "build": "npm run build:host && npm run build:client && npm run verify:contract",
+    "prepack": "node scripts/copy-license.mjs"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
@@ -77,7 +78,7 @@
       "optional": true
     }
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/xkk6663/elab-flow.git",
@@ -90,6 +91,8 @@
     "icon.svg",
     "locale/*.json",
     "README.md",
+    "LICENSE",
+    "NOTICE",
     "screenshots.json",
     "assets"
   ]

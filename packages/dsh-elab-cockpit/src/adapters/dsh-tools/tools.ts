@@ -26,6 +26,7 @@ import { debugAction, debugInspect } from './debug-ops.ts'
 import { frameAction, frameLearnAction } from './frame-ops.ts'
 import { AGENT_USAGE, agentGuidePayload } from './guide.ts'
 import { legacyToolDefinitions } from './legacy.ts'
+import { modbusAction } from './modbus-ops.ts'
 import { statusSnapshot } from './overview-ops.ts'
 import { pkgAction } from './pkg-ops.ts'
 import { jsonOutput, makeTool, type ToolsDeps } from './runtime.ts'
@@ -63,6 +64,7 @@ const IMPLS: Record<string, (deps: ToolsDeps, args: any) => Promise<unknown>> = 
   elab_frame: async (deps, args) => frameAction(deps, String(args?.action ?? ''), args ?? {}),
   elab_frame_learn: async (deps, args) => frameLearnAction(deps, String(args?.action ?? ''), args ?? {}),
   elab_pkg: async (deps, args) => pkgAction(deps, String(args?.action ?? ''), args ?? {}),
+  elab_modbus: async (deps, args) => modbusAction(deps, String(args?.action ?? ''), args ?? {}),
 }
 
 /** 面板卡片标题（presentCall；门面标题带动作，agent/用户都看得懂在做什么）。 */
@@ -81,6 +83,7 @@ const TITLES: Record<string, string> = {
   elab_frame: 'elab 帧协议 profile',
   elab_frame_learn: 'elab 协议自学习',
   elab_pkg: 'elab 芯片包与工程接入',
+  elab_modbus: 'elab Modbus RTU 主站',
 }
 
 /** 门面卡片标题：带上 action（用户看得到「这次到底调了哪个动作」）。 */

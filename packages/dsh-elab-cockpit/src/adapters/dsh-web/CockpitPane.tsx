@@ -42,6 +42,7 @@ import { ManualBar } from './ManualBar.tsx'
 import { EvidenceTail, TAIL_CAPACITY } from './EvidenceTail.tsx'
 import type { TailBuffers, TailLine } from './EvidenceTail.tsx'
 import { SerialPane } from './SerialPane.tsx'
+import { ModbusPane } from './ModbusPane.tsx'
 import type { SerialPortInfo } from './SerialPane.tsx'
 import { useSerialStream } from './serial/useSerialStream.ts'
 import { PackSettingsView } from './PackSettingsView.tsx'
@@ -428,6 +429,8 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
   // ── 本地呈现态（日志缓冲 / 频道聚焦，不进 service） ──
   const buffersRef = useRef<TailBuffers>(emptyBuffers())
   const [channel, setChannel] = useState<LogChannelId>('build')
+  /** Modbus 工作区是否占着日志尾（与日志通道互斥；点任一日志页签即退出）。 */
+  const [modbusActive, setModbusActive] = useState(false)
   const [focusStep, setFocusStep] = useState<string | null>(null)
   const [tailVersion, setTailVersion] = useState(0)
   const [cleanTarget, setCleanTarget] = useState<string | null>(null)
@@ -1308,6 +1311,20 @@ export function CockpitPane(props: CockpitPaneProps): ReactNode {
             progress={snap.progress}
             failure={failure}
             onChannel={setChannel}
+            workTabActive={modbusActive}
+            onWorkTab={setModbusActive}
+            workTab={{
+              id: 'modbus',
+              label: 'Modbus',
+              content: (
+                <ModbusPane
+                  api={elabApi}
+                  project={snap.project}
+                  running={running}
+                  sessionId={sessionId}
+                />
+              ),
+            }}
             onToggleFullscreen={props.onToggleFullscreen}
             serialContent={
               channel === 'serial' ? (

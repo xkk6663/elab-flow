@@ -64,6 +64,7 @@
 | [06-CLI终端闭环上手](tutorials/06-CLI终端闭环上手.md) | **终端闭环上手**（实机 F411）：一条 `elab loop` 跑完 5 阶段，终端按输出类型分色，含 doctor/build/flash/debug/monitor 逐步截图 |
 | [07-串口面板使用](tutorials/07-串口面板使用.md) | **串口面板上手**（实机 F103 + ESP32）：发送/历史/定时 → 四视图 → 波形多面板 → 断线重连 / 日志诊断 / 帧协议 / TCP-UDP；§5.6 为帧协议 P0/P1（位域/变长/多 ID/模板/组帧）实机演示；§5.7.9 为 **Agent 自学按钮实操**（粘样本 → 学习 → 复核 → 直播解码，实拍截图） |
 | [08-串口压力测试报告_STM32F411CEU6](tutorials/08-串口压力测试报告_STM32F411CEU6.md) | **串口压力测试报告**（实机 F411）：高压收发下的丢包/挤出/时序统计与结论 |
+| [09-协议上手_Modbus](tutorials/09-协议上手_Modbus.md) | **Modbus RTU 上手**（实机 F411）：面板怎么用（点表/轮询/单次读写/事务流水/诊断卡）→ 帧解剖与 CRC → **循环 DMA + HT/TC 接收**（为什么不上硬件 DBM）→ 20ms 静默定界的由来 → TX 软件乒乓与连发夹具 → 排错手册与延迟账本；含 7 张 WebUI 实机截图 + 3 张 DSH 窄栏实拍与验收数据 |
 
 ## requirements/ —— 需求对照
 
@@ -73,7 +74,7 @@
 
 ## 其他
 
-- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 串口与波形面板、`serial-2/` 串口 M2/M4–M7（独立 WebUI）、`serial-frames/` 帧协议 P0/P1（位域/变长/多 ID/组帧）、`wave/` 同一批能力在 DSH 右栏的实拍、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
+- `tutorials/assets/`：实机教程的截图（`debug-panel/` 调试工作区 P1/P2/P3、`cli-terminal/` 终端闭环、`wave-panel/` 串口与波形面板、`serial-2/` 串口 M2/M4–M7（独立 WebUI）、`serial-frames/` 帧协议 P0/P1（位域/变长/多 ID/组帧）、`protocol/modbus/` Modbus 面板与串口字节视图、`wave/` 同一批能力在 DSH 右栏的实拍、`dsh/` DSH 右侧栏、`webui/` 芯片上手）；
   README 首屏与调试/串口章节也直接引用其真机截图。
 - 实机验证截图在 `packages/dsh-elab-cockpit/docs/screenshots/`（插件 README 使用）。
 - 版本变更记录在仓库根 [CHANGELOG.md](../CHANGELOG.md)；工作规则见 [AGENTS.md](../AGENTS.md)。

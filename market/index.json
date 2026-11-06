@@ -52,7 +52,7 @@
       "version": "0.1.0",
       "description": "STM32F1/F4 芯片适配包（STM32CubeMX 工程指纹 + 芯片参数 + 平台坑位）",
       "status": "official",
-      "license": "MIT",
+      "license": "Apache-2.0",
       "requires": {
         "kernel_api": ">=1 <2",
         "schema_version": 1
@@ -65,7 +65,7 @@
         "type": "local",
         "path": "packs/official/st/stm32"
       },
-      "sha256": "2257a4e2d4f56cfa8e73730fe660b0f4434403729395e3575fe98b023864a8c9"
+      "sha256": "04600c13c3deb31f382260937834d32a33623fce465f47fc278f5a8ad4e95a03"
     }
   ],
   "providers": [

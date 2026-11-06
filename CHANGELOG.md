@@ -5,13 +5,28 @@
 
 ---
 
-## [V4.0.0] — 2026-11-06（Provider 工具链 · 帧协议补强 · Agent 自学习协议 · 工具门面化 · 流程清单归位）
+## [V4.0.0] — 2026-11-06（Modbus RTU 主站 · Provider 工具链 · 帧协议补强 · Agent 自学习协议 · 工具门面化 · 流程清单归位）
 
 主仓大版本：内核 `COCKPIT_VERSION` 与 `services.elab.__version__` 升到 `4.0.0`，
 插件默认下载内核版本同步为 `v4.0.0`；插件同步发 **1.0.0**（见下一条）。
 
 本条目合并了 2026-11-04 ~ 11-06 的全部未发布批次（Provider 工具链架构、帧协议 P0/P1、
 串口存量优化与 Agent 自学习协议、收尾健壮性批次、仓库清理与文档）。
+
+### 许可证：MIT → Apache-2.0
+
+- 自 **v4.0.0** 起，本仓（内核、随仓插件 `dsh-elab-cockpit`、官方适配包 `packs/official/**`）
+  改用 **Apache License 2.0**；此前 v1.0.0 – v3.1.0 为 MIT。
+- **已发布版本不受影响**：MIT 授权永久有效，v1.0.0 – v3.1.0 继续以 MIT 授权，
+  本次变更只对 v4.0.0 及以后生效。
+- 理由：与移植来源 [Lissio](https://codeberg.org/Horldsence/Lissio)（Apache-2.0）对齐，
+  减少一次跨协议再分发；同时取得 Apache-2.0 附带的**明确专利授权**与变更声明要求。
+- 仓库根**新增 `LICENSE`**（此前只有 `package.json#license` 声明、缺少授权正文），
+  `NOTICE` 追加协议沿革；`README.md` 加 license 徽章与「许可证」小节；
+  `packages/dsh-elab-cockpit/package.json#license`、`market/index.json`、
+  `packs/official/st/stm32/pack.yaml` 同步为 `Apache-2.0`。
+- **二次分发请一并携带 `LICENSE` 与 `NOTICE`**（Apache-2.0 §4(d)）。
+- 外置社区芯片包（`artery/at32`、`espressif/esp32`）的协议由各自仓库声明，仍为 MIT。
 
 ### 内核：流程清单归位（`services/elab/flow.py`）
 
@@ -152,6 +167,115 @@ Python 628 passed / 3 skipped；插件 143 pass（新增 topic 守卫 3 例）+ 
 PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行尾与 HEAD
 比对 0 翻转。端到端：临时内核验证 `/api/serial/monitor/poll`（四路形状 + 参数
 校验人话报错）、`POST /api/runs/prune`（dry_run）、`elab runs prune --dry-run`。
+
+### 新增：Modbus RTU 主站 + F411 教学从站 + 教程 09
+
+执行计划：`docs/design/执行计划_Modbus学习计划_RTU主站_F103从站_实机教程.md`（实机改为 **STM32F411CEU6**；
+接收侧由硬件双缓冲改为**循环 DMA + HT/TC**，理由见教程 §7.2）。
+
+#### 内核：`services/elab/modbus.py` + `modbusmaster.py`
+
+- **编解码**：`build` / `parse` / `response_size` / `crc16_modbus`（CRC16/MODBUS，低字节在前）、
+  8 个功能码、3 个异常码、广播（unit 0 只执行不应答）、7 类错误分类
+  （`timeout / crc / exception / malformed / port / …`）。
+- **事务引擎**：单飞队列 + `MIN_INTERVAL_MS=50` 总线间隔 + 指数退避；`Response` 长度由**请求**
+  推出（协议没有长度字段）。
+- **轮询**：`_plan_group` 按 `(fc, address)` 排序后贪心合并（同 fc、间隙 ≤ `MERGE_GAP=4`、
+  跨度 ≤ 125）—— 31 个点合成每轮 8 条事务；组间隔 500/1000/2000ms。
+- **点表**：`projects/<name>.modbus.json`（31 点 / 5 组，`writes` 组默认关闭），`rev` 乐观锁。
+- **HTTP**：`/api/modbus/{meta,state,open,close,start,stop,read,write,map,transactions}`，
+  open 复用已开的串口会话（不新开口、不复制读线程）并顺手探测一次。
+
+#### 内核：串口读线程去掉 200ms 罚时（`serialport.py` / `serialmon.py`）
+
+- 新增 `SerialIO.in_waiting`（pyserial 走 `in_waiting`，ctypes 走 `ClearCommError` +
+  `COMSTAT.cbInQue`）；读循环改为"先问到货量，再按量读，没有就 `read(1)` 阻塞"。
+- `read(4096)` 的语义是"凑够 4096 或超时"，一问一答的 Modbus 每条事务为此白等一个读超时：
+  **298ms/条 → 40ms/条**。这条对任何请求-应答式串口协议都成立。
+
+#### 插件：DSH 窄栏 Modbus 面板（本次新增）
+
+之前 modbus 在 DSH 侧**只有工具、没有界面**（`grep -r modbus src/adapters/dsh-web` 零命中）。
+本次补齐三层：
+
+- `kernel-http/icd-client.ts`：`modbusState / modbusOpen / modbusClose / modbusStart / modbusStop /
+  modbusRead / modbusWrite`（走 `/elab/api/modbus/*`；`routes.ts` 白名单此前已放行）。
+- `app/ports.ts`：新增 `ModbusPort`（只声明面板用到的 7 个方法，与 `SerialPort` 同纪律）。
+- `dsh-web/ModbusPane.tsx`：连接条（状态点 + 端口/从站/轮询组）、从站/超时/重试、成功/超时/CRC/
+  异常/重试统计、点表（名称/地址/值/年龄/W 标记）、单次读、单次写（含 FC15/16 值列表 + `confirm`）、
+  结果条、`0x0100` 段自动聚成「DMA 诊断」卡、事务流水（倒序 + hex 悬停）。
+- `dsh-web/EvidenceTail.tsx`：新增 `workTab` / `workTabActive` / `onWorkTab` —— 额外**工作区页签**
+  （不进 `LOG_CHANNELS`：Modbus 没有日志行，混进去会让 `channelOfEvent` 出现永不命中的分支），
+  激活时整块让位，点任一日志通道自动退出。
+- `dsh-web/CockpitPane.tsx`：日志尾页签行变为 `构建 | 烧录 | 调试 | 串口 | Modbus`。
+- **修掉一个只能靠实拍发现的问题**：`open` 失败的错误被下一轮 400ms 轮询里的 `setErr('')` 冲掉，
+  表现为"点了打开主站，界面什么都不说"。拆成 `err`（轮询态）与 `actErr`（用户动作态）后错误常驻。
+- 验收（F411 + DAPLink CDC）：`COM10@115200 · 从站 1 · 轮询中（fast/diag/slow/bits）`，
+  成功 21 / 超时 0 / CRC 0 / 异常 0；诊断 `rx_ht=30 / rx_tc=30 / tx_pingpong=32 / overrun=0`。
+
+#### 插件：`elab_modbus` 工具
+
+- `packages/dsh-elab-cockpit/src/adapters/dsh-tools/modbus-ops.ts`：10 个 action
+  （meta/status/open/close/read/write/start/stop/transactions/map）。
+- 写操作双重闸门：`confirm: true` + 宿主 `allowAgentWrite()`，各返回
+  `confirm-required` / `agent-write-disabled`，不静默失败也不假装成功。
+- `routes.ts` 放行 4 个 GET + 7 个 POST，写/开关类注入 actor；`domain/tools.ts` 增
+  `MODBUS_TOOL` 契约与 `modbus` 意图组；工具总数 14 → **15**。
+
+#### WebUI：Modbus 工作区
+
+- `cockpit/web/src/modbus/ModbusWorkspace.tsx`（+ `types.ts`、`module.css`）：连接条（从站/超时/重试）、
+  七个统计 chip、点表（实时值 + 时间戳）、单次读/写（写前 `window.confirm`）、事务流水
+  （TX/RX hex + 耗时）、结果条（分开显示"上次读/上次写/打开时探测"）、诊断卡
+  （FC03 @0x0100 段自动翻译成 DMA 仪表盘）。
+- **批量写补口**：写功能码选 `15/16` 时表单出现「值列表」（逗号分隔 → `values[]`），
+  不再出现"下拉里有 FC16、后端却报批量写需要 values 数组"的死角；FC15 只认 0/1 在本地先拦。
+  实测 FC16 写 `1,2,3,4` 到 0x0110 后读回逐字一致，FC15 写线圈同样对账通过。
+- **地址提示按点表反查**：写面板不再写死"0x10 = LED"，改为按当前地址查点表拿名称与备注，
+  换从站不用改代码；`formRow` 允许换行（窄轨下多一个控件不再溢出卡片）。
+- **视图类型上移到共享层** `@elab/cockpit-ui-core`（`ModbusPointDef/Live/Stats/Engine/Txn/Map/State/RunResult`），
+  `cockpit/web/src/modbus/types.ts` 只做转发 —— 与 DSH 窄栏共用同一份形状。
+- `workspaces.ts` 注册 `modbus` 工作区，`profiles/web.yaml` 排在 `serial` 之后；
+  `serial` 不可用时自动置灰。
+
+#### 示例：`examples/STM32F411_modbus`
+
+- **接收**：`uint8_t rx_buf[256]` 循环 DMA + HT/TC 中断，`pos = NDTR` 反推写头、`rx_tail` 追尾，
+  跨环拆两段搬；**不用硬件 DBM**（固定 NDTR + 整块才切，与不定长帧冲突）。
+  帧级双缓冲 `frm_mem[2]`（ISR 写一块、主循环取另一块）。
+  `.ioc` / `usart.c` 的 RX DMA 同步为 `DMA_CIRCULAR`（**TX 保持 `DMA_NORMAL`** —— 发送是一次性的，
+  Circular 会把同一块缓冲反复重发），`ud_init()` 再强制一次作为兜底。
+- **修掉一个重入竞态**：`rx_drain()` 有 3 个调用者（主循环 / DMA ISR / IDLE ISR），
+  主循环被 HT/TC 打断时同一段字节会被重复 push → 帧长虚增（`overrun` 缓慢上涨到 8）
+  + 偶发 CRC 错被从站静默丢弃，表现为"几百次里偶发丢一帧"。改为整体临界区
+  （存/恢复 PRIMASK）。修复前后对照见教程 §11 事故 G。
+- **定界**：IDLE 只当"线路静过一下"的提示（清 IDLE 前先关 `CR3.DMAR`，把 RXNE 残字节自己收下），
+  真正切帧按 `UD_FRAME_GAP_MS=20` 静默判定 —— 实测 CDC 拆包间隙 **8ms**（诊断寄存器 0x010A）。
+- **发送**：`tx_mem[2]` 软件乒乓 + TC 回调链式启动；`ud_tx_room()` 让"等空位"不算"丢帧"
+  （曾把 `tx_drop` 刷成 1056 的假报警）。
+- **从站**：8 功能码 + 写白名单 + 广播不应答 + 诊断寄存器 0x0100–0x010A；心跳走 USART2（与总线物理隔离）。
+
+#### 文档与实拍
+
+- 新增教程 **`docs/tutorials/09-协议上手_Modbus.md`**：帧解剖与 CRC、功能码/异常码、寄存器表、
+  点表与合并规则、写操作闸门、CIRC+HT/TC 原理与四张实机截图、20ms 定界的由来、TX 乒乓与连发夹具、
+  面板全流程、排错手册、延迟账本、验收数据表、迁移到 9600/真 USB-TTL。
+- 实拍截图 **10 张**：`docs/tutorials/assets/protocol/modbus/`
+  `01-panel` `02-points` `03-diag` `04-read-and-txns` `05-serial-hex`（独立 WebUI）+
+  `06-batch-write` `07-batch-readback`（FC16 批量写与读回）+ `dsh-05/dsh-06/dsh-07`（DSH 窄栏实拍）。
+- README 同步：根 `README.md` 新增 §⑪「Modbus RTU 主站」与工具表行（14 → **15** 个工具、
+  6 → **7** 个门面）；插件 `README.md` 新增「2026-11-06 新增：Modbus RTU 主站」小节（两张 DSH 实拍）、
+  `elab_*` 数量表述与「一句话使唤它」表同步。
+
+#### 实机验收（F411 + DAPLink CDC @115200）
+
+- 100 次 FC03：**ok=100 fail=0**，RTT p50 90.8ms / p95 92.4ms / max 93.4ms。
+- 稳定性：100 次 ×4 轮 + 300 次连读 = **700 次事务 0 失败**；`overrun` / `drop` / `tx_drop` 全程 0
+  （修复 `rx_drain` 重入竞态前，100 次里会出现 1 次失败且 `overrun` 涨到 8）。
+- 连发 8 帧全部到达；`tx_pingpong` 每轮 +8（4 轮后 32）、`tx_drop=0`（第二块发送缓冲确实被用上）。
+- 诊断：`rx_ht=22 / rx_tc=22 / rx_bytes=5682`（= 22×256+50，与 HT/TC 严格对得上）、
+  `last_len=8 / max_gap=8`。
+- 延迟分解（实测）：引擎内 p50 22ms → HTTP 连打 92ms（+50ms 总线间隔）→ 间隔 60ms 时 32ms。
 
 ### 串口存量优化：帧协议补强 / 帧级观测 / Agent 自学习协议
 
@@ -381,27 +505,28 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 
 ---
 
-## [DSH 插件 1.0.0] — 2026-11-06（Agent 工具门面化 27→14 · 契约归位 · 兼容层）
+## [DSH 插件 1.0.0] — 2026-11-06（Agent 工具门面化 27→15 · 契约归位 · 兼容层 · Modbus 面板）
 
 `packages/dsh-elab-cockpit` 的大版本（npm 包版本，与内核版本独立）。
 默认下载内核版本同步为 `v4.0.0`。
 
-**破坏性变更**：工具面从 27 个平铺工具收敛为 **14 个混合门面**（6 门面 + 8 细粒度）。
+**破坏性变更**：工具面从 27 个平铺工具收敛为 **15 个混合入口**（7 门面 + 8 细粒度）。
 旧名（`elab_triple` / `elab_frame_profile` / `elab_debug_open` …）默认不再注册；
 需要过渡期时把插件配置 `toolMode: both` 打开，17 个旧名会作为带废弃提示的别名一并注册。
 
-### Agent 工具：27 → 14（混合门面）
+### Agent 工具：27 → 15（混合门面）
 
 
 - **注册面重构**：原来是 27 个 `elab_*` 工具一次性全注册，且**两头失衡**——
   过度平铺（`serial_read`/`serial_decoded`/`serial_decode`/`serial_wait` 语义重叠，
   agent 得自己猜该调哪个）与过度聚合（`elab_frame_profile` 一个工具背 12 个动作）。
-  现在按**意图**分门面：**6 门面 + 8 细粒度 = 14 个注册工具**
+  现在按**意图**分门面：**7 门面 + 8 细粒度 = 15 个注册工具**
   - 门面：`elab_run`（build/triple/loop/step/preview/cancel）· `elab_serial`
     （monitor/write/decode/decoded/stats/read/wait）· `elab_debug`
     （open/control/inspect/breakpoint/wait/close）· `elab_frame`
     （list/get/preview/save/delete/encode/templates/import）· `elab_frame_learn`
-    （learn/verify/auto/codegen）· `elab_pkg`（status…verify/**adapt**）；
+    （learn/verify/auto/codegen）· `elab_pkg`（status…verify/**adapt**）· `elab_modbus`
+    （meta/status/open/close/read/write/start/stop/transactions/map）；
   - 细粒度高频入口：`elab_status` · `elab_guide` · `elab_log` · `elab_serial_read` ·
     `elab_serial_wait` · `elab_serial_capture` · `elab_serial_widget` · `elab_debug_inspect`。
 - **意图树**：`elab_guide` 正文从扁平清单升级为**两层树**（group → action），
@@ -431,9 +556,9 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
 - **调试错误不再被吞**：HTTP 客户端同时认「`error` 为字符串」与「`error` 为对象」两种形状，
   `ElabApiError` / `ApiError` 新增 `hint` 与 `status`；面板统一走 `toPanelError()` 保留 `code`+`message`+`hint`。
 - **死代码清扫**：移除 `pendingAdaptations` / `kernelMeta` / `kernelPlanSteps` / `ALL_CHANNELS` 等未引用导出。
-- **市场展示面更新**：卡片图从 2 张 v3.0.0 时期的旧 UI 换成 4 张 v4.0.0 真机窄栏图
-  （闭环三连 / 串口监视 / 源码级调试 / 波形解码），`screenshots.json` 同步；
-  市场条目中英简介按新能力面重写（多芯、源码级调试、帧协议、自学习）。
+- **市场展示面更新**：卡片图从 2 张 v3.0.0 时期的旧 UI 换成 5 张 v4.0.0 真机窄栏图
+  （闭环三连 / 串口监视 / 源码级调试 / 波形解码 / **Modbus 主站轮询**），`screenshots.json` 同步；
+  市场条目中英简介按新能力面重写（多芯、源码级调试、帧协议、自学习、Modbus RTU）。
   图经 LANCZOS 缩放 + P256 量化（244 KB → 83 KB），npm 包体积反而从 612.1 kB 降到 562.8 kB。
 - **市场封面**：新增 `assets/dsh-full-window.png`（DSH 全窗口：宿主导航 + 对话区 +
   右侧 ELAB 面板整栏）并置 `screenshots.json` 首位 —— 访客先看到插件在宿主里的
@@ -444,8 +569,16 @@ PASS；WebUI `tsc --noEmit` + vite build（332.44 kB）；本轮改动文件行�
   暗底圆角方块 `#17202e` + 绿色脉搏线 `#34d399`（圆角半径 12 / 线宽 5.5）。
   与原 ico 光栅化对比平均每通道误差 1.88/255，16/32/128px 下均清晰可辨。
   矢量重绘是为了任意尺寸不失真（ico 只有 16/32/48 三帧）。
-  注：awesome-dsh-plugin 市场站的插件卡片**不渲染头像**（纯文字 + 统计），
-  所以头像的唯一消费方是 npm registry 与 DSH 宿主（读 `package.json#icon`）。
+  注：**四个「图标」位彼此独立，别混** —— 插件头像（`package.json#icon` → `icon.svg`，
+  作用于 npm registry 与 DSH 宿主插件列表）、市场卡图标（条目 yml 的 `icon:` →
+  `assets/market-icon.png`，作用于 **DSH 内置市场**卡片头像位）、入口卡图标
+  （`build-client.mjs` 的 `guide.icon`）、卡片图/封面（`screenshots.json` → `assets/*.png`）。
+  awesome-dsh-plugin **站点**的卡片不渲染头像（纯文字 + 统计），但 DSH 内置市场
+  （`dsh-market`）**有**头像位，未声明 `icon:` 时回退成仓库 owner 的 GitHub 头像。
+- **新增市场卡图标** `assets/market-icon.png`（192×192）：按 `icon.svg` 的 path 与 stroke
+  参数用 Pillow 8× 超采样绘制后 LANCZOS 缩放入库。原因：市场条目的 `icon:` 只收
+  GitHub 托管的**位图**（png/jpg/jpeg/webp），SVG 会被 `scripts/lib/entries.mjs` 的
+  `iconProblem()` 直接拒绝，第三方图床也拒绝 —— `icon.svg` 不能用于该字段。
 
 ---
 

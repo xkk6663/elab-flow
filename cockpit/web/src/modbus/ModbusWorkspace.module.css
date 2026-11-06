@@ -1,0 +1,294 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--elab-space-3);
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 2px;
+}
+
+/* ★ 子块一律不许被压扁：column flex + height:100% 时，超出高度的子项默认
+ *   会被 shrink 成"只剩一条表头"（诊断面板就这样被吃掉过）。
+ *   这里显式 flex: none，多出来的高度交给外层滚动。 */
+.wrap > * {
+  flex: 0 0 auto;
+}
+
+/* ── 顶部连接条 ─────────────────────────────────────────── */
+.bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-2) var(--elab-space-3);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-raised);
+}
+
+.barLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--elab-fs-sm);
+  color: var(--elab-fg-secondary);
+  font-family: var(--elab-font-mono);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.dotIdle { background: var(--elab-status-idle); }
+.dotOk { background: var(--elab-status-ok); }
+.dotRun { background: var(--elab-status-run); }
+.dotFail { background: var(--elab-status-fail); }
+
+.spacer { flex: 1 1 auto; }
+
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  white-space: nowrap;      /* 「地址」「数量」不许被挤成两行 */
+  flex: none;
+}
+
+.num {
+  width: 62px;
+  padding: 3px 6px;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-primary);
+  background: var(--elab-bg-code);
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius-sm);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--elab-border);
+  background: var(--elab-bg-sunken);
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-mono);
+  color: var(--elab-fg-secondary);
+}
+
+.chipOk { color: var(--elab-status-ok); border-color: color-mix(in srgb, var(--elab-status-ok) 40%, transparent); }
+.chipWarn { color: var(--elab-status-run); border-color: color-mix(in srgb, var(--elab-status-run) 40%, transparent); }
+.chipFail { color: var(--elab-status-fail); border-color: color-mix(in srgb, var(--elab-status-fail) 40%, transparent); }
+
+/* ── 两列 ───────────────────────────────────────────────── */
+.cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  gap: var(--elab-space-3);
+  align-items: start;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1080px) {
+  .cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+.panel {
+  border: 1px solid var(--elab-border);
+  border-radius: var(--elab-radius);
+  background: var(--elab-bg-raised);
+  overflow: hidden;
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 7px var(--elab-space-3);
+  border-bottom: 1px solid var(--elab-border);
+  background: var(--elab-bg-sunken);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  letter-spacing: 0.02em;
+}
+
+.panelTitle { font-weight: 600; }
+.panelMeta { color: var(--elab-fg-muted); font-family: var(--elab-font-mono); }
+
+/* ── 点表 ───────────────────────────────────────────────── */
+.tableWrap { max-height: 46vh; overflow: auto; }
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--elab-fs-xs);
+  font-family: var(--elab-font-mono);
+}
+
+.table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 8px;
+  text-align: left;
+  font-weight: 500;
+  color: var(--elab-fg-muted);
+  background: var(--elab-bg-surface);
+  border-bottom: 1px solid var(--elab-border);
+  white-space: nowrap;
+}
+
+.table tbody td {
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--elab-border) 55%, transparent);
+  color: var(--elab-fg-secondary);
+  white-space: nowrap;
+}
+
+.table tbody tr:hover td { background: var(--elab-bg-hover); }
+
+.name { color: var(--elab-fg-primary); }
+.val { color: var(--elab-fg-primary); font-weight: 600; }
+.unit { color: var(--elab-fg-faint); }
+.stale { color: var(--elab-fg-faint); }
+.err { color: var(--elab-status-fail); }
+.wr {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--elab-status-run);
+  border: 1px solid color-mix(in srgb, var(--elab-status-run) 45%, transparent);
+}
+
+/* ── 快捷读写 ───────────────────────────────────────────── */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-3);
+}
+
+.formRow {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  /* 写面板在 FC15/16 时多一个「值列表」控件，窄轨下三个控件会挤出面板，
+     允许换行——否则 right rail 一被拖窄，输入框就跑到卡片外面。 */
+  flex-wrap: wrap;
+}
+
+.formRow > .field { flex: 1 1 0; }
+
+.hintLine {
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+  line-height: 1.5;
+}
+
+.result {
+  padding: 6px var(--elab-space-3);
+  border-top: 1px solid var(--elab-border);
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  word-break: break-all;
+}
+
+.resultOk { color: var(--elab-status-ok); }
+.resultFail { color: var(--elab-status-fail); }
+
+/* ── 事务流水 ───────────────────────────────────────────── */
+.txns {
+  max-height: 30vh;
+  overflow: auto;
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+}
+
+.txn {
+  display: grid;
+  grid-template-columns: 40px 42px 1fr 58px;
+  gap: 6px;
+  padding: 3px var(--elab-space-3);
+  border-bottom: 1px solid color-mix(in srgb, var(--elab-border) 45%, transparent);
+  color: var(--elab-fg-secondary);
+}
+
+.txnOk { color: var(--elab-fg-secondary); }
+.txnFail { color: var(--elab-status-fail); }
+.txnFc { color: var(--elab-fg-muted); }
+.txnAddr { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txnMs { text-align: right; color: var(--elab-fg-muted); }
+
+.empty {
+  padding: var(--elab-space-4);
+  text-align: center;
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-muted);
+}
+
+/* ── 诊断（DMA 双缓冲）──────────────────────────────────── */
+.diag {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--elab-space-2);
+  padding: var(--elab-space-3);
+}
+
+.diagCell {
+  padding: 6px 8px;
+  border-radius: var(--elab-radius-sm);
+  background: var(--elab-bg-code);
+  border: 1px solid var(--elab-border);
+}
+
+.diagName {
+  font-size: 10px;
+  color: var(--elab-fg-muted);
+  font-family: var(--elab-font-mono);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.diagValue {
+  font-size: var(--elab-fs-lg);
+  font-family: var(--elab-font-mono);
+  color: var(--elab-fg-primary);
+}
+
+.diagNote {
+  font-size: 10px;
+  color: var(--elab-fg-faint);
+}
+
+/* ── 上一次结果（独立一条，读/写/探测共用）─────────────── */
+.resultBar {
+  display: flex;
+  align-items: center;
+  gap: var(--elab-space-2);
+  padding: 6px var(--elab-space-3);
+  font-family: var(--elab-font-mono);
+  font-size: var(--elab-fs-xs);
+  color: var(--elab-fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resultTag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--elab-border);
+  color: var(--elab-fg-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}

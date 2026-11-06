@@ -16,6 +16,7 @@ import { registerElabTools } from '../src/adapters/dsh-tools/tools.ts'
 import { legacyNames, legacyToolDefinitions } from '../src/adapters/dsh-tools/legacy.ts'
 import { debugAction } from '../src/adapters/dsh-tools/debug-ops.ts'
 import { frameAction, frameLearnAction } from '../src/adapters/dsh-tools/frame-ops.ts'
+import { modbusAction } from '../src/adapters/dsh-tools/modbus-ops.ts'
 import { pkgAction } from '../src/adapters/dsh-tools/pkg-ops.ts'
 import { runAction } from '../src/adapters/dsh-tools/run-ops.ts'
 import { serialAction } from '../src/adapters/dsh-tools/serial-ops.ts'
@@ -30,10 +31,11 @@ function registeredNames(mode) {
   return names
 }
 
-test('注册面：facade 模式只注册新工具（14 个），且与契约一一对应', () => {
+test('注册面：facade 模式只注册新工具（15 个），且与契约一一对应', () => {
   const names = registeredNames('facade')
   assert.deepEqual([...names].sort(), Object.keys(TOOL_CONTRACTS).sort())
-  assert.equal(names.length, 14, '门面 + 细粒度应为 14 个注册工具')
+  // 15 = 7 门面（run/serial/debug/frame/frame_learn/pkg/modbus）+ 8 细粒度
+  assert.equal(names.length, 15, '门面 + 细粒度应为 15 个注册工具')
   for (const name of names) assert.match(name, /^elab_/)
 })
 
@@ -128,6 +130,7 @@ test('门面：未知 action 回结构化错误（不抛异常、不静默）', 
     ['elab_frame', frameAction],
     ['elab_frame_learn', frameLearnAction],
     ['elab_pkg', pkgAction],
+    ['elab_modbus', modbusAction],
   ]
   for (const [name, fn] of dispatchers) {
     const res = await fn({}, 'no-such-action', {})
@@ -145,6 +148,7 @@ test('门面：契约里的 action 枚举与实现分支一致（枚举里的都
     ['elab_frame', frameAction, ['list', 'get', 'preview', 'save', 'delete', 'encode', 'templates', 'import']],
     ['elab_frame_learn', frameLearnAction, ['learn', 'verify', 'auto', 'codegen']],
     ['elab_pkg', pkgAction, ['status', 'search', 'install', 'activate', 'remove', 'update', 'verify', 'adapt']],
+    ['elab_modbus', modbusAction, ['meta', 'status', 'open', 'close', 'read', 'write', 'start', 'stop', 'transactions', 'map']],
   ]
   const stub = {
     ensureHost: async () => { throw new Error('no host in test') },

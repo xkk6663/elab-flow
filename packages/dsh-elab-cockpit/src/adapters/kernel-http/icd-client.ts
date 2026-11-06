@@ -25,6 +25,8 @@ import type {
   PacksStatus,
   PkgJob,
   PkgVerifyResult,
+  ModbusRunResult,
+  ModbusStateResponse,
   PlanPreview,
   SerialAction,
   SerialBytesTail,
@@ -437,6 +439,73 @@ export const elabApi = {
       withSession('/elab/api/project', sessionId),
       { action: 'set_probe', name, probe },
     ),
+  // ── Modbus RTU 主站（挂在串口会话上，与面板/agent 同一份字节）────────
+  /**
+   * GET /api/modbus/state：引擎快照 + 点表 + 增量事务流水。
+   * `after` 是流水游标（只回比它新的），engine 没起来也回点表 —— 面板可以
+   * 先画出"有哪些点"，再等用户点「打开主站」。
+   */
+  modbusState: (project: string, after = 0, sessionId?: string) => {
+    const q = new URLSearchParams()
+    if (project !== '') q.set('project', project)
+    if (after > 0) q.set('after', String(after))
+    const qs = q.toString()
+    return request<ModbusStateResponse>(
+      withSession(`/elab/api/modbus/state${qs === '' ? '' : `?${qs}`}`, sessionId),
+    )
+  },
+  /** POST /api/modbus/open：建主站（复用/代开串口会话）；probe=顺手读一次设备 ID。 */
+  modbusOpen: (opts: {
+    project: string
+    port?: string
+    baud?: number
+    unit_id?: number
+    timeout_ms?: number
+    retries?: number
+    probe?: boolean
+    sessionId?: string
+  }) => post<{ ok: boolean; detail?: string; probe?: ModbusRunResult }>(
+    withSession('/elab/api/modbus/open', opts.sessionId),
+    opts,
+  ),
+  /** POST /api/modbus/close：关主站（串口会话按会话策略保留/释放）。 */
+  modbusClose: (sessionId?: string) =>
+    post<{ ok: boolean }>(withSession('/elab/api/modbus/close', sessionId), {}),
+  /** POST /api/modbus/start：按点表分组起轮询；groups 缺省用点表里的组。 */
+  modbusStart: (groups?: string[], sessionId?: string) =>
+    post<{ ok: boolean; groups?: string[] }>(withSession('/elab/api/modbus/start', sessionId), {
+      ...(groups === undefined ? {} : { groups }),
+    }),
+  modbusStop: (sessionId?: string) =>
+    post<{ ok: boolean }>(withSession('/elab/api/modbus/stop', sessionId), {}),
+  /** POST /api/modbus/read：单次读（FC01/02/03/04）。 */
+  modbusRead: (opts: {
+    project?: string
+    fc: number
+    address: number
+    count: number
+    unit_id?: number
+    sessionId?: string
+  }) => post<ModbusRunResult>(withSession('/elab/api/modbus/read', opts.sessionId), opts),
+  /**
+   * POST /api/modbus/write：单次写（FC05/06/0F/10）。
+   * ★ 面板侧必须**先弹确认**；内核还要求 `confirm: true` 才肯发。
+   */
+  modbusWrite: (opts: {
+    project?: string
+    fc: number
+    address: number
+    value?: number
+    values?: number[]
+    unit_id?: number
+    broadcast?: boolean
+    sessionId?: string
+  }) =>
+    post<ModbusRunResult>(withSession('/elab/api/modbus/write', opts.sessionId), {
+      ...opts,
+      confirm: true,
+    }),
+
   discover: (sessionId?: string, refresh = false) => {
     const q = new URLSearchParams()
     if (sessionId !== undefined && sessionId !== '') q.set('sessionId', sessionId)

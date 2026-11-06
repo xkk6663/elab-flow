@@ -8,6 +8,7 @@ import { LogView, ringToText } from "../render/LogView";
 import { useSerialStream } from "../serial/useSerialStream";
 import { SerialWorkspace } from "../serial/SerialWorkspace";
 import { DebugWorkspace } from "../debug/DebugWorkspace";
+import { ModbusWorkspace } from "../modbus/ModbusWorkspace";
 import { Button } from "../primitives/Button";
 import { Input } from "../primitives/Input";
 import { SegmentedTabs, type SegTab } from "../primitives/SegmentedTabs";
@@ -752,6 +753,12 @@ export function EvidenceRail({
           project={serialProject}
           running={running}
           debugFeatures={card?.name === serialProject ? card.debug_features : undefined}
+        />
+      ) : active.id === "modbus" ? (
+        <ModbusWorkspace
+          project={serialProject}
+          serialAvailable={caps?.serial.available ?? false}
+          serialHint={caps?.serial.hint ?? undefined}
         />
       ) : (
         <LogView

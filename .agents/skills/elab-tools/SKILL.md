@@ -31,6 +31,7 @@ description: elab-Flow 的 agent 工具索引：按「我要做什么」快速�
 | 解码一帧 / 读共享解码 | `elab_serial action="decode"` / `action="decoded"` | — | `POST /api/serial/decode`、`GET .../decoded` |
 | 协议自学习（抓包→草稿→验证→C 代码） | `elab_frame_learn action="learn\|verify\|auto\|codegen"` | — | `POST /api/serial/frames/{learn,verify,auto,codegen}` |
 | 录制串口 / 导出 | `elab_serial_capture` | — | `POST /api/serial/capture` |
+| Modbus RTU 主站（读/写/轮询/点表） | `elab_modbus action="meta\|status\|open\|close\|read\|write\|start\|stop\|transactions\|map"`（write 需 `allowAgentWrite` + `confirm`） | —（`elab` CLI 无 modbus 子命令） | `GET/POST /api/modbus/{meta,state,open,close,start,stop,read,write,map,transactions}` |
 | DTR/RTS、复位下载 | — | — | `GET/POST /api/serial/control` |
 | 日志 panic 剖析 / 地址符号化 | — | — | `GET /api/serial/log-profiles`、`POST /api/serial/symbolize` |
 | GDB 调试会话 | `elab_debug action="open\|control\|inspect\|breakpoint\|wait\|close"` | `elab debug -p P --run|--verify` | `/api/debug/*` |
@@ -144,6 +145,7 @@ description: elab-Flow 的 agent 工具索引：按「我要做什么」快速�
 | 帧协议 | `elab_frame` | `action`=list/get/preview/save/delete/encode/templates/import；`project,id,rev,profile,values,variant,length_value,hex,b64,template,new_id` |
 | | `elab_frame_learn` | `action`=learn/verify/auto/codegen；`capture,frames,hints,field_count,name,apply,write,overwrite` |
 | 工程/包 | `elab_pkg` | `action`=status/search/install/activate/remove/update/verify/adapt；`name,query,official,force,wait_s,path,write` |
+| 协议总线 | `elab_modbus` | `action`=meta/status/open/close/read/write/start/stop/transactions/map；`project,port,baud,unit,timeout_ms,retries,fc,address,count,values,map,rev,confirm` |
 
 写操作（串口写 / 适配写盘 / 录制 / profile 落盘）受 `allowAgentWrite` 门控；
 profile 的 save/delete/import 还要 `rev` 乐观锁（先 `elab_frame action=list` 取 rev）。

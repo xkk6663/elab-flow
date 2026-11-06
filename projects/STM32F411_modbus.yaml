@@ -1,0 +1,104 @@
+# projects/STM32F411_modbus.yaml —— Modbus RTU 从站教学例程（独立全片，0x08000000）
+#
+# 与 stm32f411ceu6.yaml 的区别：
+#   · 不接 OTA 双镜像（教学例程要"烧进去就能跑"，不依赖 boot 跳转）；
+#   · 单串口（USART1 经 DAPLink CDC = COM10）跑 Modbus，心跳另走 USART2；
+#   · 关注点是**协议**，不是闭环编排 —— 但仍然用同一套 build/flash/monitor。
+#
+# 实测依据：examples/STM32F411_modbus/CMakeLists.txt、CMakePresets.json、
+#           STM32F411XX_FLASH.ld、cmake/stm32cubemx/CMakeLists.txt
+
+name: STM32F411_modbus
+root: ${ELAB_ROOT}/examples/STM32F411_modbus
+chip: st/stm32f411ceux
+archetype: A
+
+build:
+  kind: cmake
+  source: ${root}/CMakeLists.txt
+  work_dir: ${ELAB_ROOT}/.work/STM32F411_modbus
+  generator: Ninja
+  toolchain_file:  ${ELAB_ROOT}/toolchains/gcc.cmake
+  project_include: ${ELAB_ROOT}/toolchains/inject.cmake
+  linker_script:   ${root}/STM32F411XX_FLASH.ld   # 全片 512K @ 0x08000000
+  build_type: Debug
+  project_name: STM32F411_modbus
+  uses_freertos: false
+
+artifacts:
+  elf: ${work_dir}/STM32F411_modbus.elf
+  hex: ${work_dir}/STM32F411_modbus.hex
+  bin: ${work_dir}/STM32F411_modbus.bin
+  map: ${work_dir}/STM32F411_modbus.map
+
+debug:
+  probe: atlink
+  gdb_script: ${ELAB_ROOT}/toolchains/gdb/break_main.gdb
+
+guard:
+  untouched: true
+  snapshot: true
+  snapshot_root: ${root}
+
+# Modbus 主站要独占这个口：panel 打开会话后 elab_modbus 直接挂上去，
+# 不新开口、不复制读线程（协议计划 D2）。心跳口 USART2 在没有第二只
+# USB-TTL 时看不到 —— 判据回落到寄存器 tick/toggles + LED。
+serial:
+  port: auto
+  baud: 115200
+
+monitor:
+  close_on:
+    # 单口方案：上电后、主站上线前，USART1 会发 [alive]（见 board.c）；
+    # 首帧之后总线只跑 Modbus，此时判据改用寄存器读数。
+    - { kind: regex, pattern: "^\\[(boot|alive)\\]", within_s: 10 }
+  fail_on:
+    - { kind: regex, pattern: "HardFault|Hard Fault|assert|PANIC" }
+  idle_timeout_s: 30
+
+provenance:
+  vendor:
+    value: "st（stm32cubemx）"
+    level: E4
+    evidence: "CMakeLists.txt: add_subdirectory(cmake/stm32cubemx)"
+  archetype:
+    value: "A"
+    level: E4
+    evidence: "CMakePresets.json: toolchainFile（命令行级，接管后不再加载）"
+  project_name:
+    value: "STM32F411_modbus"
+    level: E1
+    evidence: "CMakeLists.txt: set(CMAKE_PROJECT_NAME STM32F411_modbus)"
+  toolchain_cmake:
+    value: "cmake/gcc-arm-none-eabi.cmake"
+    level: E4
+    evidence: "CMakePresets.json: toolchainFile"
+  linker_script:
+    value: "STM32F411XX_FLASH.ld"
+    level: E3
+    evidence: "工具链文件: -T STM32F411XX_FLASH.ld"
+  compile_flags:
+    value: "-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard"
+    level: E1
+    evidence: "工具链文件: TARGET_FLAGS"
+  chip_macro:
+    value: "STM32F411xE"
+    level: E1
+    evidence: "cmake/stm32cubemx/CMakeLists.txt: MX_Defines_Syms"
+  chip:
+    value: "st/stm32f411ceux"
+    level: E1
+    evidence: "编译宏 STM32F411xE == chips/st/stm32f411ceux.yaml:part"
+  memory:
+    value: "RAM=0x20000 FLASH=0x80000"
+    level: E3
+    evidence: "STM32F411XX_FLASH.ld MEMORY 段"
+  uses_freertos:
+    value: "false"
+    level: E4
+    evidence: "CMakeLists.txt: 无 FreeRTOS 目标"
+  stdout:
+    value: "有输出能力"
+    level: E4
+    evidence: "Core/Src/main.c: 开机横幅 HAL_UART_Transmit(huart1)"
+  confidence: "high"

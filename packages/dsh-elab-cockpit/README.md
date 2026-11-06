@@ -50,6 +50,32 @@ DSH Desktop 深色主题（2026-11-03）。**全部为绝对地址**，市场页
 窄栏没有源码 gutter，用**函数 / 地址断点**（可加条件）；调用栈、寄存器、变量、内存等子页签按内核
 `meta.debug.features` 出现；「关闭」= `monitor reset run`（目标复位并继续跑）。
 
+### 2026-11-06 新增：Modbus RTU 主站（STM32F411 从站实机）
+
+日志尾多了一个 **`Modbus`** 页签（`构建 | 烧录 | 调试 | 串口 | Modbus`）。主站**挂在已开的串口会话上**：
+不新开端口、不复制读线程 —— 面板、串口工作区、agent 三方看到的是**同一份字节**。
+
+- **点表驱动，面板零硬编码**：点位 / 功能码 / 地址 / 类型 / 换算全在 `projects/<name>.modbus.json`。
+  本例 31 个点 / 5 组，轮询时同功能码相邻地址自动合并成 8 条读；没有点表的工程进来只显示一行提示，
+  写表单的地址说明也是**按点表反查**（不是写死"0x10 = LED"）。
+- **状态与证据同屏**：`COM10@115200 · 从站 1 · 轮询中（fast/diag/slow/bits）`，
+  成功 / 超时 / CRC / 异常码 / 重试 / 最近成功一眼可判；事务流水逐条给 `FC · 地址 · 点位 · 耗时`
+  （悬停看 `tx_hex` / `rx_hex`），失败条目直接标错误分类（`timeout` / `crc` / `exception`）。
+- **写有两道闸**：面板先弹 `window.confirm`，内核再要求 `confirm: true`；agent 侧还额外受
+  `allowAgentWrite`（默认关）约束。总线上的写会真的动 LED / 继电器 / 变频器。
+- **诊断不另做页面**：地址落在 `0x0100..0x010F` 的读保持寄存器点自动聚成「DMA 诊断」卡 ——
+  本板这几格正是接收/发送双缓冲的计数（`dma_ht` / `dma_tc` / `dma_tx_pingpong` …），
+  扫一眼就知道「HT/TC 到底有没有触发、乒乓有没有真的用上第二块缓冲」。
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/protocol/modbus/dsh-05-modbus.png" width="330" alt="DSH 右栏：Modbus 页签（未连接也能先看到点表）">
+
+<img src="https://raw.githubusercontent.com/xkk6663/elab-flow/main/docs/tutorials/assets/protocol/modbus/dsh-07-modbus-polling.png" width="330" alt="DSH 右栏：轮询中（点表实时值 + DMA 诊断 + 事务流水）">
+
+agent 侧是同一个门面：`elab_modbus`（`meta` / `status` / `open` / `close` / `read` / `write` / `start` / `stop` / `transactions` / `map`），
+读与面板同源，写要 `confirm:true` + `allowAgentWrite`，点表保存受 `rev` 乐观锁。
+帧格式 / 点表合并 / 双缓冲接收（CIRC + HT/TC）/ 排错手册见
+[09-协议上手_Modbus](../../docs/tutorials/09-协议上手_Modbus.md)。
+
 ### 2026-11-05 新增：帧协议 P0/P1（位域 / 变长 / 多 ID / 组帧，STM32F103C8T6 实机）
 
 `projects/<name>.frames.json` 的 profile 扩展了三类切帧/取字段能力：
@@ -203,7 +229,7 @@ git clone --depth 1 https://github.com/xkk6663/elab-flow.git D:\elab-flow
 
 | 机制 | 生效范围 | 内容 |
 |---|---|---|
-| `elab_*` 工具注册 | 进程级（所有会话） | 编译 / 烧录 / 调试 / 串口的结构化工具；`autoExposeTools` 默认开。**混合门面**：6 门面 + 8 细粒度 = 14 个（`toolMode: facade` 默认；`both` 额外注册旧名别名） |
+| `elab_*` 工具注册 | 进程级（所有会话） | 编译 / 烧录 / 调试 / 串口 / Modbus 的结构化工具；`autoExposeTools` 默认开。**混合门面**：7 门面 + 8 细粒度 = 15 个（`toolMode: facade` 默认；`both` 额外注册旧名别名） |
 | 常驻系统提示段 | 进程级（所有会话） | 插件挂载时注册 `plugin:elab-cockpit`：工具有哪些、推荐顺序、单飞/互斥/写门控/判活纪律 |
 | `elab_guide` 工具 | 按需调用 | **意图树**（每个动作带同义词/前置条件/示例）+ 旧名迁移表 + 规则 + 面板说明；只读、不启动内核，第一次接手工程或不确定用哪个工具时先调它 |
 | `.agents/skills` / `AGENTS.md` | 工作区级 | 只留给芯片长尾知识（引脚、坑位、验收清单）与工程约定，不再是必需项 |
@@ -226,6 +252,7 @@ agent：elab_status（拿工程名）→ elab_run(action="triple") → elab_log
 | 看运行日志 / 判活 | `elab_serial(action="monitor", op="open")` → `elab_serial_wait`（等 `[alive]`）→ `elab_serial_read` |
 | 解协议帧 / 改 profile / 组帧 | `elab_frame(action="list")` → `preview`（可传草稿）→ `encode` → `save`（`rev` + `allowAgentWrite`） |
 | 单步 / 断点 / 寄存器 | `elab_debug(action="open")` → `action="control"` → `elab_debug_inspect` → `action="close"` |
+| 读 Modbus 从站 / 写寄存器 | `elab_modbus(action="open", project=…)` → `action="read"`（或 `action="start"` 起轮询）→ `action="status"` 读点表与流水；写要 `confirm=true` + `allowAgentWrite` |
 | 接新工程 / 换芯片包 | `elab_pkg(action="adapt", write=false)`（先探测）→ `elab_pkg(action="install")` |
 
 ### 三条硬纪律（agent 会从提示段与 `elab_guide` 读到）
@@ -383,4 +410,7 @@ npm run build        # Host 半 tsc → lib + Client 半打包 + 契约校验
 
 ## License
 
-MIT
+Apache-2.0 — 授权正文见仓库根 [`LICENSE`](https://github.com/xkk6663/elab-flow/blob/main/LICENSE)，版权与归属声明见 [`NOTICE`](https://github.com/xkk6663/elab-flow/blob/main/NOTICE)。
+
+- **1.0.0 起**：Apache-2.0。
+- **0.1.0 – 0.4.0**：MIT。该授权永久有效，已发布版本继续是 MIT。
