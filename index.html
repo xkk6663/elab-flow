@@ -478,58 +478,83 @@ $ ./elab loop -p stm32f411ceu6 -v
 
 <!-- ============================ 文档 ============================ -->
 <section class="view" id="view-docs" hidden>
-  <div class="page-head">
-    <div class="wrap">
-      <span class="eyebrow">文档</span>
-      <h1>上手教程</h1>
-      <p>九篇教程按学习顺序排列，从「换新芯片先过心跳第一关」到 Modbus 主站。全部来自仓库 <code>docs/tutorials</code>，页面内可直接读。</p>
-    </div>
-  </div>
+  <div class="docs-shell" id="docsShell">
+    <!-- 左侧栏：教程列表（上） + 本篇目录（下），宽度可拖 -->
+    <aside class="docs-rail" id="docsRail">
+      <div class="rail-head">
+        <span class="rail-title">教程</span>
+        <span class="rail-hint" id="railHint">9 篇</span>
+        <button class="rail-btn" id="railCollapse" title="收起目录（拖动右侧分隔线可调宽度）" aria-label="收起目录">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+      </div>
 
-  <div class="wrap">
-    <div class="docs-layout">
-      <aside class="docs-side">
+      <div class="rail-body">
         <label class="search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
           <input type="search" id="docSearch" placeholder="搜索教程标题或内容…">
         </label>
         <div class="doc-list" id="docList"></div>
-        <div class="doc-toc" id="docToc" hidden>
-          <h5>本篇目录</h5>
-          <div id="docTocBody"></div>
-        </div>
-      </aside>
+      </div>
 
-      <div class="docs-main">
-        <!-- 概览 -->
-        <div class="docs-overview" id="docOverview">
-          <h2>按顺序读，别跳</h2>
-          <p style="color:var(--muted);font-size:13.8px;line-height:1.7;margin:6px 0 0">
-            第一次接触：01 → 03 → 06。要接自己的板子：01 → 04。要做厂商适配包：02。串口与协议：07 → 09。
-          </p>
-          <div class="doc-cards" id="docCards"></div>
+      <div class="rail-toc" id="docToc" hidden>
+        <div class="rail-head">
+          <span class="rail-title">本篇目录</span>
+          <span class="rail-hint" id="tocCount"></span>
         </div>
+        <nav class="toc-list" id="docTocBody" aria-label="本篇目录"></nav>
+      </div>
+    </aside>
 
-        <!-- 阅读器 -->
-        <div class="doc-view" id="docView">
-          <div class="doc-toolbar">
-            <button class="back-btn" id="docBack">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-              全部教程
-            </button>
-            <span style="font-size:12px;color:var(--faint)" id="docMeta"></span>
-            <span class="spacer"></span>
-            <a class="gh" id="docGithub" href="#" target="_blank" rel="noopener">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
-              在 GitHub 查看原文
-            </a>
-          </div>
-          <article class="md" id="docBody"></article>
+    <div class="rail-resizer" id="railResizer" role="separator" aria-orientation="vertical"
+         aria-label="拖动调整目录宽度（双击复位）" tabindex="0"><i></i></div>
+
+    <div class="docs-main">
+      <!-- 概览 -->
+      <div class="docs-overview" id="docOverview">
+        <div class="ov-head">
+          <span class="eyebrow">文档</span>
+          <h1>上手教程</h1>
+          <p>九篇教程按学习顺序排列，从「换新芯片先过心跳第一关」到 Modbus 主站。全部来自仓库 <code>docs/tutorials</code>，直接在页面里读。</p>
         </div>
+        <h2 class="ov-sub">按顺序读，别跳</h2>
+        <p class="ov-lead">
+          第一次接触：01 → 03 → 06。要接自己的板子：01 → 04。要做厂商适配包：02。串口与协议：07 → 09。
+        </p>
+        <div class="doc-cards" id="docCards"></div>
+      </div>
+
+      <!-- 阅读器 -->
+      <div class="doc-view" id="docView">
+        <div class="doc-toolbar">
+          <button class="back-btn" id="docBack">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            全部教程
+          </button>
+          <span class="doc-meta" id="docMeta"></span>
+          <span class="spacer"></span>
+          <button class="tool-btn" id="docTheme" title="切换深色 / 浅色阅读模式">
+            <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/></svg>
+            <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/></svg>
+            <span id="docThemeLabel">浅色</span>
+          </button>
+          <a class="gh" id="docGithub" href="#" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
+            原文
+          </a>
+        </div>
+        <article class="md" id="docBody"></article>
+        <div class="doc-pager" id="docPager"></div>
       </div>
     </div>
   </div>
+
 </section>
+
+  <button class="rail-open" id="railOpen" hidden title="展开目录">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    目录
+  </button>
 
 <!-- ============================ 芯片包市场 ============================ -->
 <section class="view" id="view-market" hidden>

@@ -81,6 +81,8 @@
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.route === route));
     document.body.dataset.route = route;
     currentRoute = route;
+    if (typeof applyDocTheme === "function") applyDocTheme();
+    if (typeof syncRailOpen === "function") syncRailOpen();
 
     if (!keepScroll) {
       window.scrollTo({ top: 0, behavior: "auto" });
@@ -635,9 +637,11 @@
 
   function closeDoc(silent) {
     activeDoc = "";
+    tocTargets = [];
     $("#docView").classList.remove("on");
     $("#docOverview").style.display = "";
     $("#docToc").hidden = true;
+    $("#docPager").innerHTML = "";
     $$(".doc-item").forEach((el) => el.classList.remove("active"));
     if (!silent) window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -657,22 +661,209 @@
     $("#docBody").innerHTML = md2html(doc.md);
     $$(".doc-item").forEach((el) => el.classList.toggle("active", el.dataset.doc === doc.num));
 
-    // 目录
-    const heads = $$("#docBody h2, #docBody h3");
-    if (heads.length) {
-      heads.forEach((h, i) => {
-        if (!h.id) h.id = "s-" + doc.num + "-" + i;
-      });
-      $("#docToc").hidden = false;
-      $("#docTocBody").innerHTML = heads
-        .filter((h) => h.tagName === "H2")
-        .map((h) => '<a href="#' + h.id + '" data-toc="' + h.id + '">' + h.textContent + "</a>")
-        .join("");
-    } else {
-      $("#docToc").hidden = true;
-    }
+    buildToc(doc);
+    buildPager(doc);
     if (!silent) window.scrollTo({ top: 0, behavior: "smooth" });
   }
+
+  /* ---- 本篇目录：h2 + h3，随滚动高亮 ---- */
+  let tocTargets = [];
+
+  function buildToc(doc) {
+    const heads = $$("#docBody h2, #docBody h3").filter((h) => h.textContent.trim());
+    heads.forEach((h, i) => {
+      if (!h.id) h.id = "s-" + doc.num + "-" + i;
+    });
+    tocTargets = heads;
+    if (!heads.length) {
+      $("#docToc").hidden = true;
+      return;
+    }
+    $("#docToc").hidden = false;
+    $("#tocCount").textContent = heads.length + " 节";
+    $("#docTocBody").innerHTML = heads
+      .map(
+        (h) =>
+          '<a href="#' + h.id + '" data-toc="' + h.id + '" class="' + (h.tagName === "H3" ? "lv3" : "lv2") + '">' +
+          esc(h.textContent.trim()) + "</a>"
+      )
+      .join("");
+    spyToc();
+  }
+
+  function spyToc() {
+    if (!tocTargets.length || !$("#docView").classList.contains("on")) return;
+    const line = window.scrollY + 120;
+    let idx = 0;
+    tocTargets.forEach((h, i) => {
+      if (h.getBoundingClientRect().top + window.scrollY <= line) idx = i;
+    });
+    const box = $("#docTocBody");
+    const links = $$("#docTocBody a");
+    links.forEach((a, i) => a.classList.toggle("on", i === idx));
+    // 让高亮项留在目录可视区（用 rect 相对量，offsetTop 的 offsetParent 是 sticky 的侧栏，不能用）
+    const on = links[idx];
+    if (on && box) {
+      const r = on.getBoundingClientRect();
+      const br = box.getBoundingClientRect();
+      if (r.top < br.top || r.bottom > br.bottom) {
+        box.scrollTop += r.top - br.top - box.clientHeight / 2 + r.height / 2;
+      }
+    }
+  }
+
+  let tocTick = false;
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (tocTick) return;
+      tocTick = true;
+      requestAnimationFrame(() => {
+        tocTick = false;
+        spyToc();
+      });
+    },
+    { passive: true }
+  );
+
+  /* ---- 文末上一篇 / 下一篇 ---- */
+  function buildPager(doc) {
+    const i = DOCS.findIndex((d) => d.num === doc.num);
+    const prev = i > 0 ? DOCS[i - 1] : null;
+    const next = i >= 0 && i < DOCS.length - 1 ? DOCS[i + 1] : null;
+    $("#docPager").innerHTML =
+      (prev
+        ? '<a href="#/docs/' + prev.num + '" data-doc="' + prev.num + '"><span class="pg-k">← 上一篇</span><span class="pg-t">' +
+          esc(prev.name) + "</span></a>"
+        : "") +
+      (next
+        ? '<a class="next" href="#/docs/' + next.num + '" data-doc="' + next.num + '"><span class="pg-k">下一篇 →</span><span class="pg-t">' +
+          esc(next.name) + "</span></a>"
+        : "");
+  }
+
+  /* ---- 侧栏：拖动调宽 / 收起 / 恢复 ---- */
+  const shell = $("#docsShell");
+  const RAIL_W_KEY = "elab.railW";
+  const RAIL_C_KEY = "elab.railCollapsed";
+  const THEME_KEY = "elab.docTheme";
+  const RAIL_MIN = 232;
+  const RAIL_MAX = 560;
+  const RAIL_DEFAULT = 300;
+
+  const store = {
+    get(k) {
+      try {
+        return localStorage.getItem(k);
+      } catch (e) {
+        return null;
+      }
+    },
+    set(k, v) {
+      try {
+        localStorage.setItem(k, v);
+      } catch (e) {
+        /* 隐私模式下写不进去，忽略 */
+      }
+    },
+  };
+
+  let railW = parseInt(store.get(RAIL_W_KEY), 10) || RAIL_DEFAULT;
+  railW = Math.min(RAIL_MAX, Math.max(RAIL_MIN, railW));
+
+  function setRailW(w) {
+    railW = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(w)));
+    shell.style.setProperty("--rail-w", railW + "px");
+  }
+  setRailW(railW);
+
+  (function initRailDrag() {
+    const bar = $("#railResizer");
+    if (!bar) return;
+    let dragging = false;
+
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.button) return;
+      dragging = true;
+      bar.classList.add("on");
+      document.body.classList.add("resizing");
+      try {
+        bar.setPointerCapture(e.pointerId);
+      } catch (err) {
+        /* 老浏览器无 pointer capture，靠 document 上的 move 兜底 */
+      }
+      e.preventDefault();
+    });
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const pad = parseFloat(getComputedStyle(shell).paddingLeft) || 0;
+      setRailW(e.clientX - shell.getBoundingClientRect().left - pad);
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      bar.classList.remove("on");
+      document.body.classList.remove("resizing");
+      store.set(RAIL_W_KEY, String(railW));
+    };
+
+    bar.addEventListener("pointermove", onMove);
+    bar.addEventListener("pointerup", onUp);
+    bar.addEventListener("pointercancel", onUp);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+
+    bar.addEventListener("dblclick", () => {
+      setRailW(RAIL_DEFAULT);
+      store.set(RAIL_W_KEY, String(RAIL_DEFAULT));
+    });
+
+    bar.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      setRailW(railW + (e.key === "ArrowRight" ? 16 : -16));
+      store.set(RAIL_W_KEY, String(railW));
+    });
+  })();
+
+  function syncRailOpen() {
+    // 浮出按钮只在本页面 + 侧栏收起时出现
+    $("#railOpen").hidden = !(shell.classList.contains("collapsed") && currentRoute === "/docs");
+  }
+
+  function setRailCollapsed(v, persist) {
+    shell.classList.toggle("collapsed", v);
+    syncRailOpen();
+    if (persist) store.set(RAIL_C_KEY, v ? "1" : "0");
+  }
+
+  // 窄屏首次访问默认收起，正文优先；用户手动展开后记住选择
+  const narrow = window.matchMedia("(max-width: 860px)").matches;
+  const storedCollapse = store.get(RAIL_C_KEY);
+  setRailCollapsed(storedCollapse === "1" || (storedCollapse === null && narrow), false);
+  $("#railCollapse").addEventListener("click", () => setRailCollapsed(true, true));
+  $("#railOpen").addEventListener("click", () => setRailCollapsed(false, true));
+
+  /* ---- 阅读主题：深色 / 浅色（只作用于文档页） ---- */
+  function docTheme() {
+    return store.get(THEME_KEY) === "light" ? "light" : "dark";
+  }
+
+  function applyDocTheme() {
+    const light = docTheme() === "light";
+    const onDocs = currentRoute === "/docs";
+    document.documentElement.classList.toggle("docs-light", light && onDocs);
+    views["/docs"].classList.toggle("light", light);
+    const lab = $("#docThemeLabel");
+    if (lab) lab.textContent = light ? "深色" : "浅色";
+  }
+
+  $("#docTheme").addEventListener("click", () => {
+    store.set(THEME_KEY, docTheme() === "light" ? "dark" : "light");
+    applyDocTheme();
+    spyToc();
+  });
 
   document.addEventListener("click", (e) => {
     const toc = e.target.closest("[data-toc]");
