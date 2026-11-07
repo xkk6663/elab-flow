@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ELAB-Flow — 一套工具链，一条流程，跑遍所有芯片</title>
+<meta name="description" content="ELAB-Flow：编译 / 烧录 / 调试校验 / 串口判据跑同一条闭环。业务工程源码零改动，内核仅 Python 标准库。含独立驾驶舱、DSH 右栏面板与 15 个 agent 工具。">
+<meta name="theme-color" content="#08090b">
+<meta property="og:title" content="ELAB-Flow — 一套工具链，跑遍所有芯片">
+<meta property="og:description" content="同一句 elab loop：体检 → 编译 → 烧录 → 调试校验 → 串口判据。业务工程源码零改动。">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236d84ff'/%3E%3Cstop offset='1' stop-color='%237a5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M22 20h20M22 32h14M22 44h20' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/css/site.css">
+</head>
+<body>
+
+<!-- ============================ 导航 ============================ -->
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#/" data-route="/" aria-label="ELAB-Flow 首页">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M6 6h12M6 12h8M6 18h12" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </span>
+      <span class="brand-name">ELAB<em>·</em>Flow</span>
+      <span class="brand-ver" id="navVer">v4.0.0</span>
+    </a>
+
+    <nav class="tabs" aria-label="主导航">
+      <a class="tab active" href="#/" data-route="/">首页</a>
+      <a class="tab" href="#/docs" data-route="/docs">文档</a>
+      <a class="tab" href="#/market" data-route="/market">芯片包市场</a>
+    </nav>
+
+    <div class="nav-actions">
+      <a class="star-btn" id="starBtn" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener" title="喜欢该项目点一下 star">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4L12 17.4 6.2 20.4l1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg>
+        <span class="label">Star</span>
+        <span class="n" id="starCount">—</span>
+      </a>
+      <a class="btn btn-primary btn-sm" id="downloadBtn" href="https://github.com/xkk6663/elab-flow/releases/latest" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
+        下载
+        <span class="ver" id="dlVer">v4.0.0</span>
+      </a>
+    </div>
+  </div>
+  <div class="nav-progress" id="navProgress"></div>
+</header>
+
+<main>
+<!-- ============================ 首页 ============================ -->
+<section class="view" id="view-home">
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-grid" aria-hidden="true"></div>
+    <div class="wrap hero-inner">
+      <div class="pill reveal">
+        <span class="dot"></span>
+        <b>v4.0.0</b> · Apache-2.0 · 内核仅 Python 标准库
+      </div>
+
+      <h1 class="hero-title reveal" style="--d:60ms">
+        一套工具链<br><span class="grad">跑遍所有芯片</span>
+      </h1>
+
+      <p class="hero-sub reveal" style="--d:120ms">
+        编译、烧录、调试校验、串口判据跑同一条闭环。<br>
+        换芯片只换一行 <code>chip:</code> —— 业务工程源码零改动。
+      </p>
+
+      <div class="hero-cta reveal" style="--d:180ms">
+        <a class="btn btn-primary btn-lg" id="heroDownload" href="https://github.com/xkk6663/elab-flow/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
+          下载安装包
+        </a>
+        <a class="btn btn-ghost btn-lg" href="#/docs" data-route="/docs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h7a3 3 0 013 3v11a3 3 0 00-3-3H4z"/><path d="M20 5h-7a3 3 0 00-3 3v11a3 3 0 013-3h7z"/></svg>
+          阅读上手教程
+        </a>
+        <a class="btn btn-ghost btn-lg" id="heroStar" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="#f5c451" style="color:#f5c451"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4L12 17.4 6.2 20.4l1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg>
+          喜欢就点个 Star
+        </a>
+      </div>
+
+      <div class="hero-note reveal" style="--d:240ms">
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Python ≥ 3.10 · 零第三方依赖</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>前端产物已入仓 · 运行时不需要 Node</span>
+        <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Windows / Linux</span>
+      </div>
+
+      <!-- 浮动 UI 模型 -->
+      <div class="hero-stage">
+        <div class="hero-glow" aria-hidden="true"></div>
+        <div class="mock" id="heroMock">
+          <div class="mock-bar">
+            <span class="mock-dots"><i></i><i></i><i></i></span>
+            <span class="mock-url"><b>127.0.0.1:8333</b> · elab cockpit</span>
+            <span class="mock-badge"><i></i>串口后端就绪</span>
+          </div>
+          <img src="assets/img/hero.webp" width="1800" height="1023" alt="elab cockpit 实机：ESP32-S31-Korvo 五阶段全绿 + 串口心跳">
+          <div class="mock-shade"></div>
+        </div>
+
+        <div class="float-chip chip-1" id="chip1">
+          <span class="chip-ico ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span>
+          <span>烧录校验 <b>Verified OK</b><br><span class="k">boot + app 双镜像</span></span>
+        </div>
+        <div class="float-chip chip-2" id="chip2">
+          <span class="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg></span>
+          <span>串口闭环 <b>ok</b> · 1.68s<br><span class="k">[alive] tick=11 toggles=22</span></span>
+        </div>
+        <div class="float-chip chip-3" id="chip3">
+          <span class="chip-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/></svg></span>
+          <span>RAM <b>16.29%</b> · FLASH <b>9.39%</b><span class="mini-bar" style="margin-left:8px"><i></i></span></span>
+        </div>
+      </div>
+
+      <div class="trust reveal">
+        <span class="trust-label">实机跑通</span>
+        <div class="trust-list">
+          <span class="trust-item"><i></i>STM32F103C8T6</span>
+          <span class="trust-item"><i></i>STM32F411CEU6 · OTA 双槽</span>
+          <span class="trust-item"><i></i>AT32F421G8U7</span>
+          <span class="trust-item"><i></i>ESP32-S31-Korvo</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 问题 / 做法 -->
+  <section class="block">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">为什么需要它</span>
+        <h2 class="title">每换一颗芯片，重搭一遍</h2>
+        <p class="lead">CubeMX 一套、WorkBench 一套、Keil / IAR 又各一套；工具版本靠 PATH 运气，真机验证全靠手工。ELAB-Flow 做的是「一套工具链和流程跑不同芯片」，不是「一套代码跑不同平台」。</p>
+      </div>
+
+      <div class="pain-grid">
+        <div class="pain reveal" style="--d:0ms">
+          <span class="tag">pain · 01</span>
+          <h3>工程要重搭</h3>
+          <p>换厂商就得再建一次工程、再配一次链接脚本，目录结构还得跟着别人的模板走。</p>
+        </div>
+        <div class="pain reveal" style="--d:80ms">
+          <span class="tag">pain · 02</span>
+          <h3>验证靠肉眼</h3>
+          <p>烧完盯着串口看日志，「好像跑起来了」就算过 —— 没法进 CI，也没法交接给下一个人。</p>
+        </div>
+        <div class="pain solve reveal" style="--d:160ms">
+          <span class="tag">elab · 做法</span>
+          <h3>外骨骼，不改器官</h3>
+          <p>业务代码原地不动，构建前后文件树快照可断言 <code>untouched</code>；芯片差异全部下沉到适配包的 YAML。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 四大功能区 -->
+  <section class="block" id="features">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">产品功能</span>
+        <h2 class="title">四个入口，同一条证据链</h2>
+        <p class="lead">从「给目录」到「拿到结论」，每一步都留下可 grep 的证据行；面板、CLI、agent 看到的是同一份事件流。</p>
+      </div>
+
+      <!-- 01 -->
+      <article class="feature">
+        <div class="f-copy reveal">
+          <div class="f-index">01 / 闭环编排</div>
+          <h3>一条命令跑完五个阶段，<br>每一步都留下可 grep 的证据</h3>
+          <p class="f-desc">体检 → 编译 → 烧录 → 调试校验 → 串口闭环。串口判据给出三态结论，<strong>能开但没收到约定关键字就报 <code>inconclusive</code></strong> —— 不会把「没验证」冒充成成功。</p>
+          <ul class="f-list">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>单步可跑：<code>elab run --steps build</code>，不必每次全量</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>退出码即结论：<code>0</code> ok / <code>1</code> failed / <code>2</code> inconclusive，CI 直接用</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>构建产物、内存占位、守卫快照同屏落账</li>
+          </ul>
+        </div>
+        <div class="f-media reveal" style="--d:100ms" data-parallax="18">
+          <div class="shot">
+            <img src="assets/img/loop.webp" width="1576" height="901" loading="lazy" alt="五阶段全绿：RAM 16.29% · FLASH 9.39%，产物与零改动守卫同屏">
+            <span class="shot-tag"><i></i>STM32F411CEU6 · 真机</span>
+          </div>
+          <div class="shot-cap">// A-07 · 五阶段全绿，产物 4 个 / 守卫 untouched</div>
+        </div>
+      </article>
+
+      <!-- 02 -->
+      <article class="feature flip">
+        <div class="f-copy reveal">
+          <div class="f-index">02 / 调试工作区</div>
+          <h3>从一次真实 HardFault<br>一路收网到源码行</h3>
+          <p class="f-desc">会话式调试器：开始 / 继续 / 暂停 / 单步 / 步入 / 步出 / 复位 / 关闭，<strong>十一个页签</strong>从调用栈一直看到 RTOS 栈水位。断点与监视持久化到项目文件，带 <code>rev</code> 乐观锁。</p>
+          <ul class="f-list">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>调用栈直接指出 <code>#2 0x54535250</code> 非法地址 → <code>heartbeat_pack_buggy</code></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>CMSIS-SVD 外设字段解码，读写都可留审计</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>关闭会话固定 <code>monitor reset run</code>，不会把板子留在 halt</li>
+          </ul>
+        </div>
+        <div class="f-media reveal" style="--d:100ms" data-parallax="18">
+          <div class="shot">
+            <img src="assets/img/debug.webp" width="1800" height="1125" loading="lazy" alt="调试工作区：HardFault 调用栈与阶段轨同屏">
+            <span class="shot-tag"><i></i>HardFault · 实机</span>
+          </div>
+          <div class="shot-cap">// 调用栈 #0 HardFault_Handler → #3 heartbeat_pack_buggy</div>
+        </div>
+      </article>
+
+      <!-- 03 -->
+      <article class="feature">
+        <div class="f-copy reveal">
+          <div class="f-index">03 / 串口与波形</div>
+          <h3>字节为真值，<br>文本只是投影</h3>
+          <p class="f-desc">每个字节批次都带 <code>seq / dir / t / len / gap</code>，方向过滤、搜索、换表示全在客户端做，<strong>切视图不丢游标</strong>。四个视图：行 / 字节 / 终端 / 波形。</p>
+          <ul class="f-list">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>帧解码 <strong>18,253 帧/秒</strong>，64B 批 p95 0.6ms（8× 余量）</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>多面板独立缩放、游标联动、冻结与导出</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>解码器是<strong>会话属性</strong>：面板与 agent 读同一份帧环</li>
+          </ul>
+        </div>
+        <div class="f-media reveal" style="--d:100ms" data-parallax="18">
+          <div class="shot">
+            <img src="assets/img/wave.webp" width="1800" height="1535" loading="lazy" alt="波形页：FireWater 协议双通道正弦，多面板独立缩放">
+            <span class="shot-tag"><i></i>FireWater · 双通道</span>
+          </div>
+          <div class="shot-cap">// 4593 帧 · 2 通道 · 跳过 57 —— 同一份帧环的投影</div>
+        </div>
+      </article>
+
+      <!-- 04 -->
+      <article class="feature flip">
+        <div class="f-copy reveal">
+          <div class="f-index">04 / Agent 原生</div>
+          <h3>不认识的协议，<br>抓一段字节就会解</h3>
+          <p class="f-desc">给 agent 一段没人告诉过它的抓包，它自己推出帧头、帧长、校验、消息 ID 与字段切分。<strong>学习只产草稿、不写文件</strong>：证据链与置信度一起返回，人复核后才落盘。</p>
+          <ul class="f-list">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>置信度 <strong>0.99</strong>，回放 <strong>168/168</strong>；解 → 重编 → 比对 <strong>177/177</strong> 全等</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><code>codegen</code> 产出 <code>generated/*.h</code>，<code>-Wall -Werror</code> 干净编译</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>15 个 <code>elab_*</code> 混合门面工具，写硬件受 <code>allowAgentWrite</code> 门控</li>
+          </ul>
+        </div>
+        <div class="f-media reveal" style="--d:100ms" data-parallax="18">
+          <div class="shot">
+            <img src="assets/img/learn.webp" width="1680" height="1050" loading="lazy" alt="帧协议自学习草稿：置信度 99% 与证据链">
+            <span class="shot-tag"><i></i>私有协议 · 自学</span>
+          </div>
+          <div class="shot-cap">// learn 只产草稿：帧头 / 长度 / 校验 / id 全部带证据</div>
+        </div>
+      </article>
+
+      <!-- 次能力 -->
+      <div class="cards">
+        <article class="card reveal">
+          <div class="card-body">
+            <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>自动接入工程</h4>
+            <p>给一个目录就探测芯片、框架、构建入口与置信度；<strong>只读在前，落盘在后</strong>，人工接管过的文件绝不覆盖。</p>
+          </div>
+          <div class="card-shot"><img src="assets/img/adapt.webp" width="1600" height="1000" loading="lazy" alt="自动适配写入报告"></div>
+        </article>
+        <article class="card reveal" style="--d:80ms">
+          <div class="card-body">
+            <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/></svg>Modbus RTU 主站</h4>
+            <p>点表驱动，31 个点 / 5 组合并成 8 条读；写保护缺 <code>confirm</code> 直接拒，越界被从站异常码 02 挡回。</p>
+          </div>
+          <div class="card-shot"><img src="assets/img/modbus.webp" width="1714" height="1880" loading="lazy" alt="Modbus 主站面板"></div>
+        </article>
+        <article class="card reveal" style="--d:0ms">
+          <div class="card-body">
+            <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>DSH 右栏面板</h4>
+            <p>agent 在跑，你在旁边看：阶梯进度、日志尾、四通道与串口页挤在窄栏里，插件首启自动补齐工具链。</p>
+          </div>
+          <div class="card-shot"><img src="assets/img/dsh.webp" width="1058" height="1530" loading="lazy" alt="DSH 右栏面板三连全绿"></div>
+        </article>
+        <article class="card reveal" style="--d:80ms">
+          <div class="card-body">
+            <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v6c0 4.4-3.4 7.4-8 8-4.6-.6-8-3.6-8-8V7z"/></svg>适配包与社区市场</h4>
+            <p>骨架仓零芯片，厂商支持全在数据层；<code>elab pkg index</code> 重生成索引，CI 用 <code>--check</code> 拦漂移。</p>
+          </div>
+          <div class="card-shot"><img src="assets/img/market.webp" width="1576" height="901" loading="lazy" alt="市场搜索安装芯片包"></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- 代码 -->
+  <section class="block" id="code">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">怎么接进来</span>
+        <h2 class="title">工程接入只写差异</h2>
+        <p class="lead">芯片参数在适配包，主机路径在 <code>elab.host.yaml</code>，命令模板在 provider —— 工程 YAML 只声明「我是谁、怎么接」。下面这份是 <code>elab adapt</code> 真实生成的文件节选。</p>
+      </div>
+
+      <div class="code-block reveal">
+        <div class="code-top">
+          <button class="code-tab active" data-code="yaml">projects/stm32f411ceu6.yaml</button>
+          <button class="code-tab" data-code="cli">$ elab loop -p stm32f411ceu6 -v</button>
+          <button class="code-copy" id="copyCode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+            复制
+          </button>
+        </div>
+        <div class="code-body">
+          <div class="code-pane" id="codePane"></div>
+          <div class="annot" id="annotPane"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 仪表盘 -->
+  <section class="block" id="dash">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">实测数据</span>
+        <h2 class="title">不靠感觉，看数字</h2>
+        <p class="lead">下面每个数字都来自仓库里的真机记录与基准脚本，跑一次就能复现。</p>
+      </div>
+
+      <div class="dash">
+        <div class="stat-grid reveal" id="statGrid">
+          <div class="stat">
+            <div class="num"><span class="count" data-to="5">0</span><small>阶段</small></div>
+            <div class="lab accent"><i></i>体检 → 编译 → 烧录 → 调试校验 → 串口</div>
+          </div>
+          <div class="stat">
+            <div class="num"><span class="count" data-to="15">0</span><small>个工具</small></div>
+            <div class="lab accent"><i></i>elab_* 混合门面，写操作受门控</div>
+          </div>
+          <div class="stat">
+            <div class="num"><span class="count" data-to="11">0</span><small>页签</small></div>
+            <div class="lab"><i></i>调试工作区，从调用栈到 RTOS 栈</div>
+          </div>
+          <div class="stat">
+            <div class="num"><span class="count" data-to="4">0</span><small>视图</small></div>
+            <div class="lab"><i></i>行 / 字节 / 终端 / 波形 共用游标</div>
+          </div>
+          <div class="stat">
+            <div class="num"><span class="count" data-to="18253">0</span><small>帧/秒</small></div>
+            <div class="lab"><i></i>单批 64B 解码 p95 0.606 ms</div>
+          </div>
+          <div class="stat">
+            <div class="num"><span class="count" data-to="177">0</span><small>/ 177</small></div>
+            <div class="lab"><i></i>解 → 重编 → 线上字节逐字全等</div>
+          </div>
+        </div>
+
+        <div class="chart-card reveal" style="--d:80ms" id="chartCard">
+          <div class="chart-head">
+            <h4>真机实测</h4>
+            <div class="chart-tabs">
+              <button class="chart-tab active" data-chart="mem">内存占位</button>
+              <button class="chart-tab" data-chart="fps">解码吞吐</button>
+            </div>
+          </div>
+          <div class="chart-legend" id="chartLegend"></div>
+          <svg class="chart-svg" id="chartSvg" viewBox="0 0 460 240" role="img" aria-label="实测数据图表"></svg>
+          <div class="dash-note" id="chartNote"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 三入口 -->
+  <section class="block tight">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <span class="eyebrow">一个内核 · 三种入口</span>
+        <h2 class="title">同一份事件流，区别只在谁在看</h2>
+      </div>
+      <div class="entries">
+        <div class="entry reveal">
+          <div class="entry-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg></div>
+          <h4>CLI · 脚本与 CI</h4>
+          <p>终端分色输出，退出码即结论。适合脚本、CI、无人值守与 agent 直接调用。</p>
+          <code class="cmd">./elab loop -p f411 -v</code>
+        </div>
+        <div class="entry reveal" style="--d:80ms">
+          <div class="entry-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg></div>
+          <h4>独立驾驶舱 · 桌面前盯全程</h4>
+          <p>工程轨 / 阶段轨 / 证据轨三列全屏，双击即起，幂等不重复起服务。</p>
+          <code class="cmd">cockpit.cmd → 127.0.0.1:8333</code>
+        </div>
+        <div class="entry reveal" style="--d:160ms">
+          <div class="entry-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></div>
+          <h4>DSH 右栏 · agent 在跑你在看</h4>
+          <p>窄栏阶梯 + 日志尾 + 串口页；插件首次打开自动下载内核并补齐工具链。</p>
+          <code class="cmd">dsh plugin add …#path:/packages/dsh-elab-cockpit</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 快速开始 -->
+  <section class="block" id="start">
+    <div class="wrap">
+      <div class="start">
+        <div class="reveal">
+          <span class="eyebrow">快速开始</span>
+          <h2 class="title" style="font-size:clamp(24px,3vw,34px)">六步，从克隆到实机全绿</h2>
+          <p class="lead" style="font-size:14.5px">需要 Python ≥ 3.10（无第三方依赖）；上板另需 CMake + Ninja + ARM GCC + OpenOCD。没有探针时 doctor / build / ci 照样能跑。</p>
+          <div class="steps" style="margin-top:22px">
+            <div class="step">
+              <span class="step-n">01</span>
+              <div><h4>克隆仓库</h4><code class="cmd-line"><b>$</b> git clone git@github.com:xkk6663/elab-flow.git</code></div>
+            </div>
+            <div class="step">
+              <span class="step-n">02</span>
+              <div><h4>装内置芯片包</h4><code class="cmd-line"><b>$</b> ./elab pkg bootstrap</code></div>
+            </div>
+            <div class="step">
+              <span class="step-n">03</span>
+              <div><h4>体检环境</h4><code class="cmd-line"><b>$</b> ./elab setup &amp;&amp; ./elab doctor</code></div>
+            </div>
+            <div class="step">
+              <span class="step-n">04</span>
+              <div><h4>接入自己的工程</h4><p>先不加 <code>--write</code> 看只读报告，确认后再落盘。</p><code class="cmd-line"><b>$</b> ./elab adapt ../my-project --write</code></div>
+            </div>
+            <div class="step">
+              <span class="step-n">05</span>
+              <div><h4>跑闭环</h4><code class="cmd-line"><b>$</b> ./elab loop -p my-project -v</code></div>
+            </div>
+            <div class="step">
+              <span class="step-n">06</span>
+              <div><h4>打开驾驶舱</h4><code class="cmd-line"><b>$</b> python -m cockpit.server</code></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="term reveal" style="--d:100ms">
+          <div class="term-bar"><span style="color:#4ee39b">●</span> elab · bash — 132×34</div>
+          <pre id="termOut">$ ./elab setup
+<span class="tk-dim">[elab] 环境自检 · pack st/stm32@0.1.0 · kernel_api &gt;=1 &lt;2</span>
+  <span class="tk-ok">✓</span> 芯片包      st/stm32 <span class="tk-dim">(stm32f103xb / stm32f411ceux)</span>
+  <span class="tk-ok">✓</span> 工具链      arm-none-eabi-gcc 13.3.1 · cmake 3.28.1 · ninja 1.11.1
+  <span class="tk-ok">✓</span> 调试器      openocd 0.12.0-3 <span class="tk-dim">(probe: atlink)</span>
+  <span class="tk-ok">✓</span> 串口        COM10 @115200 <span class="tk-dim">(auto)</span>
+
+$ ./elab loop -p stm32f411ceu6 -v
+<span class="tk-dim">[1/5]</span> 体检        <span class="tk-ok">✓</span> 0.14s   工具链 / 探针 / 串口
+<span class="tk-dim">[2/5]</span> 编译        <span class="tk-ok">✓</span> 7.46s   RAM <span class="tk-num">16.29%</span> · FLASH <span class="tk-num">9.39%</span> · 守卫 untouched
+<span class="tk-dim">[3/5]</span> 烧录        <span class="tk-ok">✓</span> ** Programming Started **
+<span class="tk-dim">[4/5]</span> 调试校验    <span class="tk-ok">✓</span> 6.03s   Breakpoint 1 at Core/Src/main.c:84
+<span class="tk-dim">[5/5]</span> 串口闭环    <span class="tk-ok">✓</span> 1.68s   命中 regex:^\[(boot|alive)\] within_s=10
+
+结论 <span class="tk-ok">ok</span> · 7.46s · exit 0      <span class="tk-dim"># 1=failed  2=inconclusive</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Star CTA -->
+  <div class="cta-band" style="margin-top:40px">
+    <div class="cta-inner reveal">
+      <h3>喜欢这个项目？点一下 Star</h3>
+      <p>芯片适配包、协议模板与实机验收报告都在开源仓库里。你的一次 star，是下一颗芯片适配的动力。</p>
+      <div class="cta-actions">
+        <a class="btn btn-primary btn-lg" id="ctaStar" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4L12 17.4 6.2 20.4l1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg>
+          Star · <span id="ctaStarCount">—</span>
+        </a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/xkk6663/elab-flow/issues" target="_blank" rel="noopener">提一个 Issue</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 文档 ============================ -->
+<section class="view" id="view-docs" hidden>
+  <div class="page-head">
+    <div class="wrap">
+      <span class="eyebrow">文档</span>
+      <h1>上手教程</h1>
+      <p>九篇教程按学习顺序排列，从「换新芯片先过心跳第一关」到 Modbus 主站。全部来自仓库 <code>docs/tutorials</code>，页面内可直接读。</p>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="docs-layout">
+      <aside class="docs-side">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input type="search" id="docSearch" placeholder="搜索教程标题或内容…">
+        </label>
+        <div class="doc-list" id="docList"></div>
+        <div class="doc-toc" id="docToc" hidden>
+          <h5>本篇目录</h5>
+          <div id="docTocBody"></div>
+        </div>
+      </aside>
+
+      <div class="docs-main">
+        <!-- 概览 -->
+        <div class="docs-overview" id="docOverview">
+          <h2>按顺序读，别跳</h2>
+          <p style="color:var(--muted);font-size:13.8px;line-height:1.7;margin:6px 0 0">
+            第一次接触：01 → 03 → 06。要接自己的板子：01 → 04。要做厂商适配包：02。串口与协议：07 → 09。
+          </p>
+          <div class="doc-cards" id="docCards"></div>
+        </div>
+
+        <!-- 阅读器 -->
+        <div class="doc-view" id="docView">
+          <div class="doc-toolbar">
+            <button class="back-btn" id="docBack">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              全部教程
+            </button>
+            <span style="font-size:12px;color:var(--faint)" id="docMeta"></span>
+            <span class="spacer"></span>
+            <a class="gh" id="docGithub" href="#" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
+              在 GitHub 查看原文
+            </a>
+          </div>
+          <article class="md" id="docBody"></article>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 芯片包市场 ============================ -->
+<section class="view" id="view-market" hidden>
+  <div class="page-head">
+    <div class="wrap">
+      <span class="eyebrow">芯片包市场</span>
+      <h1>芯片知识只住在数据层</h1>
+      <p>骨架仓本身零芯片。芯片参数、厂商指纹、平台坑位全部来自适配包；包之间互不依赖，索引写 <code>market/index.json</code>。</p>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="mkt-bar">
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input type="search" id="mktSearch" placeholder="搜厂商 / 包名 / 芯片型号…">
+      </label>
+      <span class="src-note" id="mktSrc"><i></i>正在读取索引…</span>
+      <span style="margin-left:auto"></span>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/xkk6663/elab-flow/blob/main/market/CONTRIBUTING.md" target="_blank" rel="noopener">贡献指南</a>
+      <button class="btn btn-primary btn-sm" id="openUpload">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="M7 13l5-5 5 5"/><path d="M4 4h16"/></svg>
+        上传芯片包
+      </button>
+    </div>
+
+    <div class="mkt-section-h"><h3>芯片适配包</h3><span id="packCount"></span></div>
+    <div class="mkt-grid" id="packGrid"></div>
+
+    <div class="mkt-section-h"><h3>工具链 Provider</h3><span id="provCount"></span></div>
+    <div class="mkt-grid" id="provGrid"></div>
+
+    <div class="upload-card" id="uploadCard">
+      <div>
+        <h4>你手上有别的芯片？</h4>
+        <p>适配包不依赖内核源码，只认 <code>pack.yaml</code> 协议。填一份清单就能生成市场条目，一键提成 Issue —— 审核通过后出现在上面的列表里。</p>
+      </div>
+      <button class="btn btn-primary" id="openUpload2">提交我的芯片包</button>
+    </div>
+
+    <div style="height:40px"></div>
+  </div>
+</section>
+</main>
+
+<!-- ============================ 页脚 ============================ -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="brand" href="#/" data-route="/">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M6 6h12M6 12h8M6 18h12" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+          </span>
+          <span class="brand-name">ELAB<em>·</em>Flow</span>
+        </a>
+        <p>一套工具链 + 一条流程：不同芯片的工程，跑同一句 elab build / flash / debug / monitor。</p>
+      </div>
+
+      <div class="foot-col">
+        <h5>产品</h5>
+        <a href="#features" data-anchor="features">功能</a>
+        <a href="#/docs" data-route="/docs">上手教程</a>
+        <a href="#/market" data-route="/market">芯片包市场</a>
+        <a href="https://github.com/xkk6663/elab-flow/releases" target="_blank" rel="noopener">发布版本</a>
+      </div>
+
+      <div class="foot-col">
+        <h5>资源</h5>
+        <a href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a href="https://github.com/xkk6663/elab-flow/blob/main/CHANGELOG.md" target="_blank" rel="noopener">变更记录</a>
+        <a href="https://github.com/xkk6663/elab-flow/blob/main/docs/README.md" target="_blank" rel="noopener">深度文档</a>
+        <a href="https://github.com/xkk6663/elab-flow/blob/main/LICENSE" target="_blank" rel="noopener">许可证</a>
+      </div>
+
+      <div class="foot-col">
+        <h5>社区</h5>
+        <a href="https://github.com/xkk6663/elab-flow/issues" target="_blank" rel="noopener">Issue / 反馈</a>
+        <a href="https://github.com/xkk6663/elab-flow/blob/main/market/CONTRIBUTING.md" target="_blank" rel="noopener">贡献适配包</a>
+        <a href="https://github.com/xkk6663" target="_blank" rel="noopener">作者主页</a>
+        <a href="https://github.com/xkk6663/elab-flow/stargazers" target="_blank" rel="noopener">Star 列表</a>
+      </div>
+    </div>
+
+    <div class="deps">
+      <span><b>内核</b> Python ≥ 3.10 · 仅标准库</span>
+      <span><b>构建</b> ARM GCC 13.3.1 · CMake 3.28.1 · Ninja 1.11.1 · OpenOCD 0.12.0-3</span>
+      <span><b>前端</b> 产物已入仓 · 运行时不需要 Node</span>
+      <span><b>许可</b> Apache-2.0（v4.0.0 起）· v1.0.0–v3.1.0 永久 MIT</span>
+      <span><b>第三方</b> Lissio（Apache-2.0）移植代码，见 NOTICE</span>
+    </div>
+
+    <div class="foot-bottom">
+      <div class="author">
+        <span class="avatar">XK</span>
+        <span>作者 <a href="https://github.com/xkk6663" target="_blank" rel="noopener" style="color:#c6cbdb">xkk6663</a> · 嵌入式工具链</span>
+      </div>
+      <span>© 2026 ELAB-Flow · 本站由 GitHub Pages 托管</span>
+    </div>
+  </div>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<!-- 上传芯片包弹窗 -->
+<div class="modal" id="uploadModal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upTitle">
+    <div class="modal-head">
+      <div>
+        <h3 id="upTitle">提交芯片包</h3>
+        <p>填完生成市场条目 JSON，点「提成 Issue」会在 GitHub 打开预填好的表单。</p>
+      </div>
+      <button class="modal-close" id="closeUpload" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="grid-2">
+        <div class="field">
+          <label>包名 <b>*</b><span class="hint">vendor/platform，如 artery/at32</span></label>
+          <input id="fName" placeholder="vendor/platform">
+        </div>
+        <div class="field">
+          <label>版本 <b>*</b></label>
+          <input id="fVer" placeholder="0.1.0">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label>许可证</label>
+          <select id="fLicense">
+            <option>MIT</option><option>Apache-2.0</option><option>BSD-3-Clause</option><option>GPL-3.0</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>状态</label>
+          <input id="fStatus" value="community" disabled>
+        </div>
+      </div>
+      <div class="field">
+        <label>芯片列表 <b>*</b><span class="hint">逗号分隔，如 artery/at32f421g8</span></label>
+        <input id="fChips" placeholder="vendor/chip1, vendor/chip2">
+      </div>
+      <div class="field">
+        <label>来源仓库 <b>*</b><span class="hint">公开 git 地址，需带 .gitattributes（* -text）</span></label>
+        <input id="fSrc" placeholder="https://github.com/<you>/elab-pack-xxx.git">
+      </div>
+      <div class="field">
+        <label>一句话描述</label>
+        <textarea id="fDesc" placeholder="芯片适配包：工程指纹 + 芯片参数 + 平台坑位"></textarea>
+      </div>
+      <div class="field">
+        <label>生成的市场条目</label>
+        <div class="modal-out"><pre id="entryOut">{}</pre></div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <span class="tip">提交前请确认仓库公开且带 <code>pack.yaml</code>。</span>
+      <button class="btn btn-ghost btn-sm" id="copyEntry">复制 JSON</button>
+      <a class="btn btn-primary btn-sm" id="submitIssue" href="#" target="_blank" rel="noopener">提成 Issue</a>
+    </div>
+  </div>
+</div>
+
+<script src="assets/js/site.js"></script>
+</body>
+</html>

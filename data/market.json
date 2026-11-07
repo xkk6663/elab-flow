@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "packs": [
+    {
+      "name": "artery/at32",
+      "vendor": "artery",
+      "platform": "at32",
+      "version": "0.1.0",
+      "description": "AT32F421 芯片适配包（外置 GitHub 芯片包：AT32 WorkBench 指纹 + 芯片参数 + 平台坑位）",
+      "status": "community",
+      "license": "MIT",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "artery/at32f421g8"
+      ],
+      "source": {
+        "type": "git",
+        "url": "https://github.com/xkk6663/elab-pack-artery-at32.git",
+        "ref": "20eaa90c1ae9b1cfbfa3d84c2b69b1de47978c2d"
+      },
+      "sha256": "0669317423269bc84472a9962a95879e031a3d237df14372c1f7f1d4afece625"
+    },
+    {
+      "name": "espressif/esp32",
+      "vendor": "espressif",
+      "platform": "esp32",
+      "version": "0.1.0",
+      "description": "ESP32 芯片适配包（ESP-IDF 工程指纹 + ESP32-S31 参数 + 平台坑位）",
+      "status": "community",
+      "license": "MIT",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "espressif/esp32s31"
+      ],
+      "source": {
+        "type": "git",
+        "url": "https://github.com/xkk6663/elab-pack-espressif-esp32.git",
+        "ref": "6b96b54d3bd4b98d71de8b0bc8ecd0bee5036a8a"
+      },
+      "sha256": "075b7e2b4dea04cbc2845b92949451e65fd675d588e4d7e1a9d41a39eab88b3a"
+    },
+    {
+      "name": "st/stm32",
+      "vendor": "st",
+      "platform": "stm32",
+      "version": "0.1.0",
+      "description": "STM32F1/F4 芯片适配包（STM32CubeMX 工程指纹 + 芯片参数 + 平台坑位）",
+      "status": "official",
+      "license": "Apache-2.0",
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "schema_version": 1
+      },
+      "chips": [
+        "st/stm32f103xb",
+        "st/stm32f411ceux"
+      ],
+      "source": {
+        "type": "local",
+        "path": "packs/official/st/stm32"
+      },
+      "sha256": "04600c13c3deb31f382260937834d32a33623fce465f47fc278f5a8ad4e95a03"
+    }
+  ],
+  "providers": [
+    {
+      "name": "espressif/idf",
+      "kind": "provider",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "description": "ESP-IDF（EIM 安装；工具链路径由 host 层提供）",
+      "provider_api": 1,
+      "requires": {
+        "kernel_api": ">=1 <2",
+        "host": [
+          {
+            "key": "tools.idf.python",
+            "check": "file"
+          },
+          {
+            "key": "tools.idf.idf_path",
+            "check": "dir"
+          },
+          {
+            "key": "tools.idf.tools_path",
+            "check": "dir"
+          },
+          {
+            "key": "tools.idf.venv",
+            "check": "dir"
+          }
+        ],
+        "probe": false,
+        "serial": true
+      },
+      "steps": [
+        "build",
+        "debug_verify",
+        "doctor",
+        "flash"
+      ],
+      "source": {
+        "type": "local",
+        "path": "providers/official/espressif/idf"
+      },
+      "sha256": "651fdbc85343046af9a9a6c6518d3a25c23d1125511fe2b5a7933cd16fe2bf31"
+    }
+  ],
+  "snapshot_at": "2026-11-07T11:22:48Z"
+}
