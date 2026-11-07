@@ -302,8 +302,8 @@
     mem: {
       note: "// 来源：各工程 build 阶段 .map 统计（RAM 静态 + 栈堆，含 CMSIS-RTOS 对象）",
       legend: [
-        ["RAM", "#4d6bfe"],
-        ["FLASH", "#8b7cff"],
+        ["RAM", "#34d399"],
+        ["FLASH", "#14b8a6"],
       ],
       unit: "%",
       max: 100,
@@ -315,7 +315,7 @@
     },
     fps: {
       note: "// 来源：tests/bench_serialcodec.py · CPython 3.13 · 单线程 · 每档 1.5s",
-      legend: [["解码吞吐 帧/秒", "#4d6bfe"]],
+      legend: [["解码吞吐 帧/秒", "#34d399"]],
       unit: "帧/s",
       max: 20000,
       groups: [
@@ -361,7 +361,7 @@
         const h = Math.max(2, (Math.min(v, cfg.max) / cfg.max) * ch);
         const x = cx - totalW / 2 + bi * (bw + gap);
         const y = top + ch - h;
-        const colors = key === "mem" ? ["#4d6bfe", "#8b7cff"] : ["url(#gbar)"];
+        const colors = key === "mem" ? ["#34d399", "#14b8a6"] : ["url(#gbar)"];
         const fill = colors[bi];
         out += '<rect class="bar" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
           '" height="' + h.toFixed(1) + '" rx="3" fill="' + fill + '" style="transition-delay:' + (gi * 90 + bi * 60) + 'ms"/>';
@@ -377,7 +377,7 @@
 
     svg.innerHTML =
       '<defs><linearGradient id="gbar" x1="0" y1="1" x2="0" y2="0">' +
-      '<stop offset="0" stop-color="#3f55d8"/><stop offset="1" stop-color="#8b7cff"/></linearGradient></defs>' +
+      '<stop offset="0" stop-color="#0f9d76"/><stop offset="1" stop-color="#14b8a6"/></linearGradient></defs>' +
       out;
     svg.classList.remove("in");
     void svg.getBoundingClientRect();
