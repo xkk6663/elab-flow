@@ -9,8 +9,8 @@
   --line: rgba(255, 255, 255, 0.07);
   --line-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f5f7;
-  --muted: #9ca1ad;
-  --faint: #6c7280;
+  --muted: #a7adba;
+  --faint: #7a8090;
   --brand: #34d399;
   --brand-2: #14b8a6;
   --brand-3: #a7f3d0;
@@ -885,8 +885,9 @@ h2.title {
 
 .f-index {
   font-family: var(--mono);
-  font-size: 12px;
-  color: #6b8a7d;
+  font-size: 12.4px;
+  font-weight: 500;
+  color: #7d9d8f;
   letter-spacing: 0.1em;
   display: flex;
   align-items: center;
@@ -912,8 +913,8 @@ h2.title {
 .feature .f-desc {
   margin: 14px 0 0;
   color: var(--muted);
-  font-size: 15px;
-  line-height: 1.75;
+  font-size: 15.4px;
+  line-height: 1.8;
 }
 
 .f-list {
@@ -927,9 +928,9 @@ h2.title {
 .f-list li {
   display: flex;
   gap: 10px;
-  font-size: 13.8px;
-  color: #c2c7d2;
-  line-height: 1.6;
+  font-size: 14.2px;
+  color: #ccd2dd;
+  line-height: 1.62;
 }
 
 .f-list svg {
@@ -1001,7 +1002,7 @@ h2.title {
 
 .shot-cap {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: 12.4px;
   color: var(--faint);
   padding-left: 2px;
   font-family: var(--mono);
@@ -1545,7 +1546,10 @@ footer {
   font-family: var(--mono);
 }
 
-.deps b { color: #9aa1b1; font-weight: 500; }
+.deps b { color: #b3b9c5; font-weight: 500; }
+
+.fa-name { color: #c6cbdb; }
+.fa-name:hover { color: #fff; }
 
 .foot-bottom {
   padding-top: 22px;
@@ -1566,9 +1570,9 @@ footer {
 
 .avatar {
   width: 26px; height: 26px; border-radius: 50%;
-  background: linear-gradient(145deg, #5eead4, #2dd4bf);
+  background: linear-gradient(145deg, #8bf3dd, #2dd4bf);
   display: grid; place-items: center;
-  font-size: 11px; font-weight: 600; color: #fff;
+  font-size: 11px; font-weight: 700; color: #043a2c;
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
@@ -2128,8 +2132,8 @@ html.light {
   --panel: #ffffff;
   --panel-2: #f7f8fa;
   --text: #14171d;
-  --muted: #4b5260;
-  --faint: #79818f;
+  --muted: #3b4250;
+  --faint: #5d6573;
   --line: rgba(15, 23, 42, 0.1);
   --line-strong: rgba(15, 23, 42, 0.18);
   color-scheme: light;
@@ -2174,8 +2178,11 @@ html.light .doc-item:hover { background: rgba(15, 23, 42, 0.04); }
 html.light .doc-item.active { background: rgba(52, 211, 153, 0.14); border-color: rgba(16, 185, 129, 0.34); }
 html.light .doc-item .dt { color: #2b323f; }
 html.light .doc-item.active .dt { color: #06392a; }
-html.light .doc-item .dn { color: #8b93a1; }
+html.light .doc-item .dn { color: #66707e; }
 html.light .doc-item.active .dn { color: #0e9a72; }
+html.light .deps b { color: #474e5c; }
+html.light .fa-name { color: #3b4250; }
+html.light .fa-name:hover { color: #0b7a5c; }
 html.light .toc-list a { color: #5c6472; }
 html.light .toc-list a.lv3 { color: #7c8492; }
 html.light .toc-list a:hover { color: #101318; background: rgba(15, 23, 42, 0.045); }
@@ -2291,14 +2298,26 @@ html.light .eyebrow { color: #0b7a5c; }
 html.light .eyebrow::before { background: linear-gradient(90deg, transparent, #10b981); }
 html.light .hero-kicker b { color: #0b7a5c; }
 html.light .f-index { color: #0b7a5c; }
-html.light .tr-note { color: #6b7280; }
-html.light .tr-k { color: #98a0ad; }
-html.light .pain .tag { color: #6b7280; }
+/* 深色专供的浅灰正文在白纸上几乎看不见，浅色下必须整段压深 */
+html.light .f-list li { color: #333a47; }
+html.light .f-list svg { color: #0b8a63; }
+html.light .shot-cap { color: #5a6270; }
+html.light .tr-note { color: #5a6270; }
+html.light .tr-k { color: #6f7787; }
+html.light .pain .tag { color: #5a6270; }
 html.light .pain.solve .tag { color: #0b7a5c; border-color: rgba(16, 185, 129, 0.35); }
 html.light .rail-title,
 html.light .rail-hint { color: #6b7280; }
 html.light .rail-btn { color: #4b5260; }
 html.light .rail-btn:hover { color: #101318; background: rgba(15, 23, 42, 0.05); }
+
+/* 深色专供的浅色文字落在白纸上：步骤序号 / 图表页签 / 默认链取值 */
+html.light .step-n { color: #0b7a5c; background: rgba(15, 23, 42, 0.055); }
+html.light .chart-tabs { background: rgba(15, 23, 42, 0.04); }
+html.light .chart-tab.active { color: #101318; background: #fff; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.14); }
+html.light .pd-item { background: rgba(15, 23, 42, 0.03); }
+html.light .pd-item .v { color: #14513f; }
+html.light .pd-warn b { color: #96560a; }
 
 /* 市场卡片 */
 html.light .pack-name { color: #101318; }
