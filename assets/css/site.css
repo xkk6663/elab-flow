@@ -18,7 +18,7 @@
   --warn: #f5a524;
   --radius: 16px;
   --sans: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    "PingFang SC", "Microsoft YaHei UI", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas,
     "Liberation Mono", monospace;
   --max: 1180px;
@@ -44,6 +44,21 @@ body {
   overflow-x: hidden;
 }
 
+/* 网格底纹：只在首屏上方渐显，往下淡出，给深色底一点工程感 */
+html::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.032) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.032) 1px, transparent 1px);
+  background-size: 68px 68px;
+  -webkit-mask-image: radial-gradient(1280px 880px at 50% -6%, #000 0%, rgba(0, 0, 0, 0.5) 44%, transparent 78%);
+  mask-image: radial-gradient(1280px 880px at 50% -6%, #000 0%, rgba(0, 0, 0, 0.5) 44%, transparent 78%);
+}
+
 body::before {
   content: "";
   position: fixed;
@@ -51,9 +66,11 @@ body::before {
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(900px 600px at 50% -220px, rgba(52, 211, 153, 0.28), transparent 70%),
-    radial-gradient(700px 500px at 108% 18%, rgba(20, 184, 166, 0.12), transparent 72%),
-    radial-gradient(620px 460px at -8% 42%, rgba(167, 243, 208, 0.07), transparent 70%);
+    radial-gradient(900px 600px at 50% -220px, rgba(52, 211, 153, 0.3), transparent 70%),
+    radial-gradient(700px 500px at 108% 18%, rgba(20, 184, 166, 0.14), transparent 72%),
+    radial-gradient(620px 460px at -8% 42%, rgba(167, 243, 208, 0.08), transparent 70%),
+    radial-gradient(820px 560px at 86% 76%, rgba(56, 189, 248, 0.075), transparent 72%),
+    radial-gradient(600px 440px at 14% 94%, rgba(45, 212, 191, 0.06), transparent 74%);
 }
 
 body::after {
@@ -151,7 +168,8 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: poi
 }
 
 .brand-ver {
-  font-size: 11px;
+  font-size: 11.6px;
+  font-weight: 500;
   color: var(--muted);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.04);
@@ -359,7 +377,8 @@ section { position: relative; }
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.045);
-  font-size: 12.5px;
+  font-size: 12.8px;
+  font-weight: 500;
   color: var(--muted);
   backdrop-filter: blur(8px);
 }
@@ -402,26 +421,27 @@ h1.hero-title {
 /* 标题下的一行身份说明 */
 .hero-kicker {
   margin: 22px auto 0;
-  font-size: clamp(11.5px, 1.05vw, 12.5px);
-  letter-spacing: 0.16em;
-  color: var(--faint);
+  font-size: clamp(12.4px, 1.1vw, 13.4px);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted);
   text-transform: uppercase;
 }
 
 .hero-kicker b {
   color: var(--brand);
-  font-weight: 600;
-  letter-spacing: 0.2em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
 }
 
 .hero-sub {
   margin: 18px auto 0;
   max-width: 722px;
-  font-size: clamp(13.2px, 1.16vw, 14.6px);
-  color: var(--faint);
-  line-height: 2.02;
-  letter-spacing: 0.008em;
-  text-wrap: balance;
+  font-size: clamp(13.8px, 1.2vw, 15.2px);
+  color: var(--muted);
+  line-height: 1.95;
+  letter-spacing: 0.012em;
+  text-wrap: pretty;
 }
 
 .hero-sub strong {
@@ -648,7 +668,8 @@ h1.hero-title {
 
 .trust-item {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 12.6px;
+  font-weight: 500;
   color: #a9afbd;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.025);
@@ -670,11 +691,11 @@ h1.hero-title {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
-  letter-spacing: 0.14em;
+  font-size: 12.8px;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   color: #6ee7b7;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .eyebrow::before {
@@ -739,12 +760,13 @@ h2.title {
   letter-spacing: -0.02em;
 }
 
-.pain p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.68; }
+.pain p { margin: 0; color: var(--muted); font-size: 14.4px; line-height: 1.7; }
 
 .pain .tag {
   font-family: var(--mono);
-  font-size: 11px;
-  color: #7d8494;
+  font-size: 11.8px;
+  font-weight: 500;
+  color: #95a0b0;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 1px 7px;
@@ -831,9 +853,10 @@ h2.title {
 
 .tr-k {
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: #5f6673;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #6b7383;
 }
 
 .tr-list b {
@@ -847,6 +870,10 @@ h2.title {
   font-size: 11.5px;
   color: var(--brand-3);
   white-space: nowrap;
+  align-self: flex-start; /* 不给 stretch，否则命令底块会拉满整格 */
+  padding: 1px 6px;
+  margin-left: -6px;
+  border-radius: 5px;
 }
 
 .tr-foot {
@@ -885,10 +912,10 @@ h2.title {
 
 .f-index {
   font-family: var(--mono);
-  font-size: 12.4px;
-  font-weight: 500;
+  font-size: 12.8px;
+  font-weight: 600;
   color: #7d9d8f;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1002,7 +1029,8 @@ h2.title {
 
 .shot-cap {
   margin-top: 12px;
-  font-size: 12.4px;
+  font-size: 12.8px;
+  font-weight: 500;
   color: var(--faint);
   padding-left: 2px;
   font-family: var(--mono);
@@ -1048,7 +1076,7 @@ h2.title {
 
 .card h4 svg { width: 15px; height: 15px; color: #6ee7b7; }
 
-.card p { margin: 0; color: var(--muted); font-size: 13.6px; line-height: 1.68; }
+.card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
 
 .card-shot {
   overflow: hidden;
@@ -1141,7 +1169,7 @@ h2.title {
 .code-line .ln {
   width: 34px;
   text-align: right;
-  color: #34384a;
+  color: #4d5366;
   flex: 0 0 auto;
   user-select: none;
   font-size: 11.5px;
@@ -1271,7 +1299,7 @@ h2.title {
 
 .stat .lab {
   margin-top: 7px;
-  font-size: 12.4px;
+  font-size: 13px;
   color: var(--muted);
   display: flex;
   align-items: center;
@@ -1314,14 +1342,14 @@ h2.title {
 
 .chart-tab.active { color: #e7e9f3; background: rgba(255, 255, 255, 0.08); }
 
-.chart-legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--faint); margin: 6px 0 2px; }
+.chart-legend { display: flex; gap: 14px; font-size: 12px; font-weight: 500; color: var(--faint); margin: 6px 0 2px; }
 .chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .chart-legend i { width: 7px; height: 7px; border-radius: 2px; }
 
 .chart-svg { width: 100%; height: auto; overflow: visible; margin-top: auto; }
 
-.chart-svg text { font-family: var(--mono); font-size: 9.5px; fill: #6b7280; }
-.chart-svg .val { fill: #c9cede; font-size: 10px; }
+.chart-svg text { font-family: var(--mono); font-size: 10.4px; fill: #8b93a4; }
+.chart-svg .val { fill: #c9cede; font-size: 10.6px; }
 .chart-svg .grid { stroke: rgba(255, 255, 255, 0.07); stroke-width: 1; }
 
 .bar {
@@ -1379,7 +1407,8 @@ h2.title {
   margin-top: 13px;
   display: block;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 12.2px;
+  font-weight: 500;
   color: #9ab8ac;
   background: rgba(0, 0, 0, 0.35);
   border: 1px solid var(--line);
@@ -1417,8 +1446,8 @@ h2.title {
   border: 1px solid var(--line-strong);
 }
 
-.step h4 { margin: 2px 0 4px; font-size: 14px; font-weight: 600; }
-.step p { margin: 0 0 8px; font-size: 12.8px; color: var(--muted); }
+.step h4 { margin: 2px 0 4px; font-size: 14.2px; font-weight: 600; }
+.step p { margin: 0 0 8px; font-size: 13.2px; color: var(--muted); }
 
 .cmd-line {
   display: inline-flex;
@@ -1618,13 +1647,13 @@ footer {
 }
 
 .docs-shell.collapsed { grid-template-columns: 0 0 minmax(0, 1fr) 7px var(--toc-w); }
-.docs-shell.collapsed .docs-rail { opacity: 0; transform: translateX(-10px); pointer-events: none; overflow: hidden; }
+.docs-shell.collapsed .docs-rail { opacity: 0; transform: translateX(-10px); pointer-events: none; overflow: hidden; padding: 0; border-width: 0; }
 /* 收起时只隐藏，不 display:none —— 否则 .docs-main 会掉到第 2 列（0px） */
 .docs-shell.collapsed .rail-resizer { visibility: hidden; }
 
 /* 右侧索引：可拖宽 / 可收起 */
 .docs-shell.toc-collapsed { grid-template-columns: var(--rail-w) 7px minmax(0, 1fr) 0 0; }
-.docs-shell.toc-collapsed .docs-toc { opacity: 0; transform: translateX(10px); pointer-events: none; overflow: hidden; }
+.docs-shell.toc-collapsed .docs-toc { opacity: 0; transform: translateX(10px); pointer-events: none; overflow: hidden; padding: 0; border-width: 0; }
 .docs-shell.toc-collapsed .toc-resizer { visibility: hidden; }
 
 .docs-shell.collapsed.toc-collapsed { grid-template-columns: 0 0 minmax(0, 1fr) 0 0; }
@@ -1655,18 +1684,19 @@ footer {
 }
 
 .rail-title {
-  font-size: 11px;
-  letter-spacing: 0.16em;
+  font-size: 11.8px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--faint);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .rail-hint {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--faint);
-  opacity: 0.8;
+  opacity: 0.92;
 }
 
 .rail-btn {
@@ -1843,8 +1873,9 @@ html.light .toc-resizer i { background: rgba(15, 23, 42, 0.12); }
 
 .doc-item .dn {
   font-family: var(--mono);
-  font-size: 11px;
-  color: #7d8598;
+  font-size: 11.6px;
+  font-weight: 500;
+  color: #8d95a8;
   padding-top: 2px;
 }
 
@@ -1852,7 +1883,7 @@ html.light .toc-resizer i { background: rgba(15, 23, 42, 0.12); }
 
 .doc-item .dt { display: block; font-size: 13px; color: #d3d8e3; line-height: 1.45; }
 .doc-item.active .dt { color: #fff; }
-.doc-item .dm { display: block; font-size: 11px; color: var(--faint); margin-top: 3px; font-family: var(--mono); }
+.doc-item .dm { display: block; font-size: 11.8px; font-weight: 500; color: var(--faint); margin-top: 3px; font-family: var(--mono); }
 
 .docs-main {
   min-width: 0;
@@ -1914,7 +1945,7 @@ html.light .toc-resizer i { background: rgba(15, 23, 42, 0.12); }
 
 .doc-card h4 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.02em; }
 .doc-card p { margin: 0; font-size: 12.6px; color: var(--muted); line-height: 1.6; }
-.doc-card .dc-meta { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: auto; padding-top: 4px; }
+.doc-card .dc-meta { font-size: 11.8px; font-weight: 500; color: var(--faint); font-family: var(--mono); margin-top: auto; padding-top: 4px; }
 
 /* 文档正文 */
 .doc-view { display: none; }
@@ -1968,7 +1999,8 @@ html.light .tool-btn .ic-sun { display: none; }
 html.light .tool-btn .ic-moon { display: block; }
 
 .doc-toolbar .gh {
-  font-size: 12px;
+  font-size: 12.4px;
+  font-weight: 600;
   color: #5eead4;
   display: inline-flex;
   align-items: center;
@@ -1976,6 +2008,8 @@ html.light .tool-btn .ic-moon { display: block; }
 }
 .doc-toolbar .gh:hover { color: #d1fae5; }
 .doc-toolbar .gh svg { width: 13px; height: 13px; }
+html.light .doc-toolbar .gh { color: #0b6b52; }
+html.light .doc-toolbar .gh:hover { color: #064e3b; }
 
 .md {
   font-size: 14.6px;
@@ -2120,86 +2154,91 @@ html.light .tool-btn .ic-moon { display: block; }
 
 .doc-pager a:hover { border-color: rgba(52, 211, 153, 0.34); background: rgba(52, 211, 153, 0.07); transform: translateY(-1px); }
 .doc-pager a.next { text-align: right; grid-column: 2; }
-.doc-pager .pg-k { display: block; font-size: 10.5px; letter-spacing: 0.1em; color: var(--faint); text-transform: uppercase; }
+.doc-pager .pg-k { display: block; font-size: 11.4px; font-weight: 600; letter-spacing: 0.08em; color: var(--faint); text-transform: uppercase; }
 .doc-pager .pg-t { display: block; font-size: 13px; color: var(--text); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ================================================ 全局浅色主题
    作用域：html.light —— 由导航右上角开关切换，首页 / 文档 / 市场一起生效。
    变量层换色，组件层再补硬编码的 rgba(255,255,255,*) 表面。 */
 html.light {
-  --bg: #fbfbfc;
-  --bg-2: #f4f5f8;
+  --bg: #eef2f8;
+  --bg-2: #e8eef7;
   --panel: #ffffff;
   --panel-2: #f7f8fa;
-  --text: #14171d;
-  --muted: #3b4250;
-  --faint: #5d6573;
+  --text: #0f1319;
+  --muted: #2b3242;
+  --faint: #48515f;
   --line: rgba(15, 23, 42, 0.1);
   --line-strong: rgba(15, 23, 42, 0.18);
+  --glass: rgba(255, 255, 255, 0.58);
+  --glass-2: rgba(255, 255, 255, 0.42);
+  --glass-line: rgba(255, 255, 255, 0.75);
+  --glass-shadow: 0 18px 44px -30px rgba(15, 23, 42, 0.34);
   color-scheme: light;
 }
 
-html.light body { background: var(--bg); }
+/* 浅色是「浅底深字」，再叠 antialiased 会让中文字干变细、发虚；
+   关掉它，字重回到系统默认，观感更实。深色仍然是 antialiased。 */
+html.light body {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+/* 浅色背景：一层柔和的彩色雾（薄荷 / 天青 / 淡紫 / 暖黄），让上面的玻璃有颜色可透。
+   多层大半径低透明度叠加，避免单个渐变出现明显的圆形边界。 */
+html.light body {
+  background:
+    radial-gradient(980px 660px at 4% -12%, rgba(52, 211, 153, 0.3), transparent 74%),
+    radial-gradient(880px 600px at 98% -6%, rgba(96, 165, 250, 0.26), transparent 74%),
+    radial-gradient(820px 640px at 78% 48%, rgba(167, 139, 250, 0.17), transparent 76%),
+    radial-gradient(760px 600px at 2% 68%, rgba(45, 212, 191, 0.19), transparent 76%),
+    radial-gradient(940px 680px at 42% 110%, rgba(251, 191, 36, 0.11), transparent 78%),
+    linear-gradient(180deg, #f9fcfe 0%, #eff4fb 46%, #eaf1f9 100%);
+  background-attachment: fixed;
+}
 html.light body::before {
   background:
-    radial-gradient(880px 560px at 50% -280px, rgba(52, 211, 153, 0.16), transparent 70%),
-    radial-gradient(660px 460px at 104% 10%, rgba(20, 184, 166, 0.07), transparent 72%);
+    radial-gradient(880px 560px at 50% -300px, rgba(255, 255, 255, 0.5), transparent 72%),
+    radial-gradient(520px 360px at 24% 30%, rgba(255, 255, 255, 0.28), transparent 70%);
 }
-html.light body::after { opacity: 0.05; }
+html.light body::after { opacity: 0.045; }
+html.light::before {
+  background-image:
+    linear-gradient(to right, rgba(15, 23, 42, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.045) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(1200px 820px at 50% -4%, #000 0%, rgba(0, 0, 0, 0.4) 46%, transparent 76%);
+  mask-image: radial-gradient(1200px 820px at 50% -4%, #000 0%, rgba(0, 0, 0, 0.4) 46%, transparent 76%);
+}
 html.light ::selection { background: rgba(52, 211, 153, 0.3); color: #04231a; }
 
 html.light ::-webkit-scrollbar-track { background: #eceef2; }
 html.light ::-webkit-scrollbar-thumb { background: #c9cfd9; border-color: #eceef2; }
 html.light ::-webkit-scrollbar-thumb:hover { background: #b3bbc8; }
 
-/* 导航跟着亮 */
-html.light .nav.scrolled {
-  background: rgba(251, 251, 252, 0.84);
-  border-bottom-color: var(--line);
-}
-html.light .tabs { background: rgba(15, 23, 42, 0.035); }
-html.light .tab.active {
-  background: #fff;
-  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06) inset, 0 4px 12px -8px rgba(15, 23, 42, 0.5);
-}
-html.light .star-btn { background: #fff; border-color: var(--line-strong); }
-html.light .btn-ghost { background: #fff; border-color: var(--line-strong); }
-html.light .btn-ghost:hover { background: #f3f4f7; }
+/* 导航跟着亮（玻璃质感见下方「玻璃层」段） */
 html.light .repo-btn:hover { border-color: rgba(16, 185, 129, 0.45); color: #0b6b52; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1); }
-html.light .rail-open {
-  background: rgba(255, 255, 255, 0.9);
-  border-color: var(--line-strong);
-  box-shadow: 0 6px 18px -12px rgba(15, 23, 42, 0.5);
-}
 
 /* 侧栏 */
-html.light .search { background: #fff; }
-html.light .doc-item:hover { background: rgba(15, 23, 42, 0.04); }
-html.light .doc-item.active { background: rgba(52, 211, 153, 0.14); border-color: rgba(16, 185, 129, 0.34); }
 html.light .doc-item .dt { color: #2b323f; }
 html.light .doc-item.active .dt { color: #06392a; }
-html.light .doc-item .dn { color: #66707e; }
-html.light .doc-item.active .dn { color: #0e9a72; }
+html.light .doc-item .dn { color: #55606f; }
+html.light .doc-item.active .dn { color: #0b7a5c; }
 html.light .deps b { color: #474e5c; }
 html.light .fa-name { color: #3b4250; }
 html.light .fa-name:hover { color: #0b7a5c; }
-html.light .toc-list a { color: #5c6472; }
-html.light .toc-list a.lv3 { color: #7c8492; }
-html.light .toc-list a:hover { color: #101318; background: rgba(15, 23, 42, 0.045); }
-html.light .toc-list a.on { color: #0b7a5c; background: rgba(52, 211, 153, 0.16); border-left-color: #10b981; }
+html.light .toc-list a { color: #4a5361; }
+html.light .toc-list a.lv3 { color: #566072; }
+html.light .toc-list a:hover { color: #101318; background: rgba(255, 255, 255, 0.7); }
+html.light .toc-list a.on { color: #0b7a5c; background: rgba(52, 211, 153, 0.18); border-left-color: #10b981; }
 
-/* 阅读区 */
-html.light .docs-main {
-  background: #fff;
-  border-color: rgba(15, 23, 42, 0.09);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 24px 60px -50px rgba(15, 23, 42, 0.5);
-}
+/* 阅读区（背景见下方「玻璃层」段） */
 html.light .back-btn:hover,
-html.light .tool-btn:hover { color: #101318; background: rgba(15, 23, 42, 0.05); }
-html.light .doc-card { background: #fff; border-color: rgba(15, 23, 42, 0.09); }
-html.light .doc-card:hover { background: #fbfcfd; border-color: rgba(15, 23, 42, 0.18); }
+html.light .tool-btn:hover { color: #101318; background: rgba(255, 255, 255, 0.8); }
+html.light .doc-card { background: rgba(255, 255, 255, 0.62); border-color: rgba(255, 255, 255, 0.75); }
+html.light .doc-card:hover { background: rgba(255, 255, 255, 0.9); border-color: rgba(255, 255, 255, 0.95); }
 html.light .doc-card p { color: #4b5260; }
-html.light .doc-pager a:hover { background: rgba(52, 211, 153, 0.09); }
+html.light .doc-pager a:hover { background: rgba(52, 211, 153, 0.1); }
 
 /* 正文排版：深色 → 纸面 */
 html.light .md { color: #333b49; }
@@ -2246,33 +2285,153 @@ html.light .float-chip {
   box-shadow: 0 18px 40px -28px rgba(15, 23, 42, 0.55);
 }
 html.light .mini-bar { background: rgba(15, 23, 42, 0.12); }
-html.light .trust-item { color: #4b5260; background: #fff; }
+html.light .trust-item { color: #3f4857; background: #fff; }
 html.light .trust-item:hover { color: #101318; background: #f3f4f7; }
 
+/* ------------------------------------------------ 玻璃层
+   浅色主题的核心观感：卡片是一块块磨砂玻璃，透出背后的薄荷 / 天青 / 淡紫雾。
+   三层结构 = 半透明白底 + backdrop blur + 1px 内高光（模拟玻璃边缘的反光）。 */
 html.light .pain,
 html.light .tool-rail,
-html.light .tr-list li,
 html.light .entry,
 html.light .pack,
+html.light .stat,
+html.light .chart-card,
+html.light .card,
 html.light .upload-card,
-html.light .doc-card { background: #fff; }
+html.light .doc-card,
+html.light .docs-main,
+html.light .prov-default,
+html.light .cta-inner {
+  background: linear-gradient(152deg, rgba(255, 255, 255, 0.76), rgba(255, 255, 255, 0.46));
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  backdrop-filter: blur(24px) saturate(190%);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3),
+    0 0 0 1px rgba(15, 23, 42, 0.03),
+    0 18px 44px -28px rgba(15, 23, 42, 0.28);
+}
 
-html.light .pain.solve { background: linear-gradient(180deg, rgba(52, 211, 153, 0.15), rgba(52, 211, 153, 0.04)); }
-html.light .pain::after { background: radial-gradient(300px 120px at 10% 0%, rgba(15, 23, 42, 0.035), transparent 70%); }
-html.light .tr-list li:hover { background: rgba(52, 211, 153, 0.08); }
+html.light .pain.solve {
+  background: linear-gradient(152deg, rgba(236, 253, 245, 0.86), rgba(209, 250, 229, 0.46));
+  border-color: rgba(16, 185, 129, 0.34);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 18px 44px -30px rgba(6, 95, 70, 0.36);
+}
+html.light .pain::after { background: radial-gradient(300px 120px at 10% 0%, rgba(255, 255, 255, 0.55), transparent 70%); }
+
+/* 内嵌的小格子不再叠一层 blur（会糊成一团），只用半透明白 */
+html.light .tr-list li,
+html.light .trust-item,
+html.light .pill,
+html.light .pd-item {
+  background: rgba(255, 255, 255, 0.74);
+  border-color: rgba(255, 255, 255, 0.8);
+}
+html.light .tr-list li:hover { background: rgba(255, 255, 255, 0.92); }
+html.light .pd-item { background: rgba(255, 255, 255, 0.7); }
 html.light .entry:hover,
-html.light .pack:hover { border-color: rgba(15, 23, 42, 0.2); box-shadow: 0 24px 50px -44px rgba(15, 23, 42, 0.6); }
+html.light .pack:hover {
+  border-color: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    0 26px 54px -34px rgba(15, 23, 42, 0.42);
+  transform: translateY(-2px);
+}
+
+/* 导航 / 工具条 / 按钮：同一套玻璃语言 */
+html.light .nav.scrolled {
+  background: rgba(255, 255, 255, 0.55);
+  -webkit-backdrop-filter: blur(26px) saturate(200%);
+  backdrop-filter: blur(26px) saturate(200%);
+  border-bottom-color: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.05), 0 10px 30px -28px rgba(15, 23, 42, 0.5);
+}
+html.light .tabs {
+  background: rgba(255, 255, 255, 0.5);
+  border-color: rgba(255, 255, 255, 0.7);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+html.light .tab.active {
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 4px 14px -8px rgba(15, 23, 42, 0.5);
+}
+html.light .star-btn,
+html.light .btn-ghost,
+html.light .search,
+html.light .rail-open,
+html.light .theme-btn {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(255, 255, 255, 0.8);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 22px -18px rgba(15, 23, 42, 0.4);
+}
+html.light .btn-ghost:hover,
+html.light .star-btn:hover { background: rgba(255, 255, 255, 0.9); }
+
+/* 文档三栏：侧栏与索引各自一块玻璃板 */
+html.light .docs-rail,
+html.light .docs-toc {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.66), rgba(255, 255, 255, 0.34));
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 14px;
+  padding: 12px 12px 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 16px 40px -32px rgba(15, 23, 42, 0.34);
+}
+html.light .doc-item:hover { background: rgba(255, 255, 255, 0.66); }
+html.light .doc-item.active {
+  background: rgba(52, 211, 153, 0.2);
+  border-color: rgba(16, 185, 129, 0.36);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
 
 html.light .shot,
-html.light .mock { border-color: rgba(15, 23, 42, 0.12); box-shadow: 0 26px 60px -38px rgba(15, 23, 42, 0.5); }
+html.light .mock {
+  border-color: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 0 0 1px rgba(15, 23, 42, 0.07),
+    0 30px 66px -40px rgba(15, 23, 42, 0.55);
+}
+
+/* 这些面板在浅色主题里**依然是深色**（驾驶舱窗口 / 终端 / 代码块 / 截图），
+   里面却大量引用 --text / --muted / --faint。浅色下这些变量会变成深墨色，
+   于是深底上压深字 —— 页签、窗口地址栏、行号、注释全都糊掉。
+   正解：在这几个容器上把变量重新指回深色主题的一套，子孙全部自动跟随。 */
+html.light .mock,
+html.light .shot,
+html.light .term,
+html.light .code-block {
+  --text: #f4f5f7;
+  --muted: #b6bcc9;
+  --faint: #98a0b0;
+  --line: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
 
 html.light .cta-inner {
-  background: radial-gradient(600px 200px at 50% 0%, rgba(52, 211, 153, 0.18), transparent 70%),
-    linear-gradient(180deg, #ffffff, #f7f9f8);
+  background: radial-gradient(620px 220px at 50% 0%, rgba(52, 211, 153, 0.22), transparent 70%),
+    linear-gradient(152deg, rgba(255, 255, 255, 0.78), rgba(236, 253, 245, 0.48));
+  border-color: rgba(16, 185, 129, 0.3);
 }
 html.light .foot-col a { color: #4b5260; }
 html.light .foot-col a:hover { color: #101318; }
-html.light footer { background: linear-gradient(180deg, rgba(15, 23, 42, 0.02), transparent); }
+html.light footer {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08));
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  border-top-color: rgba(255, 255, 255, 0.7);
+}
 
 /* 行内代码：深色的薄荷色在白纸上太淡，统一压成深绿 */
 html.light .hero-sub code,
@@ -2301,55 +2460,106 @@ html.light .f-index { color: #0b7a5c; }
 /* 深色专供的浅灰正文在白纸上几乎看不见，浅色下必须整段压深 */
 html.light .f-list li { color: #333a47; }
 html.light .f-list svg { color: #0b8a63; }
-html.light .shot-cap { color: #5a6270; }
-html.light .tr-note { color: #5a6270; }
-html.light .tr-k { color: #6f7787; }
-html.light .pain .tag { color: #5a6270; }
+html.light .shot-cap { color: #3f4857; }
+html.light .tr-note { color: #3f4857; }
+html.light .tr-k { color: #4f5a6b; }
+html.light .pain .tag { color: #46505f; }
 html.light .pain.solve .tag { color: #0b7a5c; border-color: rgba(16, 185, 129, 0.35); }
 html.light .rail-title,
-html.light .rail-hint { color: #6b7280; }
+html.light .rail-hint { color: #414b5a; }
 html.light .rail-btn { color: #4b5260; }
 html.light .rail-btn:hover { color: #101318; background: rgba(15, 23, 42, 0.05); }
 
 /* 深色专供的浅色文字落在白纸上：步骤序号 / 图表页签 / 默认链取值 */
 html.light .step-n { color: #0b7a5c; background: rgba(15, 23, 42, 0.055); }
+/* 图表里的坐标刻度 / 柱顶数值：深色是浅灰，浅底上等于消失 */
+html.light .chart-svg text { fill: #4b5464; }
+html.light .chart-svg .val { fill: #2b3442; }
+html.light .chart-svg .grid { stroke: rgba(15, 23, 42, 0.1); }
+/* 入口卡图标：薄荷白在浅底上太淡 */
+html.light .entry-ico { color: #0b7a5c; background: rgba(16, 185, 129, 0.14); border-color: rgba(16, 185, 129, 0.3); }
 html.light .chart-tabs { background: rgba(15, 23, 42, 0.04); }
 html.light .chart-tab.active { color: #101318; background: #fff; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.14); }
 html.light .pd-item { background: rgba(15, 23, 42, 0.03); }
 html.light .pd-item .v { color: #14513f; }
 html.light .pd-warn b { color: #96560a; }
 
+/* 命令条：深色主题是「黑底浅字」，浅色主题里 rgba(0,0,0,.4) 落在浅卡片上变成灰底浅字，
+   字几乎浮不起来。浅色改成「淡墨底 + 深字」，保留等宽字体的终端观感。 */
+html.light .cmd-line {
+  color: #123c31;
+  background: rgba(15, 23, 42, 0.055);
+  border-color: rgba(15, 23, 42, 0.13);
+}
+html.light .cmd-line b { color: #5a6474; }
+html.light .entry .cmd {
+  color: #0d4b3a;
+  background: rgba(15, 23, 42, 0.055);
+  border-color: rgba(15, 23, 42, 0.13);
+}
+
 /* 市场卡片 */
 html.light .pack-name { color: #101318; }
 html.light .pack-foot a { color: #0b7a5c; }
 html.light .pack-foot a:hover { color: #075c45; }
-html.light .pack-sub { color: #6b7280; }
+html.light .pack-sub { color: #3f4857; }
 html.light .pack-cmd {
-  background: #f4f6f9;
-  border-color: rgba(15, 23, 42, 0.1);
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(255, 255, 255, 0.85);
   color: #1f6b55;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
-html.light .chip-tag { color: #4b5260; background: #f6f7f9; border-color: rgba(15, 23, 42, 0.1); }
-html.light .pack-ico { background: #f6f7f9; border-color: rgba(15, 23, 42, 0.1); color: #0b7a5c; }
+html.light .chip-tag { color: #4b5260; background: rgba(255, 255, 255, 0.6); border-color: rgba(255, 255, 255, 0.85); }
+html.light .pack-ico { background: rgba(255, 255, 255, 0.62); border-color: rgba(255, 255, 255, 0.85); color: #0b7a5c; }
 html.light .badge.official { color: #0b7a5c; background: rgba(52, 211, 153, 0.14); border-color: rgba(16, 185, 129, 0.35); }
 html.light .badge.community { color: #0e7490; background: rgba(20, 184, 166, 0.12); border-color: rgba(14, 116, 144, 0.3); }
 html.light .badge.provider { color: #9a5b00; background: rgba(245, 165, 36, 0.14); border-color: rgba(245, 165, 36, 0.35); }
 html.light .pd-warn { background: rgba(245, 165, 36, 0.1); }
 
 /* 上传 / 弹窗 / 提示 */
-html.light .modal { background: rgba(15, 23, 42, 0.32); }
-html.light .modal-box { background: #fff; box-shadow: 0 40px 100px -50px rgba(15, 23, 42, 0.55); }
-html.light .modal-foot { background: #fff; }
-html.light .modal-out { background: #f6f7f9; }
+html.light .modal {
+  background: rgba(15, 23, 42, 0.26);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+html.light .modal-box {
+  background: linear-gradient(158deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.68));
+  -webkit-backdrop-filter: blur(30px) saturate(190%);
+  backdrop-filter: blur(30px) saturate(190%);
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 50px 110px -50px rgba(15, 23, 42, 0.6);
+}
+html.light .modal-foot {
+  background: rgba(255, 255, 255, 0.5);
+  border-top-color: rgba(255, 255, 255, 0.7);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+html.light .modal-out { background: rgba(15, 23, 42, 0.04); border-color: rgba(255, 255, 255, 0.7); }
 html.light .modal-out pre { color: #2b3442; }
-html.light .modal-close:hover { color: #101318; background: rgba(15, 23, 42, 0.06); }
+html.light .modal-close:hover { color: #101318; background: rgba(255, 255, 255, 0.8); }
 html.light .field input,
 html.light .field textarea,
-html.light .field select { background: #fff; }
+html.light .field select {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+html.light .field input:focus,
+html.light .field textarea:focus,
+html.light .field select:focus {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+}
 html.light .toast {
-  background: rgba(255, 255, 255, 0.97);
+  background: rgba(255, 255, 255, 0.82);
   color: #101318;
-  box-shadow: 0 20px 40px -26px rgba(15, 23, 42, 0.5);
+  border-color: rgba(255, 255, 255, 0.9);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 20px 46px -26px rgba(15, 23, 42, 0.5);
 }
 
 /* ================================================ 文档浅色阅读模式 END */
@@ -2415,7 +2625,7 @@ html.light .toast {
 }
 
 .pack-name { font-family: var(--mono); font-size: 14px; color: #fff; }
-.pack-sub { font-size: 11.5px; color: var(--faint); margin-top: 3px; font-family: var(--mono); }
+.pack-sub { font-size: 12.2px; font-weight: 500; color: var(--faint); margin-top: 3px; font-family: var(--mono); }
 
 .badge {
   font-size: 10.5px;
@@ -2550,11 +2760,11 @@ html.light .toast {
   color: #fff;
 }
 
-.pd-title h4 em { font-style: normal; font-size: 12px; color: var(--faint); }
-.pd-title > span { display: block; font-size: 12px; color: var(--faint); margin-top: 3px; }
+.pd-title h4 em { font-style: normal; font-size: 12.4px; color: var(--faint); }
+.pd-title > span { display: block; font-size: 12.4px; color: var(--faint); margin-top: 3px; }
 .pd-top .badge { margin-left: auto; }
 
-.pd-lead { margin: 0; font-size: 13.2px; color: var(--muted); line-height: 1.75; }
+.pd-lead { margin: 0; font-size: 13.6px; color: var(--muted); line-height: 1.75; }
 .pd-lead b { color: var(--text); font-weight: 600; }
 
 .pd-lead code,
@@ -2598,10 +2808,10 @@ html.light .toast {
   word-break: break-word;
 }
 
-.pd-item .d { font-size: 11.2px; line-height: 1.55; color: var(--faint); }
+.pd-item .d { font-size: 11.8px; line-height: 1.55; color: var(--faint); }
 
 .pd-steps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.pd-steps .pd-lab { font-size: 11px; letter-spacing: 0.08em; color: var(--faint); margin-right: 2px; }
+.pd-steps .pd-lab { font-size: 11.8px; font-weight: 600; letter-spacing: 0.06em; color: var(--faint); margin-right: 2px; }
 
 .chip-tag.ok {
   color: #9ff0cd;
@@ -2624,9 +2834,10 @@ html.light .toast {
   display: inline-block;
   min-width: 52px;
   margin-right: 8px;
-  color: #7d8b84;
-  font-size: 10.5px;
-  letter-spacing: 0.1em;
+  color: #8d9a92;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
 .pd-warn {
@@ -2728,7 +2939,7 @@ html.light .toast {
 }
 .field input:focus, .field textarea:focus { border-color: rgba(52, 211, 153, 0.6); background: rgba(52, 211, 153, 0.06); }
 .field textarea { resize: vertical; min-height: 64px; }
-.field .hint { display: block; font-size: 11px; color: var(--faint); margin-top: 1px; font-family: var(--sans); }
+.field .hint { display: block; font-size: 11.8px; font-weight: 500; color: var(--faint); margin-top: 1px; font-family: var(--sans); }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
@@ -2760,7 +2971,7 @@ html.light .toast {
   background: #0c0d11;
   flex-wrap: wrap;
 }
-.modal-foot .tip { font-size: 11.5px; color: var(--faint); margin-right: auto; }
+.modal-foot .tip { font-size: 12px; font-weight: 500; color: var(--faint); margin-right: auto; }
 
 /* Toast */
 .toast {
@@ -2842,7 +3053,14 @@ html.light .toast {
   .tabs { order: 3; width: 100%; margin: 0 0 8px; justify-content: space-between; }
   .tab { flex: 1; text-align: center; padding: 5px 4px; font-size: 12px; }
   .star-btn .label { display: none; }
-  .nav { background: rgba(8, 9, 11, 0.78); backdrop-filter: blur(18px) saturate(160%); }
+  :root:not(.light) .nav { background: rgba(8, 9, 11, 0.78); backdrop-filter: blur(18px) saturate(160%); }
+  html.light .nav {
+    background: rgba(255, 255, 255, 0.66);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-bottom-color: rgba(255, 255, 255, 0.7);
+    box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.05);
+  }
   .hero { padding-top: 156px; }
   .page-head { padding-top: 148px; }
   .mock-badge { display: none; }
@@ -2886,3 +3104,127 @@ html.light .toast {
   }
   .tr-head { margin-bottom: 12px; }
 }
+
+/* ================================================ 深色质感增强
+   深色不走「白玻璃」，只补表面张力：顶部 1px 高光 + 一道很淡的落影，
+   让卡片从纯黑背景里浮起来一点点。 :root:not(.light) 保证不会碰到浅色主题。 */
+:root:not(.light) .pain,
+:root:not(.light) .tool-rail,
+:root:not(.light) .entry,
+:root:not(.light) .pack,
+:root:not(.light) .stat,
+:root:not(.light) .chart-card,
+:root:not(.light) .card,
+:root:not(.light) .upload-card,
+:root:not(.light) .doc-card,
+:root:not(.light) .docs-main,
+:root:not(.light) .prov-default,
+:root:not(.light) .cta-inner {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.055),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.012),
+    0 26px 50px -40px rgba(0, 0, 0, 0.9);
+}
+
+:root:not(.light) .entry:hover,
+:root:not(.light) .pack:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 30px 56px -40px rgba(0, 0, 0, 0.95);
+}
+
+/* 导航毛玻璃在深色下压得更实，滚动时文字不会和背景光斑打架 */
+:root:not(.light) .nav.scrolled {
+  background: rgba(8, 9, 11, 0.66);
+  -webkit-backdrop-filter: blur(22px) saturate(190%);
+  backdrop-filter: blur(22px) saturate(190%);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.045);
+}
+
+/* 页脚小字在浅色玻璃上偏淡，单独压一档 */
+html.light .deps,
+html.light .foot-bottom { color: #4a5261; }
+html.light .deps { border-color: rgba(15, 23, 42, 0.08); }
+
+/* ================================================ 滚动彩雾
+   body::before 是 fixed 的（只服务首屏）。滚到中后段就只剩纯黑/纯白，
+   这里在 main 上再铺一层随内容滚动的彩雾，让每一屏都有氛围色可透。 */
+main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* 用「固定尺寸 + 平铺」而不是百分比：main 高度一万多 px，
+     按百分比定位会让光斑全挤在页首，滚到中段就一片纯黑。
+     三层不同步长的 radial 叠着平铺，重复感很弱。 */
+  background-image:
+    radial-gradient(660px 480px at 28% 26%, rgba(45, 212, 191, 0.17), transparent 70%),
+    radial-gradient(600px 440px at 74% 58%, rgba(56, 189, 248, 0.14), transparent 72%),
+    radial-gradient(720px 520px at 46% 84%, rgba(129, 140, 248, 0.12), transparent 72%);
+  background-size: 1420px 1180px, 1660px 1360px, 1920px 1540px;
+  background-repeat: repeat;
+  background-position: 0 0, 240px 180px, 90px 520px;
+}
+
+html.light main::before {
+  background-image:
+    radial-gradient(680px 500px at 26% 24%, rgba(52, 211, 153, 0.2), transparent 70%),
+    radial-gradient(620px 460px at 76% 56%, rgba(96, 165, 250, 0.18), transparent 72%),
+    radial-gradient(740px 540px at 44% 84%, rgba(167, 139, 250, 0.15), transparent 72%);
+}
+
+/* 深色卡片底再提亮一档：3.5% 白在纯黑上几乎看不见 */
+:where(:root:not(.light)) .pain,
+:where(:root:not(.light)) .entry,
+:where(:root:not(.light)) .pack,
+:where(:root:not(.light)) .stat,
+:where(:root:not(.light)) .chart-card,
+:where(:root:not(.light)) .card,
+:where(:root:not(.light)) .tool-rail,
+:where(:root:not(.light)) .docs-main,
+:where(:root:not(.light)) .upload-card,
+:where(:root:not(.light)) .doc-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.072), rgba(255, 255, 255, 0.022));
+}
+
+/* 浅色下渐变标题的左端（#f0fdf4）在白底上等于消失，整体压深一档 */
+html.light .grad {
+  background: linear-gradient(97deg, #5eead4 0%, #34d399 32%, #10b981 68%, #0b7a5c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  filter: drop-shadow(0 18px 46px rgba(16, 185, 129, 0.24));
+}
+
+/* 浅色：默认工具链卡的标题写死了 #fff（深色专用），且卡片被统一的玻璃底洗掉了绿色调 */
+html.light .prov-default {
+  background:
+    radial-gradient(680px 240px at 4% -30%, rgba(16, 185, 129, 0.16), transparent 72%),
+    linear-gradient(152deg, rgba(255, 255, 255, 0.72), rgba(240, 253, 250, 0.42));
+  border-color: rgba(16, 185, 129, 0.3);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  backdrop-filter: blur(24px) saturate(190%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.98),
+    0 0 0 1px rgba(16, 185, 129, 0.06),
+    0 18px 44px -30px rgba(6, 95, 70, 0.34);
+}
+html.light .pd-title h4 { color: #0f211c; }
+html.light .pd-title h4 em { color: #0b7a5c; }
+html.light .pd-ico { background: rgba(16, 185, 129, 0.14); border-color: rgba(16, 185, 129, 0.32); color: #0b7a5c; }
+html.light .pd-lead b { color: #101318; }
+html.light .pd-foot .pd-k { color: #4c564f; }
+html.light .pd-title > span, html.light .pd-title h4 em { color: #4c564f; }
+
+/* 深色文档页：左右两栏也补一块淡玻璃板，和正文卡对齐（浅色已在玻璃层里写过） */
+:where(:root:not(.light)) .docs-rail,
+:where(:root:not(.light)) .docs-toc {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.014));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 12px 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+}
+:where(:root:not(.light)) .doc-item:hover { background: rgba(255, 255, 255, 0.05); }
+:where(:root:not(.light)) .search { background: rgba(255, 255, 255, 0.04); }
