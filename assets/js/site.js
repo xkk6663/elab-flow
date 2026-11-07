@@ -81,8 +81,9 @@
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.route === route));
     document.body.dataset.route = route;
     currentRoute = route;
-    if (typeof applyDocTheme === "function") applyDocTheme();
+    if (typeof applyTheme === "function") applyTheme();
     if (typeof syncRailOpen === "function") syncRailOpen();
+    if (typeof syncTocOpen === "function") syncTocOpen();
 
     if (!keepScroll) {
       window.scrollTo({ top: 0, behavior: "auto" });
@@ -640,7 +641,8 @@
     tocTargets = [];
     $("#docView").classList.remove("on");
     $("#docOverview").style.display = "";
-    $("#docToc").hidden = true;
+    shell.classList.add("no-toc");
+    syncTocOpen();
     $("#docPager").innerHTML = "";
     $$(".doc-item").forEach((el) => el.classList.remove("active"));
     if (!silent) window.scrollTo({ top: 0, behavior: "smooth" });
@@ -675,11 +677,9 @@
       if (!h.id) h.id = "s-" + doc.num + "-" + i;
     });
     tocTargets = heads;
-    if (!heads.length) {
-      $("#docToc").hidden = true;
-      return;
-    }
-    $("#docToc").hidden = false;
+    shell.classList.toggle("no-toc", !heads.length);
+    syncTocOpen();
+    if (!heads.length) return;
     $("#tocCount").textContent = heads.length + " 节";
     $("#docTocBody").innerHTML = heads
       .map(
@@ -742,14 +742,19 @@
         : "");
   }
 
-  /* ---- 侧栏：拖动调宽 / 收起 / 恢复 ---- */
+  /* ---- 左右两栏：拖动调宽 / 收起 / 恢复 ---- */
   const shell = $("#docsShell");
   const RAIL_W_KEY = "elab.railW";
   const RAIL_C_KEY = "elab.railCollapsed";
+  const TOC_W_KEY = "elab.tocW";
+  const TOC_C_KEY = "elab.tocCollapsed";
   const THEME_KEY = "elab.docTheme";
   const RAIL_MIN = 232;
   const RAIL_MAX = 560;
   const RAIL_DEFAULT = 300;
+  const TOC_MIN = 190;
+  const TOC_MAX = 460;
+  const TOC_DEFAULT = 268;
 
   const store = {
     get(k) {
@@ -768,20 +773,33 @@
     },
   };
 
-  let railW = parseInt(store.get(RAIL_W_KEY), 10) || RAIL_DEFAULT;
-  railW = Math.min(RAIL_MAX, Math.max(RAIL_MIN, railW));
+  const isNarrow = () => window.matchMedia("(max-width: 1060px)").matches;
+  const padOf = () => parseFloat(getComputedStyle(shell).paddingLeft) || 0;
+
+  function clamp(v, min, max) {
+    return Math.min(max, Math.max(min, Math.round(v)));
+  }
+
+  let railW = clamp(parseInt(store.get(RAIL_W_KEY), 10) || RAIL_DEFAULT, RAIL_MIN, RAIL_MAX);
+  let tocW = clamp(parseInt(store.get(TOC_W_KEY), 10) || TOC_DEFAULT, TOC_MIN, TOC_MAX);
 
   function setRailW(w) {
-    railW = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(w)));
+    railW = clamp(w, RAIL_MIN, RAIL_MAX);
     shell.style.setProperty("--rail-w", railW + "px");
   }
-  setRailW(railW);
 
-  (function initRailDrag() {
-    const bar = $("#railResizer");
+  function setTocW(w) {
+    tocW = clamp(w, TOC_MIN, TOC_MAX);
+    shell.style.setProperty("--toc-w", tocW + "px");
+  }
+
+  setRailW(railW);
+  setTocW(tocW);
+
+  /* 通用拖动条：measure(clientX) 把指针位置换算成宽度 */
+  function bindResizer(bar, { measure, commit, reset, step }) {
     if (!bar) return;
     let dragging = false;
-
     bar.addEventListener("pointerdown", (e) => {
       if (e.button) return;
       dragging = true;
@@ -794,42 +812,63 @@
       }
       e.preventDefault();
     });
-
-    const onMove = (e) => {
-      if (!dragging) return;
-      const pad = parseFloat(getComputedStyle(shell).paddingLeft) || 0;
-      setRailW(e.clientX - shell.getBoundingClientRect().left - pad);
+    const move = (e) => {
+      if (dragging) measure(e.clientX);
     };
-    const onUp = () => {
+    const up = () => {
       if (!dragging) return;
       dragging = false;
       bar.classList.remove("on");
       document.body.classList.remove("resizing");
-      store.set(RAIL_W_KEY, String(railW));
+      commit();
     };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+    bar.addEventListener("pointercancel", up);
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    bar.addEventListener("dblclick", reset);
+    bar.addEventListener("keydown", step);
+  }
 
-    bar.addEventListener("pointermove", onMove);
-    bar.addEventListener("pointerup", onUp);
-    bar.addEventListener("pointercancel", onUp);
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
-
-    bar.addEventListener("dblclick", () => {
+  bindResizer($("#railResizer"), {
+    measure: (x) => setRailW(x - shell.getBoundingClientRect().left - padOf()),
+    commit: () => store.set(RAIL_W_KEY, String(railW)),
+    reset: () => {
       setRailW(RAIL_DEFAULT);
       store.set(RAIL_W_KEY, String(RAIL_DEFAULT));
-    });
-
-    bar.addEventListener("keydown", (e) => {
+    },
+    step: (e) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       e.preventDefault();
       setRailW(railW + (e.key === "ArrowRight" ? 16 : -16));
       store.set(RAIL_W_KEY, String(railW));
-    });
-  })();
+    },
+  });
+
+  bindResizer($("#tocResizer"), {
+    measure: (x) => setTocW(shell.getBoundingClientRect().right - padOf() - x),
+    commit: () => store.set(TOC_W_KEY, String(tocW)),
+    reset: () => {
+      setTocW(TOC_DEFAULT);
+      store.set(TOC_W_KEY, String(TOC_DEFAULT));
+    },
+    step: (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      setTocW(tocW + (e.key === "ArrowLeft" ? 16 : -16));
+      store.set(TOC_W_KEY, String(tocW));
+    },
+  });
 
   function syncRailOpen() {
     // 浮出按钮只在本页面 + 侧栏收起时出现
     $("#railOpen").hidden = !(shell.classList.contains("collapsed") && currentRoute === "/docs");
+  }
+
+  function syncTocOpen() {
+    const hasToc = currentRoute === "/docs" && !shell.classList.contains("no-toc");
+    $("#tocOpen").hidden = !(hasToc && shell.classList.contains("toc-collapsed") && !isNarrow());
   }
 
   function setRailCollapsed(v, persist) {
@@ -838,30 +877,52 @@
     if (persist) store.set(RAIL_C_KEY, v ? "1" : "0");
   }
 
-  // 窄屏首次访问默认收起，正文优先；用户手动展开后记住选择
-  const narrow = window.matchMedia("(max-width: 860px)").matches;
+  function setTocCollapsed(v, persist) {
+    shell.classList.toggle("toc-collapsed", v);
+    syncTocOpen();
+    if (persist) store.set(TOC_C_KEY, v ? "1" : "0");
+  }
+
+  // 窄屏首次访问默认收起两侧，正文优先；用户手动展开后记住选择
+  const narrow = isNarrow();
   const storedCollapse = store.get(RAIL_C_KEY);
   setRailCollapsed(storedCollapse === "1" || (storedCollapse === null && narrow), false);
+
+  const storedTocCollapse = store.get(TOC_C_KEY);
+  setTocCollapsed(storedTocCollapse === "1" || (storedTocCollapse === null && narrow), false);
+
   $("#railCollapse").addEventListener("click", () => setRailCollapsed(true, true));
   $("#railOpen").addEventListener("click", () => setRailCollapsed(false, true));
+  $("#tocCollapse").addEventListener("click", () => setTocCollapsed(true, true));
+  $("#tocOpen").addEventListener("click", () => setTocCollapsed(false, true));
 
-  /* ---- 阅读主题：深色 / 浅色（只作用于文档页） ---- */
-  function docTheme() {
+  // 窗口跨过断点时，浮出按钮的显示条件会变
+  window.addEventListener(
+    "resize",
+    () => {
+      syncRailOpen();
+      syncTocOpen();
+    },
+    { passive: true }
+  );
+
+  /* ---- 全局主题：深色 / 浅色（右上角开关，三个页面都吃） ---- */
+  function themeName() {
     return store.get(THEME_KEY) === "light" ? "light" : "dark";
   }
 
-  function applyDocTheme() {
-    const light = docTheme() === "light";
-    const onDocs = currentRoute === "/docs";
-    document.documentElement.classList.toggle("docs-light", light && onDocs);
-    views["/docs"].classList.toggle("light", light);
-    const lab = $("#docThemeLabel");
-    if (lab) lab.textContent = light ? "深色" : "浅色";
+  function applyTheme() {
+    const light = themeName() === "light";
+    document.documentElement.classList.toggle("light", light);
+    const btn = $("#themeToggle");
+    if (btn) btn.setAttribute("aria-pressed", light ? "true" : "false");
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", light ? "#fbfbfc" : "#08090b");
   }
 
-  $("#docTheme").addEventListener("click", () => {
-    store.set(THEME_KEY, docTheme() === "light" ? "dark" : "light");
-    applyDocTheme();
+  $("#themeToggle").addEventListener("click", () => {
+    store.set(THEME_KEY, themeName() === "light" ? "dark" : "light");
+    applyTheme();
     spyToc();
   });
 

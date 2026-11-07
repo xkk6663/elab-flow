@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ELAB-Flow — 一套工具链，一条流程，跑遍所有芯片</title>
-<meta name="description" content="ELAB-Flow：编译 / 烧录 / 调试校验 / 串口判据跑同一条闭环。业务工程源码零改动，内核仅 Python 标准库。含独立驾驶舱、DSH 右栏面板与 15 个 agent 工具。">
+<title>ELAB-Flow — 让 agent 接管你的嵌入式开发</title>
+<meta name="description" content="ELAB-Flow：把嵌入式开发流程托管给你的 agent 与 DSH。体检 / 编译 / 烧录 / 调试校验 / 串口判据五段，合成为 agent 可直接调用的工具，一条 elab loop 跑完闭环、退出码说话。">
 <meta name="theme-color" content="#08090b">
 <meta name="color-scheme" content="dark">
-<meta property="og:title" content="ELAB-Flow — 一套工具链，跑遍所有芯片">
-<meta property="og:description" content="同一句 elab loop：体检 → 编译 → 烧录 → 调试校验 → 串口判据。业务工程源码零改动。">
+<meta property="og:title" content="ELAB-Flow — 让 agent 接管你的嵌入式开发">
+<meta property="og:description" content="把嵌入式开发流程托管给你的 agent：五段流程 = 五个可调用工具，一条 elab loop 跑完体检 → 编译 → 烧录 → 调试校验 → 串口判据。">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://xkk6663.github.io/elab-flow/">
 <meta property="og:image" content="https://xkk6663.github.io/elab-flow/assets/img/hero.webp">
@@ -36,6 +36,10 @@
     </nav>
 
     <div class="nav-actions">
+      <button class="theme-btn" id="themeToggle" title="切换深色 / 浅色主题" aria-label="切换深色 / 浅色主题">
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/></svg>
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/></svg>
+      </button>
       <a class="star-btn" id="starBtn" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener" title="喜欢该项目点一下 star">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4L12 17.4 6.2 20.4l1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg>
         <span class="label">Star</span>
@@ -68,13 +72,13 @@
       </h1>
 
       <p class="hero-kicker reveal" style="--d:110ms">
-        <b>ELAB&middot;FLOW</b> &middot; 嵌入式工程的全流程编排工具链
+        <b>ELAB&middot;FLOW</b> &middot; 给 agent 用的嵌入式开发工具链
       </p>
 
       <p class="hero-sub reveal" style="--d:160ms">
-        同一句 <code>elab loop</code> 里跑完「体检 → 编译 → 烧录 → 调试校验 → 串口判据」五段闭环，
-        退出码说话、证据落盘。换芯片只改一行 <code>chip:</code>，业务工程源码零改动；
-        内核只用 Python 标准库，前端产物直接入仓，克隆下来不装 Node 也能开驾驶舱。
+        <span class="hs-l"><strong>把嵌入式开发流程，托管给你的 agent 与 DSH。</strong></span>
+        <span class="hs-l">体检 → 编译 → 烧录 → 调试校验 → 串口判据，五段合成一条 <code>elab loop</code>。</span>
+        <span class="hs-l">退出码说话、证据落盘；业务代码留在原地，换芯片只改一行 <code>chip:</code>。</span>
       </p>
 
       <div class="hero-cta reveal" style="--d:180ms">
@@ -86,9 +90,9 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h7a3 3 0 013 3v11a3 3 0 00-3-3H4z"/><path d="M20 5h-7a3 3 0 00-3 3v11a3 3 0 013-3h7z"/></svg>
           阅读上手教程
         </a>
-        <a class="btn btn-ghost btn-lg" id="heroStar" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener">
-          <svg viewBox="0 0 24 24" fill="#f5c451" style="color:#f5c451"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4L12 17.4 6.2 20.4l1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg>
-          喜欢就点个 Star
+        <a class="btn btn-ghost btn-lg repo-btn" id="heroRepo" href="https://github.com/xkk6663/elab-flow" target="_blank" rel="noopener" title="打开 GitHub 仓库：源码、芯片包与实机验收报告">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
+          进入 GitHub 仓库
         </a>
       </div>
 
@@ -142,25 +146,42 @@
     <div class="wrap">
       <div class="sec-head reveal">
         <span class="eyebrow">为什么需要它</span>
-        <h2 class="title">每换一颗芯片，重搭一遍</h2>
-        <p class="lead">CubeMX 一套、WorkBench 一套、Keil / IAR 又各一套；工具版本靠 PATH 运气，真机验证全靠手工。ELAB-Flow 做的是「一套工具链和流程跑不同芯片」，不是「一套代码跑不同平台」。</p>
+        <h2 class="title">让 agent 接管你的嵌入式开发</h2>
+        <p class="lead lead-wide">模型能写驱动、能读手册，却卡在最后一步——编译要开 IDE、烧录点鼠标、验证盯串口，它插不进手。<br>ELAB-Flow 把五段流程托管给 agent：业务代码留在原工程，每一步都有工具调用。</p>
       </div>
 
       <div class="pain-grid">
         <div class="pain reveal" style="--d:0ms">
           <span class="tag">pain · 01</span>
-          <h3>工程要重搭</h3>
-          <p>换厂商就得再建一次工程、再配一次链接脚本，目录结构还得跟着别人的模板走。</p>
+          <h3>工具关在 GUI 里</h3>
+          <p>建工程靠 CubeMX 点出来，编译烧录靠 IDE 按钮，工具版本靠 PATH 运气 —— 没有稳定入口，agent 第一步就卡死。</p>
         </div>
         <div class="pain reveal" style="--d:80ms">
           <span class="tag">pain · 02</span>
-          <h3>验证靠肉眼</h3>
-          <p>烧完盯着串口看日志，「好像跑起来了」就算过 —— 没法进 CI，也没法交接给下一个人。</p>
+          <h3>结论靠肉眼</h3>
+          <p>烧完盯着串口日志，「好像跑起来了」就算过；没有判据、没有退出码，agent 判断不了这一步成没成，也进不了 CI。</p>
         </div>
         <div class="pain solve reveal" style="--d:160ms">
           <span class="tag">elab · 做法</span>
-          <h3>外骨骼，不改器官</h3>
-          <p>业务代码原地不动，构建前后文件树快照可断言 <code>untouched</code>；芯片差异全部下沉到适配包的 YAML。</p>
+          <h3>流程即工具</h3>
+          <p>每个阶段都是一条带退出码、带证据行的命令。agent 一次 tool call 跑完，读同一份事件流再决定下一步 —— 不需要有人守在屏幕前。</p>
+        </div>
+      </div>
+
+      <div class="tool-rail reveal" style="--d:120ms">
+        <div class="tr-head">
+          <span class="tr-title">五个阶段 = 五个 agent 工具</span>
+          <span class="tr-note">外骨骼式接入 · 业务代码零改动</span>
+        </div>
+        <ol class="tr-list">
+          <li><span class="tr-k">01</span><b>体检</b><code>elab doctor</code></li>
+          <li><span class="tr-k">02</span><b>编译</b><code>elab build</code></li>
+          <li><span class="tr-k">03</span><b>烧录</b><code>elab flash</code></li>
+          <li><span class="tr-k">04</span><b>调试校验</b><code>elab debug</code></li>
+          <li><span class="tr-k">05</span><b>串口判据</b><code>elab monitor</code></li>
+        </ol>
+        <div class="tr-foot">
+          <code>elab loop</code> 顺序跑完五段，任一段失败即停并把证据回传给 agent；面板、CLI、agent 读的是同一份事件流。
         </div>
       </div>
     </div>
@@ -496,14 +517,6 @@ $ ./elab loop -p stm32f411ceu6 -v
         </label>
         <div class="doc-list" id="docList"></div>
       </div>
-
-      <div class="rail-toc" id="docToc" hidden>
-        <div class="rail-head">
-          <span class="rail-title">本篇目录</span>
-          <span class="rail-hint" id="tocCount"></span>
-        </div>
-        <nav class="toc-list" id="docTocBody" aria-label="本篇目录"></nav>
-      </div>
     </aside>
 
     <div class="rail-resizer" id="railResizer" role="separator" aria-orientation="vertical"
@@ -533,11 +546,6 @@ $ ./elab loop -p stm32f411ceu6 -v
           </button>
           <span class="doc-meta" id="docMeta"></span>
           <span class="spacer"></span>
-          <button class="tool-btn" id="docTheme" title="切换深色 / 浅色阅读模式">
-            <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 019.6 4 8.5 8.5 0 1020 14.5z"/></svg>
-            <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/></svg>
-            <span id="docThemeLabel">浅色</span>
-          </button>
           <a class="gh" id="docGithub" href="#" target="_blank" rel="noopener">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></svg>
             原文
@@ -547,6 +555,21 @@ $ ./elab loop -p stm32f411ceu6 -v
         <div class="doc-pager" id="docPager"></div>
       </div>
     </div>
+
+    <!-- 右侧索引：宽度可拖，可收起 -->
+    <div class="toc-resizer" id="tocResizer" role="separator" aria-orientation="vertical"
+         aria-label="拖动调整索引宽度（双击复位）" tabindex="0"><i></i></div>
+
+    <aside class="docs-toc" id="docsToc" aria-label="本篇目录">
+      <div class="rail-head">
+        <span class="rail-title">本篇目录</span>
+        <span class="rail-hint" id="tocCount"></span>
+        <button class="rail-btn" id="tocCollapse" title="收起索引" aria-label="收起索引">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <nav class="toc-list" id="docTocBody"></nav>
+    </aside>
   </div>
 
 </section>
@@ -554,6 +577,11 @@ $ ./elab loop -p stm32f411ceu6 -v
   <button class="rail-open" id="railOpen" hidden title="展开目录">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
     目录
+  </button>
+
+  <button class="toc-open" id="tocOpen" hidden title="展开索引">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    索引
   </button>
 
 <!-- ============================ 芯片包市场 ============================ -->
