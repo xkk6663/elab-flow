@@ -1429,8 +1429,6 @@ footer {
 
 .page-head p { margin: 14px 0 0; color: var(--muted); max-width: 640px; font-size: 15px; }
 
-/* 文档页头与工作区同宽（其余页面仍用 .wrap 1180） */
-.docs-head-inner { max-width: 1560px; margin: 0 auto; padding: 0 24px; }
 
 /* 文档阅读器：左侧栏宽度 --rail-w 由 JS 拖动写入 */
 .docs-shell {
