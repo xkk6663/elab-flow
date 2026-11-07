@@ -560,7 +560,72 @@ $ ./elab loop -p stm32f411ceu6 -v
     <div class="mkt-grid" id="packGrid"></div>
 
     <div class="mkt-section-h"><h3>工具链 Provider</h3><span id="provCount"></span></div>
-    <div class="mkt-grid" id="provGrid"></div>
+    <div class="mkt-grid" id="provGrid">
+      <!-- 内置默认链：不是市场条目，是内核自带的兜底，所以写死在页面里 -->
+      <article class="prov-default" data-search="elab/native builtin 默认 内置 native arm-none-eabi-gcc 13.3.1 cmake ninja openocd gdb cmsis-dap swd 串口 monitor doctor build flash debug_verify">
+        <div class="pd-top">
+          <span class="pd-ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2.4"/><path d="M8 7V3.6M16 7V3.6M3 12.4h18"/><path d="M7.5 16.6h2.2l1.1-2.2 1.4 4 1.2-1.8h2.9"/></svg>
+          </span>
+          <div class="pd-title">
+            <h4>elab/native <em>@builtin</em></h4>
+            <span>内核内置默认链 · 不用安装，也不在 Provider 索引里</span>
+          </div>
+          <span class="badge official">默认</span>
+        </div>
+
+        <p class="pd-lead">
+          项目 YAML <b>不写</b> <code>provider:</code>（或写 <code>provider: native</code>）时，
+          体检 / 编译 / 烧录 / 调试校验四步直接走内核代码。工具版本不来自包，
+          一律以本机 <code>elab.host.yaml</code> 的声明为准 —— 仓库里那套是：
+        </p>
+
+        <div class="pd-grid">
+          <div class="pd-item">
+            <span class="k">交叉编译</span>
+            <span class="v">arm-none-eabi-gcc 13.3.1</span>
+            <span class="d">GNU-tools-for-STM32 · 版本 pin 死，不吃 PATH 运气</span>
+          </div>
+          <div class="pd-item">
+            <span class="k">构建</span>
+            <span class="v">CMake ≥ 3.22 + Ninja 1.11.1</span>
+            <span class="d">cmake configure → cmake --build，一条命令一段日志</span>
+          </div>
+          <div class="pd-item">
+            <span class="k">烧录 / 调试</span>
+            <span class="v">OpenOCD 2.0.9 + arm-none-eabi-gdb</span>
+            <span class="d">CMSIS-DAP · SWD 5 MHz · target cfg 取芯片包</span>
+          </div>
+          <div class="pd-item">
+            <span class="k">串口</span>
+            <span class="v">内核 monitor（永不外包）</span>
+            <span class="d">115200 8N1 · 串口三态与 serial/* 事件归内核</span>
+          </div>
+        </div>
+
+        <div class="pd-steps">
+          <span class="pd-lab">提供步骤</span>
+          <span class="chip-tag ok">doctor</span>
+          <span class="chip-tag ok">build</span>
+          <span class="chip-tag ok">flash</span>
+          <span class="chip-tag ok">debug_verify</span>
+          <span class="chip-tag">monitor · 内核保留</span>
+          <span class="chip-tag">doctor_deep · 内核保留</span>
+        </div>
+
+        <div class="pd-foot">
+          <div><span class="pd-k">怎么绑</span><code>provider: native</code>，或整行省略（默认就是它）</div>
+          <div><span class="pd-k">改路径</span><code>elab.host.yaml</code> → <code>toolchains.arm-none-eabi.root</code> / <code>tools.cmake</code> / <code>tools.ninja</code> / <code>tools.openocd</code></div>
+          <div><span class="pd-k">临时换</span><code>ELAB_ARM_GCC_ROOT</code> / <code>ELAB_CMAKE</code> / <code>ELAB_NINJA</code> / <code>ELAB_OPENOCD</code> 环境变量覆盖，不改仓库文件</div>
+        </div>
+
+        <p class="pd-warn">
+          <b>什么时候该换掉它：</b>芯片厂商自带完整 SDK 与构建系统时（ESP32-S31 就是），
+          项目显式绑 <code>provider: espressif/idf@&gt;=1 &lt;2</code>。绑定后缺哪个步骤就直接报错，
+          不会静默回退到这条原生链 —— 这是设计决定 D3。
+        </p>
+      </article>
+    </div>
 
     <div class="upload-card" id="uploadCard">
       <div>

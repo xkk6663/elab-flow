@@ -915,19 +915,28 @@
           : "market/index.json · 快照 " + (data.snapshot_at ? data.snapshot_at.slice(0, 10) : "已打包") + "（实时读取不可用）");
 
       $("#packCount").textContent = packs.length + " packs";
-      $("#provCount").textContent = provs.length + " providers";
+      $("#provCount").textContent =
+        "1 个内置默认" + (provs.length ? " + " + provs.length + " 个外部" : " · 暂无外部 provider");
       $("#packGrid").innerHTML = packs.length
         ? packs.map((p) => packCard(p, "pack")).join("")
         : '<div class="mkt-empty">还没有已登记的芯片包。</div>';
-      $("#provGrid").innerHTML = provs.length
-        ? provs.map((p) => packCard(p, "provider")).join("")
-        : '<div class="mkt-empty">还没有已登记的 provider。</div>';
+      // 内置默认链是写死在页面里的，重渲染时先摘出来再放回最前面
+      const grid = $("#provGrid");
+      const builtin = grid.querySelector(".prov-default");
+      grid.innerHTML = "";
+      if (builtin) grid.appendChild(builtin);
+      grid.insertAdjacentHTML(
+        "beforeend",
+        provs.length
+          ? provs.map((p) => packCard(p, "provider")).join("")
+          : '<div class="mkt-empty">除内置默认链外，还没有安装任何外部 provider。</div>'
+      );
     });
   }
 
   $("#mktSearch").addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
-    $$(".pack").forEach((el) => {
+    $$(".pack, .prov-default, .mkt-empty").forEach((el) => {
       const hay = el.dataset.search || "";
       el.style.display = !q || hay.includes(q) ? "" : "none";
     });
