@@ -2019,6 +2019,8 @@ html.light .doc-toolbar .gh:hover { color: #064e3b; }
 }
 
 .md > *:first-child { margin-top: 0; }
+/* 教程里的裸锚点 <a id="7"></a> 由 md2html 转成不可见定位点，不占高度 */
+.md .anchor { display: block; height: 0; overflow: hidden; }
 .md h1 {
   font-size: 28px;
   letter-spacing: -0.03em;
