@@ -118,6 +118,18 @@
       go(a.dataset.route);
       return;
     }
+    // 正文内页内锚点（教程目录的 [7](#7)）：就地滚动。
+    // 不能交给路由——parseHash 见到不以 / 开头的 #0 会当成首页，读者被弹回首页。
+    const inDoc = e.target.closest('#docBody a[href^="#"]');
+    if (inDoc) {
+      const id = decodeURIComponent(inDoc.getAttribute("href").slice(1));
+      const el = id && document.getElementById(id);
+      if (el) {
+        e.preventDefault();
+        window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 76, behavior: "smooth" });
+        return;
+      }
+    }
     const anchor = e.target.closest("a[data-anchor]");
     if (anchor) {
       e.preventDefault();
@@ -947,6 +959,13 @@
       codes.push(c);
       return "\u0000C" + (codes.length - 1) + "\u0000";
     });
+    // 裸 HTML 锚点（教程里给 GitHub 目录跳转用的 <a id="7"></a>）：
+    // 必须在 esc 之前抽出来，否则会被转义成 &lt;a id="7"&gt; 直接显示在正文里
+    const ids = [];
+    t = t.replace(/<a\s+(?:id|name)\s*=\s*"([^"\s]+)"\s*>\s*<\/a>/gi, (m, id) => {
+      ids.push(id);
+      return "\u0000A" + (ids.length - 1) + "\u0000";
+    });
     t = esc(t);
     // 图片
     // alt 里可能带一层配对方括号（「[alive] 稳定 1Hz」），[^\]]* 会截断 → 这类图渲染成乱链接
@@ -966,6 +985,8 @@
     t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
     // 还原行内代码
     t = t.replace(/\u0000C(\d+)\u0000/g, (m, i) => "<code>" + esc(codes[+i]) + "</code>");
+    // 还原锚点：输出不可见定位点，目录里的 [7](#7) 才跳得到
+    t = t.replace(/\u0000A(\d+)\u0000/g, (m, i) => '<span class="anchor" id="' + esc(ids[+i]) + '"></span>');
     return t;
   }
 
@@ -1029,6 +1050,14 @@
       if (h) {
         const lvl = h[1].length;
         out.push("<h" + lvl + ">" + inline(h[2].replace(/\s+#+\s*$/, "")) + "</h" + lvl + ">");
+        i++;
+        continue;
+      }
+
+      // 裸 HTML 锚点独占一行（GitHub 目录跳转用）：直出不可见定位点，别包成空段落
+      const anc = line.match(/^\s*<a\s+(?:id|name)\s*=\s*"([^"\s]+)"\s*>\s*<\/a>\s*$/i);
+      if (anc) {
+        out.push('<span class="anchor" id="' + esc(anc[1]) + '"></span>');
         i++;
         continue;
       }
