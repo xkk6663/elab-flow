@@ -1,4 +1,4 @@
-# 协议上手 09：Modbus RTU 主站 + 硬件串口双缓冲（STM32F411 实机）
+# 协议上手 09：Modbus RTU 主站 + 循环 DMA 接收 + 软件乒乓发送（STM32F411 实机）
 
 > 从站固件：`examples/STM32F411_modbus`（STM32F411CEU6 / Cortex-M4F / 115200 8N1）
 > 主站实现：`services/elab/modbus.py`（编解码）+ `services/elab/modbusmaster.py`（事务与轮询）
@@ -286,7 +286,7 @@ if (olen) break;               /* 有一个不可写就整批拒绝 */
 
 ---
 
-## 7. 硬件串口双缓冲（一）：接收为什么是 CIRC + HT/TC
+## 7. 接收侧缓冲（一）：为什么是 CIRC + HT/TC，而不是硬件双缓冲
 
 ### 7.1 问题不是"慢"，是"窗口"
 
