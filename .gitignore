@@ -49,3 +49,10 @@ generated/
 # 插件包内携带的许可证副本（prepack 时从仓库根复制生成，不入库，避免两份副本漂移）
 packages/dsh-elab-cockpit/LICENSE
 packages/dsh-elab-cockpit/NOTICE
+
+# 官网站点构建产物：`python site/build_data.py` 生成，随 gh-pages 发布，不入 main
+# （tut-assets/ 是教程截图的站内副本，源图在 docs/tutorials/assets/）
+site/tut-assets/
+site/data/
+# 站点宣传片（17MB 媒体文件，只上 gh-pages，不进 main）
+site/assets/video/
