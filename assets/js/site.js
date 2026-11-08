@@ -949,7 +949,8 @@
     });
     t = esc(t);
     // 图片
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, alt, src) => {
+    // alt 里可能带一层配对方括号（「[alive] 稳定 1Hz」），[^\]]* 会截断 → 这类图渲染成乱链接
+    t = t.replace(/!\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (m, alt, src) => {
       const url = absUrl(src);
       return '<img src="' + url + '" alt="' + esc(alt) + '" loading="lazy">';
     });
@@ -970,6 +971,8 @@
 
   function absUrl(u) {
     if (!u || /^(https?:|mailto:|#|data:)/.test(u)) return u;
+    // 教程截图已随站点托管（构建期复制到 tut-assets/），同源加载，不走 raw 热链
+    if (u.startsWith("tut-assets/") || u.startsWith("./tut-assets/")) return u.replace(/^\.\//, "");
     if (u.startsWith("/")) return REPO_URL + "/blob/main" + u;
     if (/\.md(#.*)?$/.test(u)) return REPO_URL + "/blob/main/docs/tutorials/" + u.replace(/^\.\//, "");
     return RAW + "docs/tutorials/" + u.replace(/^\.\//, "");
@@ -1276,6 +1279,45 @@
   $("#copyEntry").addEventListener("click", () => {
     copy($("#entryOut").textContent).then((ok) => toast(ok ? "JSON 已复制" : "复制失败"));
   });
+
+  /* ---------------------------------------------------------- 宣传片灯箱 */
+  const promoModal = $("#promoModal");
+  const promoVideo = $("#promoVideo");
+  if (promoModal && promoVideo) {
+    const openPromo = () => {
+      promoModal.hidden = false;
+      document.body.classList.add("no-scroll");
+      const p = promoVideo.play();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+      const root = document.documentElement;
+      if (root.requestFullscreen) {
+        const fs = root.requestFullscreen();
+        if (fs && typeof fs.catch === "function") fs.catch(() => {});
+      }
+    };
+    const closePromo = () => {
+      promoModal.hidden = true;
+      document.body.classList.remove("no-scroll");
+      promoVideo.pause();
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+    };
+    ["#heroPlay", "#promoCard"].forEach((sel) => {
+      const btn = $(sel);
+      if (btn) btn.addEventListener("click", openPromo);
+    });
+    $("#promoClose").addEventListener("click", closePromo);
+    promoModal.addEventListener("click", (e) => {
+      if (e.target === promoModal) closePromo();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !promoModal.hidden) closePromo();
+    });
+    document.addEventListener("fullscreenchange", () => {
+      if (!document.fullscreenElement && !promoModal.hidden) closePromo();
+    });
+  }
 
   /* ---------------------------------------------------------- 启动 */
   function boot() {

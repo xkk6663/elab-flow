@@ -3228,3 +3228,162 @@ html.light .pd-title > span, html.light .pd-title h4 em { color: #4c564f; }
 }
 :where(:root:not(.light)) .doc-item:hover { background: rgba(255, 255, 255, 0.05); }
 :where(:root:not(.light)) .search { background: rgba(255, 255, 255, 0.04); }
+
+/* ---------------------------------------------------------- 产品宣传片 */
+.promo-card {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  aspect-ratio: 16 / 9;
+  border-radius: 18px;
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
+  background: var(--panel);
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.55);
+}
+.promo-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.7s var(--ease);
+}
+.promo-card:hover img { transform: scale(1.035); }
+
+.promo-card-shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.16) 0%, rgba(0, 0, 0, 0) 36%, rgba(4, 5, 7, 0.86) 100%);
+}
+
+.promo-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 86px;
+  height: 86px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 9, 11, 0.55);
+  border: 1px solid rgba(167, 243, 208, 0.55);
+  color: var(--brand-3);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6), 0 0 0 8px rgba(52, 211, 153, 0.08);
+  transition: transform 0.28s var(--ease), background 0.28s, box-shadow 0.28s;
+}
+.promo-play svg { width: 30px; height: 30px; }
+.promo-card:hover .promo-play {
+  transform: translate(-50%, -50%) scale(1.07);
+  background: rgba(52, 211, 153, 0.2);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.65), 0 0 0 12px rgba(52, 211, 153, 0.13);
+}
+
+.promo-card-meta {
+  position: absolute;
+  left: 30px;
+  bottom: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+.promo-card-title { font-size: 21px; font-weight: 600; letter-spacing: -0.02em; }
+.promo-card-sub { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+
+.promo-card-badge {
+  position: absolute;
+  right: 24px;
+  bottom: 26px;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border: 1px solid var(--line-strong);
+  background: rgba(8, 9, 11, 0.55);
+  padding: 5px 10px;
+  border-radius: 8px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* 全屏灯箱播放 */
+.promo-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: block;
+  background: #000;
+}
+.promo-modal[hidden] { display: none; }
+body.no-scroll { overflow: hidden; }
+
+.promo-dialog {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  background: #000;
+}
+
+.promo-head {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 22px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+.promo-title b { color: var(--text); font-weight: 600; letter-spacing: 0.08em; }
+.promo-meta { margin-left: 12px; color: var(--faint); }
+
+.promo-close {
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 9, 11, 0.55);
+  color: #fff;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: background 0.18s, border-color 0.18s;
+}
+.promo-close:hover { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.3); }
+.promo-close svg { width: 18px; height: 18px; }
+
+.promo-dialog video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+@media (max-width: 640px) {
+  .promo-play { width: 64px; height: 64px; }
+  .promo-play svg { width: 24px; height: 24px; }
+  .promo-card-meta { left: 16px; bottom: 14px; }
+  .promo-card-title { font-size: 16px; }
+  .promo-card-sub { font-size: 11px; }
+  .promo-card-badge { right: 14px; bottom: 14px; }
+  .promo-meta { display: none; }
+  .promo-head { padding: 12px 14px; }
+}

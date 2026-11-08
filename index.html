@@ -82,6 +82,10 @@
       </p>
 
       <div class="hero-cta reveal" style="--d:180ms">
+        <button class="btn btn-ghost btn-lg promo-open" id="heroPlay" type="button" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.4l6 3.6-6 3.6z" fill="currentColor" stroke="none"/></svg>
+          观看产品宣传片
+        </button>
         <a class="btn btn-primary btn-lg" id="heroDownload" href="https://github.com/xkk6663/elab-flow/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
           下载安装包
@@ -140,6 +144,24 @@
       </div>
     </div>
   </div>
+
+  <!-- 产品宣传片（封面 → 全屏播放） -->
+  <section class="block promo-block">
+    <div class="wrap">
+      <button class="promo-card reveal" id="promoCard" type="button" aria-haspopup="dialog" aria-label="播放 ELAB-Flow 产品宣传片">
+        <img src="assets/img/promo-poster.webp" width="1600" height="900" alt="ELAB-Flow 产品宣传片封面：ELAB·FLOW，让 agent 接管你的嵌入式开发流程">
+        <span class="promo-card-shade" aria-hidden="true"></span>
+        <span class="promo-play" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.4l6 3.6-6 3.6z" fill="currentColor" stroke="none"/></svg>
+        </span>
+        <span class="promo-card-meta">
+          <span class="promo-card-title">ELAB&middot;FLOW 产品宣传片</span>
+          <span class="promo-card-sub">13 章 &middot; 从自动接入到五段闭环的实机证据</span>
+        </span>
+        <span class="promo-card-badge">1:59 &middot; 1080p</span>
+      </button>
+    </div>
+  </section>
 
   <!-- 问题 / 做法 -->
   <section class="block">
@@ -809,6 +831,22 @@ $ ./elab loop -p stm32f411ceu6 -v
       <button class="btn btn-ghost btn-sm" id="copyEntry">复制 JSON</button>
       <a class="btn btn-primary btn-sm" id="submitIssue" href="#" target="_blank" rel="noopener">提成 Issue</a>
     </div>
+  </div>
+</div>
+
+<!-- 产品宣传片灯箱 -->
+<div class="promo-modal" id="promoModal" hidden>
+  <div class="promo-dialog" role="dialog" aria-modal="true" aria-label="ELAB-Flow 产品宣传片">
+    <div class="promo-head">
+      <span class="promo-title"><b>ELAB&middot;FLOW</b> 产品宣传片<span class="promo-meta">1 分 59 秒 &middot; 1080p</span></span>
+      <button class="promo-close" id="promoClose" type="button" aria-label="关闭宣传片">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <video id="promoVideo" controls playsinline preload="none" poster="assets/img/promo-poster.webp">
+      <source src="assets/video/elab-promo.mp4" type="video/mp4">
+      你的浏览器不支持网页视频，请<a href="assets/video/elab-promo.mp4">直接下载</a>观看。
+    </video>
   </div>
 </div>
 
