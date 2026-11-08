@@ -2,6 +2,10 @@
 
 用法：python site/publish.py
 原理：临时 index + hash-object/write-tree/commit-tree，绕开工作区切换。
+
+平时不用手跑：.github/workflows/site.yml 在 docs/tutorials/** 或 site/** 变更时
+会自动 build_data + publish；本机手动发布时 push 需带代理
+（如 http_proxy=http://127.0.0.1:7890），否则连不上 github.com:443。
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ def main() -> None:
         if p.is_dir():
             continue
         rel = p.relative_to(SITE).as_posix()
-        if rel.startswith(".shots/") or rel in {"build_data.py", "publish.py", ".gitignore"}:
+        if rel.startswith(".shots/") or rel in {"build_data.py", "publish.py", "tutorials.json", ".gitignore"}:
             continue
         files.append(rel)
 

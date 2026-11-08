@@ -182,7 +182,7 @@ def main() -> None:
             }
         )
     (DATA / "docs.json").write_text(
-        json.dumps({"generated_at": time.strftime("%Y-%m-%d"), "docs": docs}, ensure_ascii=False),
+        json.dumps({"generated_at": time.strftime("%Y-%m-%d", time.gmtime()), "docs": docs}, ensure_ascii=False),
         encoding="utf-8",
     )
 
