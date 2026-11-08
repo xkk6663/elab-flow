@@ -1,11 +1,17 @@
-"""把仓库里的教程与市场索引打成官网静态快照（发布前跑一次）。
+"""把仓库里的教程与市场索引打成官网静态快照。
 
 用法：python site/build_data.py
-产物：site/data/docs.json、site/data/market.json
+产物：site/data/docs.json、site/data/market.json、site/tut-assets/**
+
+教程清单自动发现：`docs/tutorials/NN-*.md` 按文件名前的两位序号排序入列，
+新增教程只要文件名带序号即可，不用改代码。中文简称与一句话描述可在
+`site/tutorials.json` 里按文件名覆盖（没有覆盖时：简称取序号后、下划线前的片段，
+描述取正文首段）。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import time
@@ -20,20 +26,23 @@ DOCS = ROOT / "docs" / "tutorials"
 # 于是首页图正常、教程截图时好时坏。改为构建期复制到站内 tut-assets/。
 TUT_ASSETS = SITE / "tut-assets"
 ASSETS_SRC = DOCS / "assets"
+# 可选：文件名 → 中文简称 / 描述 的覆盖表
+META_FILE = SITE / "tutorials.json"
 
-# 教程顺序即学习顺序；desc 不给就自动取正文首段
-ORDER = [
-    ("00-项目全览与架构解读.md", "项目全览与架构", "先读这篇：一句话定位、四层架构、11 组功能与 agent 工具全览"),
-    ("01-芯片开发上手_独立WebUI.md", "芯片开发上手", "换新芯片 / 新板，先过心跳第一关，再跑完整闭环"),
-    ("02-市场适配包贡献.md", "适配包贡献", "给新厂商做适配包，并把它发布到社区市场"),
-    ("03-插件市场使用_独立WebUI.md", "插件市场使用", "零环境装插件，首启向导把工具链一次配齐"),
-    ("04-调试面板上手_STM32F103C8T6.md", "调试工作区上手", "断点 / 监视 / 外设 / RTOS 栈，从一次真实 HardFault 收网"),
-    ("05-DSH插件上手_STM32F103C8T6.md", "DSH 插件上手", "右栏窄栏闭环 + 调试页签，agent 在跑你在旁边看"),
-    ("06-CLI终端闭环上手.md", "CLI 终端闭环", "只想用命令行：一条命令跑完五个阶段"),
-    ("07-串口面板使用.md", "串口面板使用", "发送 / 历史 / 定时、四视图、波形游标与帧解码"),
-    ("08-串口压力测试报告_STM32F411CEU6.md", "串口压力测试", "高吞吐与丢数判定，真机双向压测报告"),
-    ("09-协议上手_Modbus.md", "Modbus 协议上手", "RTU 主站点表轮询、批量读写与硬件串口双缓冲"),
-]
+
+def discover() -> list[tuple[str, str, str]]:
+    """扫描 docs/tutorials/NN-*.md，返回（文件名, 简称, 描述），按序号排序。"""
+    meta: dict = {}
+    if META_FILE.is_file():
+        meta = json.loads(META_FILE.read_text(encoding="utf-8"))
+    out: list[tuple[str, str, str]] = []
+    for path in sorted(DOCS.glob("[0-9][0-9]-*.md")):
+        fn = path.name
+        stem = fn[3:-3]  # 去掉 "NN-" 与 ".md"
+        item = meta.get(fn) or {}
+        name = item.get("name") or stem.split("_")[0]
+        out.append((fn, name, item.get("desc", "")))
+    return out
 
 
 def strip_front(md: str) -> str:
@@ -107,6 +116,10 @@ def fetch_repo_meta() -> dict:
         "snapshot_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     hdr = {"User-Agent": "elab-flow-site-builder", "Accept": "application/vnd.github+json"}
+    # CI 里带上 GITHUB_TOKEN，避免匿名调用被限流后 star / tag 快照变空
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        hdr["Authorization"] = "Bearer " + token
     try:
         with urllib.request.urlopen(
             urllib.request.Request("https://api.github.com/repos/xkk6663/elab-flow", headers=hdr), timeout=20
@@ -139,13 +152,16 @@ def fetch_repo_meta() -> dict:
 
 def main() -> None:
     DATA.mkdir(parents=True, exist_ok=True)
-    raw = {fn: (DOCS / fn).read_text(encoding="utf-8") for fn, _, _ in ORDER}
+    order = discover()
+    if not order:
+        raise SystemExit("docs/tutorials/ 下没有 NN-*.md，检查文件名是否带两位序号")
+    raw = {fn: (DOCS / fn).read_text(encoding="utf-8") for fn, _, _ in order}
     staged, missing, asset_bytes = stage_images(raw)
     for m in missing:
         print("缺图:", m)
 
     docs = []
-    for fn, plain, desc in ORDER:
+    for fn, plain, desc in order:
         md = staged[fn]
         title = ""
         for line in md.splitlines():

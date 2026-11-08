@@ -1,0 +1,45 @@
+name: site
+
+# 教程 / 站点源一推 main，就重建静态快照并发布到 gh-pages。
+# 只看这几条路径，改代码不会触发站点发布。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/tutorials/**"
+      - "site/**"
+      - "market/index.json"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: site-publish
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # publish.py 以 gh-pages 现有提交为父提交，先把分支取到本地
+      - name: 取 gh-pages
+        run: git fetch --depth=1 origin gh-pages:refs/heads/gh-pages || echo "首次发布，忽略"
+
+      - name: 生成快照
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python site/build_data.py
+
+      - name: 发布到 gh-pages
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python site/publish.py
