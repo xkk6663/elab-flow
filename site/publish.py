@@ -76,7 +76,9 @@ def main() -> None:
         if p.is_dir():
             continue
         rel = p.relative_to(SITE).as_posix()
-        if rel.startswith(".shots/") or rel in {"build_data.py", "publish.py", "tutorials.json", ".gitignore"}:
+        if rel.startswith(".shots/") or rel.startswith("__pycache__/") or rel.endswith(".pyc"):
+            continue
+        if rel in {"build_data.py", "publish.py", "tutorials.json", ".gitignore"}:
             continue
         files.append(rel)
 
