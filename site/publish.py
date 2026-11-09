@@ -18,6 +18,12 @@ ROOT = Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
 BRANCH = "gh-pages"
 
+# 这些目录被 .gitignore 排除、不入仓库，CI 检出时本地不存在。
+# 发布又是“以本地 site/ 全量重建树”，于是父提交里有、本地没有的文件会被静默删掉
+# （2026-11 宣传片就是这样从 gh-pages 消失、线上变 404 的）。
+# 所以父提交里存在、本地缺失的媒体要原样搬回来。
+CARGO_PREFIXES = ("assets/video/",)
+
 
 def run(args: list[str], env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
     p = subprocess.run(args, cwd=str(ROOT), env=env, capture_output=True, text=True, encoding="utf-8")
@@ -27,7 +33,44 @@ def run(args: list[str], env: dict | None = None, check: bool = True) -> subproc
     return p
 
 
+def resolve_parent() -> str:
+    """当前 gh-pages 头（本地先、远端后），作为新提交的父提交与搬运来源。"""
+    cur = run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{BRANCH}"], check=False)
+    if cur.returncode == 0 and cur.stdout.strip():
+        return cur.stdout.strip()
+    remote = run(["git", "ls-remote", "origin", f"refs/heads/{BRANCH}"], check=False)
+    if remote.returncode == 0 and remote.stdout.strip():
+        return remote.stdout.split()[0]
+    return ""
+
+
+def carry_over(env: dict, parent: str) -> list[str]:
+    """把父提交里 CARGO_PREFIXES 下、本地不存在的 blob 原样塞回新树。"""
+    if not parent:
+        return []
+    out = run(["git", "ls-tree", "-r", parent], check=False)
+    if out.returncode != 0:
+        return []
+    kept: list[str] = []
+    for line in out.stdout.splitlines():
+        meta, _, path = line.partition("\t")
+        parts = meta.split()
+        if len(parts) != 3:
+            continue
+        mode, typ, blob = parts
+        if typ != "blob" or not path.startswith(CARGO_PREFIXES):
+            continue
+        if (SITE / path).exists():
+            continue
+        run(["git", "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}"], env=env)
+        kept.append(path)
+    return kept
+
+
 def main() -> None:
+    # 父提交要先取：既用于 commit-tree -p，也是“本地缺失媒体”的搬运来源
+    parent = resolve_parent()
+
     files: list[str] = []
     for p in sorted(SITE.rglob("*")):
         if p.is_dir():
@@ -46,31 +89,22 @@ def main() -> None:
     for rel in files:
         blob = run(["git", "hash-object", "-w", str(SITE / rel)]).stdout.strip()
         run(["git", "update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}"], env=env)
+    carried = carry_over(env, parent)
     tree = run(["git", "write-tree"], env=env).stdout.strip()
 
     # .nojekyll 必须存在，否则 GitHub Pages 会走 Jekyll
     if ".nojekyll" not in files:
-        blob = run(["git", "hash-object", "-w", "--stdin"], env=env).stdout.strip() if False else ""
         print("警告：缺少 .nojekyll")
 
     msg = "site: ELAB-Flow 官网（首页 / 文档 / 芯片包市场）"
-
-    # 以现有 gh-pages 为父提交，保证可以 fast-forward（避免每次都是孤立根提交）
-    parent = ""
-    cur = run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{BRANCH}"], check=False)
-    if cur.returncode == 0:
-        parent = cur.stdout.strip()
-    if not parent:
-        remote = run(["git", "ls-remote", "origin", f"refs/heads/{BRANCH}"], check=False)
-        if remote.returncode == 0 and remote.stdout.strip():
-            parent = remote.stdout.split()[0]
 
     cmd = ["git", "commit-tree", tree]
     if parent:
         cmd += ["-p", parent]
     commit = run(cmd + ["-m", msg]).stdout.strip()
     run(["git", "update-ref", f"refs/heads/{BRANCH}", commit])
-    print(f"tree {tree[:8]} commit {commit[:8]} parent {(parent[:8] or '-')} · {len(files)} files")
+    note = f" · 搬运 {len(carried)} 个媒体" if carried else ""
+    print(f"tree {tree[:8]} commit {commit[:8]} parent {(parent[:8] or '-')} · {len(files)} files{note}")
     push = run(["git", "push", "origin", f"{BRANCH}:{BRANCH}"], check=False)
     print(push.stdout.strip() or push.stderr.strip())
 
